@@ -142,3 +142,29 @@ pgrep -af 'xyz.jpenilla.squaremap.common.bridge.process.FakeSidecar' || true
 Output: no matching process.
 
 The review fixes register-or-close listeners and accepted sockets under the supervisor lock, make startup state transitions deterministic, prevent readiness completion after cleanup, propagate configured shutdown grace, and zeroize the stdin line, decoded token, Hello payload, and serialized Hello protobuf buffer on success and error paths.
+
+## Executor-cleanup follow-up
+
+RED command against `7eb8f57`:
+
+```text
+./gradlew --no-daemon --no-configuration-cache :squaremap-common:test --tests '*SidecarSupervisorTest'
+```
+
+Result: `BUILD FAILED`; `closeStopsOwnedSidecarThreads()` failed at `SidecarSupervisorTest.java:42` with `10 tests completed, 1 failed`. The behavior-level test observed live `squaremap-sidecar` threads remaining after connection close.
+
+GREEN command:
+
+```text
+./gradlew --no-daemon --no-configuration-cache :squaremap-common:test --tests '*SidecarSupervisorTest'
+```
+
+Result: `BUILD SUCCESSFUL`; the focused suite passed all 10 tests, including bounded observation that owned sidecar threads disappear after close. Cleanup now shuts down both the scheduler and worker executor on its first cleanup path using idempotent `shutdownNow()` calls, safe even when cleanup runs from an owned executor thread.
+
+Post-test process check:
+
+```text
+pgrep -af 'xyz.jpenilla.squaremap.common.bridge.process.FakeSidecar' || true
+```
+
+Output: no matching process.

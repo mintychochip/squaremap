@@ -27,6 +27,27 @@ class SidecarSupervisorTest {
         assertTrue(connection.isClosed());
         assertDoesNotThrow(supervisor::close);
     }
+    @Test
+    void closeStopsOwnedSidecarThreads() throws Exception {
+        final int before = sidecarThreadCount();
+        final SidecarSupervisor supervisor = new SidecarSupervisor();
+        final BridgeConnection connection = supervisor.start(config("valid", Duration.ofSeconds(5)))
+            .toCompletableFuture().get(6, TimeUnit.SECONDS);
+        assertTrue(sidecarThreadCount() > before);
+        connection.close();
+        final long deadline = System.nanoTime() + Duration.ofSeconds(2).toNanos();
+        while (System.nanoTime() < deadline && sidecarThreadCount() > before) {
+            Thread.sleep(10L);
+        }
+        assertTrue(sidecarThreadCount() <= before);
+    }
+
+    private static int sidecarThreadCount() {
+        return (int) Thread.getAllStackTraces().keySet().stream()
+            .filter(thread -> thread.getName().equals("squaremap-sidecar"))
+            .count();
+    }
+
 
     @Test
     void tokenMismatchRejectsAndTerminatesChild() {

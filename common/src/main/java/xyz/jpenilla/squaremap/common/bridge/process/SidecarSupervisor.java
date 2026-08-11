@@ -308,6 +308,8 @@ public final class SidecarSupervisor implements AutoCloseable {
             closeQuietly(child.getInputStream());
             closeQuietly(child.getErrorStream());
         }
+        this.scheduler.shutdownNow();
+        this.executor.shutdownNow();
     }
 
     private void closeAccepted(final ManagedConnection accepted) {
