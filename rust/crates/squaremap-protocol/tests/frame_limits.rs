@@ -243,6 +243,46 @@ async fn rejects_empty_or_invalid_zstd_body() {
 }
 
 #[tokio::test]
+async fn accepts_empty_snapshot_body() {
+    let envelope = snapshot_envelope(0, 0);
+    let bytes = frame(FrameClass::ChunkSnapshot, &envelope);
+    let decoded = read_envelope(&mut &bytes[..], FrameLimits::default())
+        .await
+        .expect("empty ChunkSnapshotBody is valid");
+    assert!(matches!(
+        decoded.payload,
+        Some(envelope::Payload::ChunkSnapshot(_))
+    ));
+}
+
+#[tokio::test]
+async fn rejects_skippable_and_concatenated_zstd_frames() {
+    let standard = match snapshot_envelope(0, 0).payload.expect("snapshot payload") {
+        envelope::Payload::ChunkSnapshot(snapshot) => snapshot.compressed_body,
+        _ => unreachable!("snapshot helper must contain a chunk snapshot"),
+    };
+    let mut skippable = vec![0x50, 0x2a, 0x4d, 0x18, 1, 0, 0, 0, 0];
+    skippable.extend_from_slice(&standard);
+    let mut concatenated = standard.clone();
+    concatenated.extend_from_slice(&standard);
+    for compressed_body in [skippable, concatenated, [standard, vec![0]].concat()] {
+        let envelope = Envelope {
+            payload: Some(envelope::Payload::ChunkSnapshot(ChunkSnapshot {
+                compressed_body,
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let bytes = frame(FrameClass::ChunkSnapshot, &envelope);
+        let err = read_envelope(&mut &bytes[..], FrameLimits::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FrameError::SnapshotValidation { .. }));
+    }
+}
+
+
+#[tokio::test]
 async fn rejects_truncated_magic_prefixed_zero_length_snapshot() {
     let envelope = Envelope {
         payload: Some(envelope::Payload::ChunkSnapshot(ChunkSnapshot {
@@ -255,12 +295,7 @@ async fn rejects_truncated_magic_prefixed_zero_length_snapshot() {
     let err = read_envelope(&mut &bytes[..], FrameLimits::default())
         .await
         .unwrap_err();
-    assert!(matches!(
-        err,
-        FrameError::SnapshotValidation {
-            reason: squaremap_protocol::SnapshotValidationReason::ZeroUncompressedLength
-        }
-    ));
+    assert!(matches!(err, FrameError::SnapshotValidation { .. }));
 }
 
 #[tokio::test]

@@ -17,6 +17,7 @@ public final class FrameCodec {
     private static final int PREFIX_BYTES = 5;
     private static final ThreadLocal<ZstdDecompressor> ZSTD_DECOMPRESSOR =
         ThreadLocal.withInitial(ZstdDecompressor::new);
+    private static final byte[] EMPTY_BYTES = new byte[0];
 
     private FrameCodec() {
     }
@@ -147,9 +148,6 @@ public final class FrameCodec {
             throw ProtocolException.snapshot("declared uncompressed length exceeds absolute limit");
         }
         final long ratioLimit;
-        if (declaredLength == 0) {
-            throw ProtocolException.zeroUncompressedLength();
-        }
         try {
             ratioLimit = Math.multiplyExact(
                 (long) compressedLength,
@@ -166,23 +164,22 @@ public final class FrameCodec {
         }
 
         final byte[] compressed = compressedBody.toByteArray();
-        if (compressed.length < 4
-            || compressed[0] != 0x28
-            || (compressed[1] & 0xff) != 0xb5
-            || (compressed[2] & 0xff) != 0x2f
-            || (compressed[3] & 0xff) != 0xfd) {
-            throw ProtocolException.snapshot("invalid zstd body: bad frame magic");
-        }
-        final byte[] uncompressed = new byte[(int) declaredLength];
+        validateSingleStandardZstdFrame(compressed);
+        final byte[] uncompressed = declaredLength == 0
+            ? EMPTY_BYTES
+            : new byte[(int) declaredLength];
+        // Aircompressor skips input parsing for a zero-capacity output. A one-byte
+        // probe forces complete frame validation while preserving a logical empty body.
+        final byte[] decompressionOutput = declaredLength == 0 ? new byte[1] : uncompressed;
         final int decompressedLength;
         try {
             decompressedLength = ZSTD_DECOMPRESSOR.get().decompress(
                 compressed,
                 0,
                 compressed.length,
-                uncompressed,
+                decompressionOutput,
                 0,
-                uncompressed.length
+                decompressionOutput.length
             );
         } catch (final RuntimeException exception) {
             throw ProtocolException.snapshot("invalid zstd body: " + exception.getMessage());
@@ -203,6 +200,126 @@ public final class FrameCodec {
         } catch (final InvalidProtocolBufferException exception) {
             throw ProtocolException.snapshot("invalid snapshot body protobuf: " + exception.getMessage());
         }
+    }
+
+    private static void validateSingleStandardZstdFrame(
+        final byte[] compressed
+    ) throws ProtocolException {
+        if (compressed.length < 5
+            || compressed[0] != 0x28
+            || (compressed[1] & 0xff) != 0xb5
+            || (compressed[2] & 0xff) != 0x2f
+            || (compressed[3] & 0xff) != 0xfd) {
+            throw ProtocolException.snapshot("invalid zstd body: bad frame magic");
+        }
+
+        int cursor = 4;
+        final int descriptor = compressed[cursor++] & 0xff;
+        if ((descriptor & 0x18) != 0) {
+            throw ProtocolException.snapshot("invalid zstd body: reserved frame-header bit");
+        }
+        final boolean singleSegment = (descriptor & 0x20) != 0;
+        final boolean checksum = (descriptor & 0x04) != 0;
+        final int contentSizeFlag = descriptor >>> 6;
+
+        if (!singleSegment) {
+            cursor = advanceZstdCursor(compressed, cursor, 1);
+            final int windowDescriptor = compressed[cursor - 1] & 0xff;
+            final int exponent = windowDescriptor >>> 3;
+            final int mantissa = windowDescriptor & 0x07;
+            final long windowBase = 1L << (10 + exponent);
+            final long windowSize = windowBase + (windowBase >>> 3) * mantissa;
+            if (windowSize > FrameLimits.MAX_ZSTD_WINDOW_BYTES) {
+                throw ProtocolException.snapshot("zstd window exceeds shared limit");
+            }
+        }
+
+        final int dictionaryLength = switch (descriptor & 0x03) {
+            case 0 -> 0;
+            case 1 -> 1;
+            case 2 -> 2;
+            case 3 -> 4;
+            default -> throw new AssertionError();
+        };
+        cursor = advanceZstdCursor(compressed, cursor, dictionaryLength);
+        final int contentSizeLength = switch (contentSizeFlag) {
+            case 0 -> singleSegment ? 1 : 0;
+            case 1 -> 2;
+            case 2 -> 4;
+            case 3 -> 8;
+            default -> throw new AssertionError();
+        };
+        final int contentSizeOffset = cursor;
+        cursor = advanceZstdCursor(compressed, cursor, contentSizeLength);
+        if (singleSegment) {
+            long contentSize = littleEndianAtMost(
+                compressed,
+                contentSizeOffset,
+                contentSizeLength,
+                FrameLimits.MAX_ZSTD_WINDOW_BYTES
+            );
+            if (contentSizeFlag == 1) {
+                contentSize += 256;
+            }
+            if (contentSize > FrameLimits.MAX_ZSTD_WINDOW_BYTES) {
+                throw ProtocolException.snapshot("zstd window exceeds shared limit");
+            }
+        }
+
+        boolean lastBlock;
+        do {
+            final int blockHeaderOffset = cursor;
+            cursor = advanceZstdCursor(compressed, cursor, 3);
+            final int blockHeader = (compressed[blockHeaderOffset] & 0xff)
+                | (compressed[blockHeaderOffset + 1] & 0xff) << 8
+                | (compressed[blockHeaderOffset + 2] & 0xff) << 16;
+            lastBlock = (blockHeader & 1) != 0;
+            final int blockType = (blockHeader >>> 1) & 0x03;
+            final int blockSize = blockHeader >>> 3;
+            final int storedSize = switch (blockType) {
+                case 0, 2 -> blockSize;
+                case 1 -> 1;
+                default -> throw ProtocolException.snapshot("invalid zstd body: reserved block type");
+            };
+            cursor = advanceZstdCursor(compressed, cursor, storedSize);
+        } while (!lastBlock);
+
+        if (checksum) {
+            cursor = advanceZstdCursor(compressed, cursor, 4);
+        }
+        if (cursor != compressed.length) {
+            throw ProtocolException.snapshot("invalid zstd body: trailing or concatenated frame");
+        }
+    }
+
+    private static int advanceZstdCursor(
+        final byte[] compressed,
+        final int cursor,
+        final int count
+    ) throws ProtocolException {
+        if (count < 0 || cursor < 0 || cursor > compressed.length || count > compressed.length - cursor) {
+            throw ProtocolException.snapshot("invalid zstd body: truncated frame");
+        }
+        return cursor + count;
+    }
+
+    private static long littleEndianAtMost(
+        final byte[] bytes,
+        final int offset,
+        final int length,
+        final long maximum
+    ) {
+        long value = 0;
+        for (int index = 0; index < length; index++) {
+            final int next = bytes[offset + index] & 0xff;
+            if (index >= 4 && next != 0) {
+                return maximum + 1;
+            }
+            if (index < 4) {
+                value |= (long) next << (index * 8);
+            }
+        }
+        return value > maximum ? maximum + 1 : value;
     }
 
     private enum FrameClass {
@@ -287,15 +404,6 @@ public final class FrameCodec {
             return new ProtocolException("early EOF", "early EOF", expected, actual, null);
         }
 
-        private static ProtocolException zeroUncompressedLength() {
-            return new ProtocolException(
-                "zero uncompressed length",
-                "chunk snapshot body must not be empty",
-                1,
-                0,
-                null
-            );
-        }
 
         private static ProtocolException noProgress(final long expected, final long actual) {
             return new ProtocolException("no progress", "channel made no progress", expected, actual, null);

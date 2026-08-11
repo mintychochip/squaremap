@@ -173,9 +173,9 @@ Observed result: `18 passed` in the `frame_limits` suite.
 
 The Java decompressor is now `ThreadLocal<ZstdDecompressor>`, and the concurrent test repeatedly validates eight distinct bodies in parallel, including independent CRCs and write/read round trips. Rust configures its decoder with `FrameLimits::MAX_ZSTD_WINDOW_LOG` (23). Java uses Aircompressor 0.27, whose decoder applies the same 8 MiB maximum window; both suites reject a valid frame encoded with a larger 10 MiB window. Both suites also accept a 9,000,006-byte body encoded with the compliant 8 MiB window, preserving the separate 128 MiB decompressed-output limit.
 
-Both implementations reject `uncompressed_length == 0` before zstd decompression and before any output allocation. This closes the zero-output decoder bypass for a standard zstd magic prefix plus truncated garbage. The invariant is intentional: a valid serialized `ChunkSnapshotBody` is non-empty; `ChunkMissing` represents an absent chunk and is not encoded as an empty snapshot body.
+The interim follow-up rejected `uncompressed_length == 0` symmetrically before decompression, closing the Aircompressor zero-output bypass but over-constraining the valid default Protobuf body. The final review fix below supersedes that behavior with bounded one-byte probing and exact single-frame validation.
 
-Allocation order remains bounded: fixed five-byte prefix, class-specific length check, bounded envelope allocation, protobuf decode, compressed-body bound, absolute/ratio/zero-length checks, then output allocation and decompression. The new zero-length check occurs before the ratio calculation and all decompressor calls; the Rust window limit is configured before reads from the decoder.
+Allocation order remained bounded throughout: fixed five-byte prefix, class-specific length check, bounded envelope allocation, protobuf decode, compressed-body bound, absolute/ratio checks, then bounded output allocation and decompression. Rust configures the shared window limit before reading from the decoder.
 
 ### Dependency inspection
 
@@ -191,6 +191,34 @@ Observed resolution was only `io.airlift:aircompressor:0.27` on `runtimeClasspat
 
 - Shared zstd policy is named in both `FrameLimits` classes as `MAX_ZSTD_WINDOW_LOG = 23` and `MAX_ZSTD_WINDOW_BYTES = 1L << 23`; Rust applies the log directly to its decoder and Java's Aircompressor decoder enforces the same window bound.
 - Java decompressor mutable state is not shared across threads.
-- Zero declared output is rejected symmetrically before decompression, including on write.
+- The interim zero-output rejection was superseded by the final bounded empty-output validation below.
 - High-window rejection, compliant-window large-body acceptance, concurrent validation, and zero-output bypass coverage are now in the focused contract tests.
 - No formatter, linter, project-wide suite, Task 3 work, or progress-ledger change was made.
+
+## Final review-fix evidence
+
+### Single-frame and valid-empty RED
+
+The final Java contract tests added explicit acceptance of a valid zstd-compressed empty `ChunkSnapshotBody` and rejection of skippable, concatenated, and trailing zstd data. Before the Java production fix, the exact focused command was:
+
+```text
+./gradlew --no-daemon --no-configuration-cache :squaremap-common:test --tests '*FrameCodecTest'
+```
+
+Observed result: `BUILD FAILED`; `23 tests completed, 1 failed`. `acceptsEmptySnapshotBody` was rejected by the blanket zero-uncompressed-length check. The malformed zero-output, skippable, concatenated, and trailing cases remained finite.
+
+### Final GREEN
+
+After replacing the blanket rejection with bounded empty-output validation and adding exact single-standard-frame validation, the same Java command produced `BUILD SUCCESSFUL`. The focused XML records `tests="23"`, `skipped="0"`, `failures="0"`, and `errors="0"`.
+
+The Rust focused command was rerun against its single-frame implementation:
+
+```text
+cargo test --manifest-path rust/Cargo.toml -p squaremap-protocol --test frame_limits
+```
+
+Observed result: `20 passed`.
+
+Java validates one standard zstd frame structurally before decompression: frame-header field lengths, the shared 8 MiB window, block headers and stored lengths, optional checksum bytes, and exact end-of-input are all bounds-checked without allocating from block declarations. For a declared empty body, it supplies a one-byte decompression probe so Aircompressor must parse the entire frame, then treats the logical output as the zero-byte Protobuf body for CRC32C and typed decode. Rust requires the same standard magic, decodes one frame with window log 23, and rejects any bytes remaining in either the decoder's buffer or inner reader.
+
+Both bindings therefore accept `zstd(ChunkSnapshotBody::default())` with declared length and CRC32C zero, while rejecting magic-prefixed truncation, skippable frames, concatenated frames, and trailing compressed data. All prior allocation, ratio, CRC, concurrency, no-progress, and no-JNI invariants remain covered.

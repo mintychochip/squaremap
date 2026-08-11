@@ -2,7 +2,7 @@ use crate::limits::FrameLimits;
 use bytes::BytesMut;
 use prost::Message;
 use std::fmt;
-use std::io::{self, Read};
+use std::io::{self, BufRead, Read};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
@@ -32,7 +32,6 @@ impl TryFrom<u8> for FrameClass {
 pub enum SnapshotValidationReason {
     CompressedBodyEmpty,
     CompressedBodyOversize { length: usize, max: u32 },
-    ZeroUncompressedLength,
     DeclaredUncompressedLength { length: u32, max: u32 },
     DecompressionRatio { compressed: usize, uncompressed: u32 },
     WindowLimit { max_log: u32 },
@@ -85,9 +84,6 @@ impl fmt::Display for SnapshotValidationReason {
             Self::CompressedBodyEmpty => formatter.write_str("compressed body is empty"),
             Self::CompressedBodyOversize { length, max } => {
                 write!(formatter, "compressed body length {length} exceeds {max}")
-            }
-            Self::ZeroUncompressedLength => {
-                formatter.write_str("uncompressed snapshot body length is zero")
             }
             Self::DeclaredUncompressedLength { length, max } => {
                 write!(formatter, "declared uncompressed length {length} exceeds {max}")
@@ -191,12 +187,14 @@ fn validate_snapshot(
             max: limits.max_snapshot_bytes,
         }));
     }
-
     let declared = snapshot.uncompressed_length;
-    if declared == 0 {
-        return Err(snapshot_error(
-            SnapshotValidationReason::ZeroUncompressedLength,
-        ));
+
+    if compressed_length < 4
+        || snapshot.compressed_body[..4] != [0x28, 0xb5, 0x2f, 0xfd]
+    {
+        return Err(snapshot_error(SnapshotValidationReason::InvalidZstd(
+            "body is not one standard zstd frame".to_owned(),
+        )));
     }
     if declared > limits.max_uncompressed_snapshot_bytes {
         return Err(snapshot_error(
@@ -215,9 +213,9 @@ fn validate_snapshot(
             uncompressed: declared,
         }));
     }
-
     let mut decoder = zstd::stream::read::Decoder::new(snapshot.compressed_body.as_slice())
-        .map_err(|error| snapshot_error(SnapshotValidationReason::InvalidZstd(error.to_string())))?;
+        .map_err(|error| snapshot_error(SnapshotValidationReason::InvalidZstd(error.to_string())))?
+        .single_frame();
     decoder
         .window_log_max(FrameLimits::MAX_ZSTD_WINDOW_LOG)
         .map_err(|error| snapshot_error(SnapshotValidationReason::InvalidZstd(error.to_string())))?;
@@ -245,6 +243,14 @@ fn validate_snapshot(
         }
         uncompressed.extend_from_slice(&chunk[..count]);
     }
+    let buffered_remaining = decoder.get_ref().buffer().len();
+    let inner_remaining = decoder.get_ref().get_ref().len();
+    if buffered_remaining != 0 || inner_remaining != 0 {
+        return Err(snapshot_error(SnapshotValidationReason::InvalidZstd(
+            "body contains trailing zstd data".to_owned(),
+        )));
+    }
+    let _ = decoder.finish();
     if uncompressed.len() != declared as usize {
         return Err(snapshot_error(SnapshotValidationReason::DecompressedLength {
             expected: declared,

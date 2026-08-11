@@ -130,18 +130,47 @@ class FrameCodecTest {
     }
 
     @Test
+    void acceptsEmptySnapshotBody() throws Exception {
+        final byte[] compressed = compress(ChunkSnapshotBody.getDefaultInstance().toByteArray());
+        final Envelope decoded = FrameCodec.read(new ByteArrayReadable(frame(
+            1,
+            snapshotWithCompressed(0, 0, compressed).toByteArray()
+        )));
+        assertEquals(Envelope.PayloadCase.CHUNK_SNAPSHOT, decoded.getPayloadCase());
+        assertEquals(0, decoded.getChunkSnapshot().getUncompressedLength());
+    }
+
+    @Test
+    void rejectsSkippableAndConcatenatedZstdFrames() {
+        final byte[] standard = compress(ChunkSnapshotBody.getDefaultInstance().toByteArray());
+        final byte[] skippable = new byte[9 + standard.length];
+        skippable[0] = 0x50;
+        skippable[1] = 0x2a;
+        skippable[2] = 0x4d;
+        skippable[3] = 0x18;
+        skippable[4] = 1;
+        System.arraycopy(standard, 0, skippable, 9, standard.length);
+        final byte[] concatenated = new byte[standard.length * 2];
+        System.arraycopy(standard, 0, concatenated, 0, standard.length);
+        System.arraycopy(standard, 0, concatenated, standard.length, standard.length);
+        final byte[] trailing = java.util.Arrays.copyOf(standard, standard.length + 1);
+        trailing[trailing.length - 1] = 0;
+        for (final byte[] compressed : new byte[][] {skippable, concatenated, trailing}) {
+            assertProtocolFailure(frame(1, snapshotWithCompressed(0, 0, compressed).toByteArray()));
+        }
+    }
+
+    @Test
     void rejectsTruncatedMagicPrefixedZeroLengthSnapshot() {
         final byte[] truncated = {(byte) 0x28, (byte) 0xb5, 0x2f, (byte) 0xfd, 0x00};
-        final FrameCodec.ProtocolException exception = assertThrows(
+        assertThrows(
             FrameCodec.ProtocolException.class,
             () -> FrameCodec.read(new ByteArrayReadable(frame(
                 1,
                 snapshotWithCompressed(0, 0, truncated).toByteArray()
             )))
         );
-        assertEquals("zero uncompressed length", exception.reason());
     }
-
     @Test
     void rejectsSnapshotFrameWithWindowAboveSharedPolicy() {
         final byte[] compressed = Base64.getDecoder().decode(HIGH_WINDOW_ZSTD_BASE64);
