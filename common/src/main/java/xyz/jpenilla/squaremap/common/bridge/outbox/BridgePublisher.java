@@ -2,18 +2,15 @@ package xyz.jpenilla.squaremap.common.bridge.outbox;
 
 import com.google.protobuf.ByteString;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
-import java.util.UUID;
-import java.util.concurrent.Semaphore;
-import java.util.concurrent.TimeUnit;
-import java.util.function.Consumer;
 import xyz.jpenilla.squaremap.bridge.v1.Ack;
+import xyz.jpenilla.squaremap.bridge.v1.AckStatus;
+import java.util.concurrent.Semaphore;
 import xyz.jpenilla.squaremap.bridge.v1.ChunkCoordinate;
 import xyz.jpenilla.squaremap.bridge.v1.ChunkDirty;
 import xyz.jpenilla.squaremap.bridge.v1.Envelope;
@@ -29,6 +26,13 @@ public final class BridgePublisher implements AutoCloseable {
         RESYNC_MARKED
     }
 
+    @FunctionalInterface
+    public interface Writer extends AutoCloseable {
+        void write(Sent sent) throws Exception;
+
+        default void close() {}
+    }
+
     public record Published(Object payload) {
         public Published {
             Objects.requireNonNull(payload, "payload");
@@ -39,24 +43,23 @@ public final class BridgePublisher implements AutoCloseable {
 
     private final Object lock = new Object();
     private final CoalescingOutbox outbox;
-    private final Consumer<Sent> writer;
+    private final Writer writer;
     private final Semaphore signal = new Semaphore(0);
     private final Thread worker;
-    private final Map<Object, BridgeEvent> latest = new HashMap<>();
+    private final Map<Object, BridgeEvent> current = new HashMap<>();
     private final Map<Long, InFlight> inFlight = new HashMap<>();
-    private final Set<DirtyIdentity> inFlightDirty = new HashSet<>();
     private boolean signaled;
+    private boolean dispatching;
     private boolean closed;
+    private Throwable failure;
     private long sentCount;
     private long nextSequence;
-    private byte[] sessionId = sessionBytes();
+    private long generation;
+    private byte[] sessionId;
 
-    public BridgePublisher(final Consumer<Sent> writer) {
-        this(new CoalescingOutbox(), writer);
-    }
-
-    public BridgePublisher(final CoalescingOutbox outbox, final Consumer<Sent> writer) {
-        this.outbox = Objects.requireNonNull(outbox, "outbox");
+    public BridgePublisher(final byte[] sessionId, final Writer writer) {
+        this.outbox = new CoalescingOutbox();
+        this.sessionId = validSession(sessionId);
         this.writer = Objects.requireNonNull(writer, "writer");
         this.worker = new Thread(this::runWriter, "squaremap-bridge-writer");
         this.worker.setDaemon(true);
@@ -66,48 +69,22 @@ public final class BridgePublisher implements AutoCloseable {
     public PublishResult publish(final BridgeEvent event) {
         Objects.requireNonNull(event, "event");
         synchronized (this.lock) {
-            if (this.closed) {
-                throw new IllegalStateException("publisher is closed");
-            }
-            final PublishResult result;
-            if (event instanceof BridgeEvent.DirtyChunk dirty
-                && !this.inFlightDirty.contains(DirtyIdentity.from(dirty))
-                && !this.outbox.containsDirtyKey(dirty)
-                && this.outbox.dirtyKeyCount() + this.inFlightDirty.size() >= CoalescingOutbox.MAX_DIRTY_KEYS) {
-                result = this.outbox.markResync(dirty.world(), dirty.epoch());
-            } else {
-                result = this.outbox.offer(event);
-            }
-            this.rememberLatest(event);
+            this.ensureOpen();
+            final PublishResult result = this.offerCurrent(event);
             this.signalLocked();
             return result;
         }
     }
 
-    private void rememberLatest(final BridgeEvent event) {
-        if (event instanceof BridgeEvent.ResyncWorld
-            || event instanceof BridgeEvent.DirtyChunk dirty && this.outbox.containsResync(dirty.world(), dirty.epoch())) {
-            final BridgeEvent.WorldKey world;
-            final long epoch;
-            if (event instanceof BridgeEvent.ResyncWorld resync) {
-                world = resync.world();
-                epoch = resync.epoch();
-            } else {
-                final BridgeEvent.DirtyChunk dirty = (BridgeEvent.DirtyChunk) event;
-                world = dirty.world();
-                epoch = dirty.epoch();
-            }
-            this.latest.entrySet().removeIf(entry -> entry.getKey() instanceof DirtyIdentity key
-                && key.world().equals(world) && key.epoch() == epoch);
-            this.latest.put(new WorldIdentityKey(world, epoch), new BridgeEvent.ResyncWorld(world, epoch));
-            return;
-        }
-        this.latest.put(identity(event), event);
-    }
-
     public byte[] sessionId() {
         synchronized (this.lock) {
             return this.sessionId.clone();
+        }
+    }
+
+    public Throwable failure() {
+        synchronized (this.lock) {
+            return this.failure;
         }
     }
 
@@ -135,59 +112,61 @@ public final class BridgePublisher implements AutoCloseable {
         return false;
     }
 
-    public void acknowledge(final long sequence) {
+    /** Handles an authenticated Ack envelope from the currently active session. */
+    public void acknowledge(final Envelope envelope) {
+        Objects.requireNonNull(envelope, "envelope");
+        if (!envelope.hasAck()) {
+            return;
+        }
+        final Ack ack = envelope.getAck();
         synchronized (this.lock) {
-            final InFlight sent = this.inFlight.remove(sequence);
-            if (sent == null) {
+            if (!java.util.Arrays.equals(this.sessionId, envelope.getSessionId().toByteArray())) {
+                return;
+            }
+            if (ack.getStatus() != AckStatus.ACK_STATUS_ACCEPTED
+                && ack.getStatus() != AckStatus.ACK_STATUS_DUPLICATE) {
+                return;
+            }
+            final InFlight sent = this.inFlight.remove(ack.getAcknowledgedSequence());
+            if (sent == null || sent.generation() != this.generation) {
                 return;
             }
             if (sent.event() instanceof BridgeEvent.DirtyChunk dirty) {
-                this.inFlightDirty.remove(DirtyIdentity.from(dirty));
+                final Object identity = identity(dirty);
+                if (Objects.equals(this.current.get(identity), dirty)) {
+                    this.current.remove(identity);
+                }
+            } else if (sent.event() instanceof BridgeEvent.ResyncWorld resync) {
+                final Object identity = identity(resync);
+                if (Objects.equals(this.current.get(identity), resync)) {
+                    this.current.remove(identity);
+                }
             }
         }
     }
-    public void acknowledge(final Ack ack) {
-        Objects.requireNonNull(ack, "ack");
-        this.acknowledge(ack.getAcknowledgedSequence());
-    }
 
-    public void reconnect() {
+    /** Activates a caller-authenticated session after the old writer generation is idle. */
+    public void reconnect(final byte[] newSessionId) {
+        final byte[] validated = validSession(newSessionId);
         synchronized (this.lock) {
-            if (this.closed) {
-                return;
+            if (Arrays.equals(this.sessionId, validated)) {
+                throw new IllegalArgumentException("reconnect requires a fresh session ID");
             }
-            this.sessionId = sessionBytes();
+            while (this.dispatching) {
+                try {
+                    this.lock.wait();
+                } catch (final InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("interrupted waiting for bridge writer", interrupted);
+                }
+            }
+            this.ensureOpen();
+            this.generation++;
+            this.sessionId = validated;
             this.nextSequence = 0;
             this.inFlight.clear();
-            this.inFlightDirty.clear();
-            this.outbox.replaceWith(this.latest.values());
+            this.outbox.replaceWith(this.current.values());
             this.signalLocked();
-        }
-    }
-
-    public void drainNow() {
-        final List<Sent> sent = new ArrayList<>();
-        synchronized (this.lock) {
-            if (this.closed) {
-                return;
-            }
-            for (final BridgeEvent event : this.outbox.drain()) {
-                if (this.nextSequence == Long.MAX_VALUE) {
-                    this.closed = true;
-                    throw new IllegalStateException("bridge sequence exhausted");
-                }
-                final long sequence = ++this.nextSequence;
-                final Envelope envelope = toEnvelope(event, sequence, this.sessionId);
-                this.inFlight.put(sequence, new InFlight(event));
-                if (event instanceof BridgeEvent.DirtyChunk dirty) {
-                    this.inFlightDirty.add(DirtyIdentity.from(dirty));
-                }
-                this.sentCount++;
-                sent.add(new Sent(sequence, new Published(event instanceof BridgeEvent.ReplaceState state ? state.payload() : event), envelope));
-            }
-        }
-        for (final Sent value : sent) {
-            this.writer.accept(value);
         }
     }
 
@@ -204,24 +183,90 @@ public final class BridgePublisher implements AutoCloseable {
     @Override
     public void close() {
         synchronized (this.lock) {
-            if (this.closed) {
-                this.signal.release();
-            } else {
-                this.closed = true;
-                this.signal.release();
+            this.closed = true;
+            this.signal.release();
+        }
+        try {
+            this.writer.close();
+        } catch (final Throwable closeFailure) {
+            synchronized (this.lock) {
+                if (this.failure == null) {
+                    this.failure = closeFailure;
+                }
             }
         }
-        if (Thread.currentThread() != this.worker) {
+        if (Thread.currentThread() == this.worker) {
+            return;
+        }
+        boolean interrupted = false;
+        for (;;) {
             try {
-                this.worker.join(TimeUnit.SECONDS.toMillis(2));
-            } catch (final InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
+                this.worker.join();
+                break;
+            } catch (final InterruptedException ignored) {
+                interrupted = true;
             }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private PublishResult offerCurrent(final BridgeEvent event) {
+        if (event instanceof BridgeEvent.ReplaceState state) {
+            final Object identity = identity(state);
+            this.current.put(identity, state);
+            return this.outbox.offer(state);
+        }
+        if (event instanceof BridgeEvent.ResyncWorld resync) {
+            this.removeDirtyFor(resync.world(), resync.epoch());
+            this.current.put(identity(resync), resync);
+            return this.outbox.offer(resync);
+        }
+
+        final BridgeEvent.DirtyChunk dirty = (BridgeEvent.DirtyChunk) event;
+        final Object identity = identity(dirty);
+        final BridgeEvent previous = this.current.get(identity);
+        if (previous instanceof BridgeEvent.ResyncWorld) {
+            return PublishResult.COALESCED;
+        }
+        if (previous instanceof BridgeEvent.DirtyChunk old && dirty.revision() <= old.revision()) {
+            return PublishResult.COALESCED;
+        }
+        if (previous == null && dirtyCount() >= CoalescingOutbox.MAX_DIRTY_KEYS) {
+            this.removeDirtyFor(dirty.world(), dirty.epoch());
+            final BridgeEvent.ResyncWorld marker = new BridgeEvent.ResyncWorld(dirty.world(), dirty.epoch());
+            this.current.put(identity(marker), marker);
+            this.outbox.markResync(dirty.world(), dirty.epoch());
+            return PublishResult.RESYNC_MARKED;
+        }
+        this.current.put(identity, dirty);
+        return this.outbox.offer(dirty);
+    }
+
+    private int dirtyCount() {
+        int count = 0;
+        for (final BridgeEvent event : this.current.values()) {
+            if (event instanceof BridgeEvent.DirtyChunk) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private void removeDirtyFor(final BridgeEvent.WorldKey world, final long epoch) {
+        this.current.entrySet().removeIf(entry -> entry.getKey() instanceof DirtyIdentity identity
+            && identity.world().equals(world) && identity.epoch() == epoch);
+    }
+
+    private void ensureOpen() {
+        if (this.closed) {
+            throw new IllegalStateException("publisher is closed", this.failure);
         }
     }
 
     private void runWriter() {
-        while (true) {
+        for (;;) {
             try {
                 this.signal.acquire();
             } catch (final InterruptedException interrupted) {
@@ -234,14 +279,86 @@ public final class BridgePublisher implements AutoCloseable {
                 }
                 this.signaled = false;
             }
-            this.drainNow();
+            this.dispatchBatch();
             synchronized (this.lock) {
-                if (!this.outbox.isEmpty() && !this.signaled && !this.closed) {
-                    this.signaled = true;
-                    continue;
+                if (this.closed) {
+                    return;
+                }
+                if (!this.outbox.isEmpty()) {
+                    this.signalLocked();
                 }
             }
         }
+    }
+
+    private void dispatchBatch() {
+        final List<Sent> batch;
+        final List<BridgeEvent> events;
+        final long batchGeneration;
+        synchronized (this.lock) {
+            if (this.closed) {
+                return;
+            }
+            events = this.outbox.drain();
+            if (events.isEmpty()) {
+                return;
+            }
+            if (events.size() > Long.MAX_VALUE - this.nextSequence) {
+                this.outbox.replaceWith(this.current.values());
+                this.failLocked(new IllegalStateException("bridge sequence exhausted"));
+                return;
+            }
+            batchGeneration = this.generation;
+            batch = new ArrayList<>(events.size());
+            for (final BridgeEvent event : events) {
+                final long sequence = ++this.nextSequence;
+                final Sent sent = new Sent(sequence, new Published(event instanceof BridgeEvent.ReplaceState state ? state.payload() : event),
+                    toEnvelope(event, sequence, this.sessionId));
+                this.inFlight.put(sequence, new InFlight(event, batchGeneration));
+                batch.add(sent);
+            }
+            this.dispatching = true;
+        }
+
+        for (final Sent sent : batch) {
+            try {
+                this.writer.write(sent);
+            } catch (final Throwable writeFailure) {
+                synchronized (this.lock) {
+                    this.outbox.replaceWith(this.current.values());
+                    this.inFlight.entrySet().removeIf(entry -> entry.getValue().generation() == batchGeneration);
+                    this.dispatching = false;
+                    this.failLocked(writeFailure);
+                    this.lock.notifyAll();
+                }
+                try {
+                    this.writer.close();
+                } catch (final Throwable closeFailure) {
+                    synchronized (this.lock) {
+                        writeFailure.addSuppressed(closeFailure);
+                    }
+                }
+                return;
+            }
+            synchronized (this.lock) {
+                this.sentCount++;
+                if (this.closed) {
+                    this.dispatching = false;
+                    this.lock.notifyAll();
+                    return;
+                }
+            }
+        }
+        synchronized (this.lock) {
+            this.dispatching = false;
+            this.lock.notifyAll();
+        }
+    }
+
+    private void failLocked(final Throwable cause) {
+        this.failure = cause;
+        this.closed = true;
+        this.signal.release();
     }
 
     private void signalLocked() {
@@ -267,6 +384,8 @@ public final class BridgePublisher implements AutoCloseable {
             .setSequence(sequence);
         if (event instanceof BridgeEvent.ReplaceState state) {
             return state.payload().toBuilder()
+                .setProtocolMajor(1)
+                .setProtocolMinor(0)
                 .setSessionId(ByteString.copyFrom(sessionId))
                 .setSequence(sequence)
                 .build();
@@ -280,30 +399,21 @@ public final class BridgePublisher implements AutoCloseable {
             return builder.setChunkDirty(ChunkDirty.newBuilder()
                 .setWorld(world)
                 .setCoordinate(ChunkCoordinate.newBuilder().setX(dirty.x()).setZ(dirty.z()))
-                .setRevision(dirty.revision()))
-                .build();
+                .setRevision(dirty.revision())).build();
         }
         return builder.setWorldResyncRequired(WorldResyncRequired.newBuilder()
-            .setWorld(world)
-            .setReason(ResyncReason.RESYNC_REASON_QUEUE_FULL))
-            .build();
+            .setWorld(world).setReason(ResyncReason.RESYNC_REASON_QUEUE_FULL)).build();
     }
 
-    private static byte[] sessionBytes() {
-        final UUID uuid = UUID.randomUUID();
-        final byte[] bytes = new byte[16];
-        for (int index = 0; index < Long.BYTES; index++) {
-            bytes[index] = (byte) (uuid.getMostSignificantBits() >>> (56 - index * 8));
-            bytes[8 + index] = (byte) (uuid.getLeastSignificantBits() >>> (56 - index * 8));
+    private static byte[] validSession(final byte[] sessionId) {
+        Objects.requireNonNull(sessionId, "sessionId");
+        if (sessionId.length != 16) {
+            throw new IllegalArgumentException("session ID must contain exactly 16 bytes");
         }
-        return bytes;
+        return sessionId.clone();
     }
 
-    private record InFlight(BridgeEvent event) {}
-    private record DirtyIdentity(BridgeEvent.WorldKey world, long epoch, int x, int z) {
-        static DirtyIdentity from(final BridgeEvent.DirtyChunk event) {
-            return new DirtyIdentity(event.world(), event.epoch(), event.x(), event.z());
-        }
-    }
+    private record InFlight(BridgeEvent event, long generation) {}
+    private record DirtyIdentity(BridgeEvent.WorldKey world, long epoch, int x, int z) {}
     private record WorldIdentityKey(BridgeEvent.WorldKey world, long epoch) {}
 }

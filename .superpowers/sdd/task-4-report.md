@@ -53,3 +53,44 @@ Result: `6 passed (1 suite, 11 warnings, 0.00s)`. The warnings are existing prot
 - The worktree was checked with `git diff --check`; only the Task 4 Java outbox/event/publisher files, focused tests, Rust session module/test, server module declaration, and this report are in scope.
 
 Atomic task commit: this commit; SHA recorded in the progress ledger.
+
+## Review-fix RED/GREEN evidence
+
+Review-fix Java RED command:
+
+```text
+./gradlew --no-daemon --no-configuration-cache :squaremap-common:test --tests '*CoalescingOutboxTest'
+```
+
+Result: `BUILD FAILED` during test compilation with 20 expected missing-API errors for the new authenticated Ack, supplied-session reconnect, closeable Writer, failure accessor, and review regressions. The production implementation was then changed to satisfy those contracts.
+
+Review-fix Rust RED command:
+
+```text
+cargo test --manifest-path rust/Cargo.toml -p squaremap-server --test session_ordering
+```
+
+Result: `cargo test` failed on the newly added `HandlerPanicked` assertion because panic-safe handler handling was not yet implemented.
+
+Review-fix Java GREEN command:
+
+```text
+./gradlew --no-daemon --no-configuration-cache :squaremap-common:test --tests '*CoalescingOutboxTest'
+```
+
+Result: `BUILD SUCCESSFUL`; focused XML recorded 15 tests, 0 skipped, 0 failures, and 0 errors. Added regressions cover in-flight revision maxima, queued/in-flight union capacity, authenticated/status-filtered Acks, supplied-session reconnect barriers, writer failure requeue/cause, blocked close, resync recovery, bounded acknowledged dirty history, replacement protocol/correlation fields, monotonic drain sequencing, worker-only dispatch, and sequence exhaustion.
+
+Review-fix Rust GREEN command:
+
+```text
+cargo test --manifest-path rust/Cargo.toml -p squaremap-server --test session_ordering
+```
+
+Result: `9 passed (1 suite, 15 warnings, 0.01s)`. Added cancellation/panic retry and RFC 4122 v4 UUID bit assertions; bootstrap Hello now masks the generated UUID to version 4 and RFC variant bits.
+
+## Review-fix invariant review
+
+- Java has one authoritative `current` identity map for queued/in-flight dirty values. It retains the maximum revision, counts each dirty identity once, removes acknowledged dirty/resync history, and keeps only replacement snapshots as reconnect baselines. A fresh post-resync dirty therefore cannot be erased by an acknowledged marker.
+- Acks require an envelope from the current 16-byte session and only accepted/duplicate statuses. Unknown, old-session, rejected, unspecified, and duplicate/removed sequences are no-ops. Reconnect waits for the old generation's callback batch to finish before activating the new session and resetting sequence 1.
+- The writer is a private single worker. Callback failures requeue canonical current values, expose the cause, close the publisher, and close the writer. Close invokes the unblocking writer contract and joins without a timeout; sequence capacity is preflighted before batch removal. Replacement envelopes force protocol 1/0 while retaining correlation and payload.
+- Rust evaluates a cloned cursor candidate, commits only after a panic-safe durable handler returns success, latches gaps immediately, and leaves cancellation/panic retries eligible for application. Session IDs are exact 16-byte RFC 4122 v4 values in both the session generator and bootstrap Hello.

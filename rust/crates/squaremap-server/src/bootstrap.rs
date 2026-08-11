@@ -160,6 +160,8 @@ pub async fn run_bridge(
         .map_err(|_| BootstrapError::ConnectTimeout)??;
     let mut session_id = [0_u8; SESSION_ID_BYTES];
     rand::rng().fill_bytes(&mut session_id);
+    session_id[6] = (session_id[6] & 0x0f) | 0x40;
+    session_id[8] = (session_id[8] & 0x3f) | 0x80;
     tracing::info!(
         session_id = %hex::encode(session_id),
         protocol_major = PROTOCOL_MAJOR,

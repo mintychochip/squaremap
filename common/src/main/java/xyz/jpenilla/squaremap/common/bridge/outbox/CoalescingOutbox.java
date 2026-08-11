@@ -76,6 +76,13 @@ public final class CoalescingOutbox {
             }
         }
     }
+    void requeue(final Collection<BridgeEvent> events) {
+        synchronized (this.lock) {
+            for (final BridgeEvent event : events) {
+                this.offerLocked(event);
+            }
+        }
+    }
 
     private BridgePublisher.PublishResult offerLocked(final BridgeEvent event) {
         if (event instanceof BridgeEvent.ReplaceState state) {

@@ -108,6 +108,41 @@ async fn failed_handler_produces_no_ack_and_does_not_advance_cursor() {
     let success = server.process(message(&id, 1), |_| async { Ok::<_, SessionError>(()) }).await.unwrap();
     assert_eq!(success.ack().unwrap().acknowledged_sequence, 1);
 }
+#[tokio::test]
+async fn cancelled_handler_does_not_consume_sequence() {
+    let id = [12_u8; 16];
+    let mut server = Session::new(id);
+    let cancelled = tokio::time::timeout(std::time::Duration::from_millis(10), server.process(message(&id, 1), |_| async {
+        std::future::pending::<Result<(), SessionError>>().await
+    })).await;
+    assert!(cancelled.is_err());
+    let retry = server.process(message(&id, 1), |_| async { Ok::<_, SessionError>(()) }).await.unwrap();
+    assert_eq!(retry.ack().unwrap().acknowledged_sequence, 1);
+}
+
+#[tokio::test]
+async fn panicking_handler_does_not_consume_sequence() {
+    let id = [13_u8; 16];
+    let mut server = Session::new(id);
+    let panicked = server.process(message(&id, 1), |_| async {
+        panic!("handler panic");
+        #[allow(unreachable_code)]
+        Ok::<(), SessionError>(())
+    }).await;
+    assert!(matches!(panicked, Err(SessionError::HandlerPanicked(_))));
+    let retry = server.process(message(&id, 1), |_| async { Ok::<_, SessionError>(()) }).await.unwrap();
+    assert_eq!(retry.ack().unwrap().acknowledged_sequence, 1);
+}
+
+#[test]
+fn authenticated_ids_are_rfc4122_v4() {
+    for _ in 0..32 {
+        let session = Session::authenticated();
+        let id = session.session_id();
+        assert_eq!(id[6] >> 4, 4);
+        assert_eq!(id[8] & 0xc0, 0x80);
+    }
+}
 
 #[test]
 fn reconnect_requires_fresh_valid_uuid_and_resets_ordering() {
