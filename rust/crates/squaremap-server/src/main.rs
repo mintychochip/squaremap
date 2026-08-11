@@ -50,6 +50,10 @@ fn main() {
             Ok(bind) => bind,
             Err(error) => { eprintln!("invalid bind address: {error}"); std::process::exit(2); }
         };
+        if !bind.ip().is_loopback() {
+            eprintln!("serve-fixture requires a loopback bind address");
+            std::process::exit(2);
+        }
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio runtime should initialize");
         let result = runtime.block_on(async move {
             let output = OutputRoot::new(root)?;

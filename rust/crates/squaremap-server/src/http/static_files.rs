@@ -1,9 +1,9 @@
-use super::cache;
 use crate::output::{etag_for, validate_relative, OutputRoot};
 use axum::body::Body;
 use axum::http::{header, HeaderMap, HeaderValue, Method, Response, StatusCode};
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
+use tokio_util::io::ReaderStream;
 
 pub(crate) fn decode_path(raw: &str) -> io::Result<PathBuf> {
     let path = raw.strip_prefix('/').unwrap_or(raw);
@@ -58,19 +58,22 @@ pub(crate) fn serve(root: &OutputRoot, path: &Path, method: &Method, request_hea
         }
         Err(_) => return super::make_response(StatusCode::FORBIDDEN, headers, Body::empty()),
     };
-    let (mut file, metadata) = opened;
+    let (file, metadata) = opened;
     let etag = etag_for(&metadata);
     headers.insert(header::ETAG, HeaderValue::try_from(etag.as_str()).unwrap());
     headers.insert(header::CONTENT_LENGTH, HeaderValue::from_str(&metadata.len().to_string()).unwrap());
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type(path)));
-    if request_headers.get(header::IF_NONE_MATCH).and_then(|value| value.to_str().ok()).is_some_and(|value| value.split(',').any(|candidate| candidate.trim() == etag)) {
+    if request_headers.get(header::IF_NONE_MATCH).and_then(|value| value.to_str().ok()).is_some_and(|value| {
+        value.trim() == "*" || value.split(',').any(|candidate| {
+            let candidate = candidate.trim();
+            candidate == etag || candidate.strip_prefix("W/").is_some_and(|weak| weak == etag)
+        })
+    }) {
         return super::make_response(StatusCode::NOT_MODIFIED, headers, Body::empty());
     }
-    if method == Method::HEAD { return super::make_response(StatusCode::OK, headers, Body::from(vec![0; metadata.len() as usize])); }
-    let mut bytes = Vec::with_capacity(metadata.len().min(8 * 1024 * 1024) as usize);
-    if metadata.len() > 8 * 1024 * 1024 { return super::make_response(StatusCode::PAYLOAD_TOO_LARGE, headers, Body::empty()); }
-    if file.read_to_end(&mut bytes).is_err() { return super::make_response(StatusCode::INTERNAL_SERVER_ERROR, headers, Body::empty()); }
-    super::make_response(StatusCode::OK, headers, Body::from(bytes))
+    if method == Method::HEAD { return super::make_response(StatusCode::OK, headers, Body::empty()); }
+    let stream = ReaderStream::new(tokio::fs::File::from_std(file));
+    super::make_response(StatusCode::OK, headers, Body::from_stream(stream))
 }
 fn is_tile(path: &Path) -> bool { path.components().next().is_some_and(|component| component == std::path::Component::Normal("tiles".as_ref())) }
 fn content_type(path: &Path) -> &'static str {

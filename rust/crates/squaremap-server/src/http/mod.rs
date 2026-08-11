@@ -4,12 +4,10 @@ mod static_files;
 
 pub use dev_frontend::DevFrontendConfig;
 use crate::output::OutputRoot;
-use axum::body::{to_bytes, Body};
-use axum::http::{header, HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri};
+use axum::body::Body;
+use axum::http::{HeaderMap, Method, Request, Response, StatusCode, Uri};
 use axum::Router;
-use hyper::body::Incoming;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -73,9 +71,6 @@ struct AppState { root: OutputRoot, dev: Option<dev_frontend::DevFrontend> }
 
 async fn handle_request(state: axum::extract::State<Arc<AppState>>, request: Request<Body>) -> Response<Body> {
     let method = request.method().clone();
-    if method != Method::GET && method != Method::HEAD {
-        return response(StatusCode::METHOD_NOT_ALLOWED, HeaderMap::new(), Body::empty());
-    }
     let raw_path = request.uri().path();
     let decoded = match static_files::decode_path(raw_path) {
         Ok(path) => path,
@@ -86,6 +81,9 @@ async fn handle_request(state: axum::extract::State<Arc<AppState>>, request: Req
         if let Some(dev) = state.dev.as_ref() {
             return dev.proxy(request).await.unwrap_or_else(|_| response(StatusCode::BAD_GATEWAY, HeaderMap::new(), Body::empty()));
         }
+    }
+    if method != Method::GET && method != Method::HEAD {
+        return response(StatusCode::METHOD_NOT_ALLOWED, HeaderMap::new(), Body::empty());
     }
     static_files::serve(&state.root, &decoded, &method, request.headers())
 }
@@ -107,11 +105,6 @@ fn response(status: StatusCode, headers: HeaderMap, body: Body) -> Response<Body
 
 pub(crate) fn make_response(status: StatusCode, headers: HeaderMap, body: Body) -> Response<Body> { response(status, headers, body) }
 
-pub(crate) fn copy_safe_headers(from: &HeaderMap, to: &mut HeaderMap) {
-    for (name, value) in from {
-        if !cache::is_hop_by_hop(name) { to.append(name, value.clone()); }
-    }
-}
 
 pub(crate) fn uri_path_with_query(uri: &Uri) -> String {
     let mut value = uri.path().to_owned();

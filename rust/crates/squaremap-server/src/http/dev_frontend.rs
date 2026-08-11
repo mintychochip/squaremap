@@ -1,6 +1,6 @@
 use super::{make_response, uri_path_with_query};
-use axum::body::{to_bytes, Body};
-use axum::http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode};
+use axum::body::Body;
+use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use futures_util::{SinkExt, StreamExt};
 use hyper_util::rt::TokioIo;
 use reqwest::Client;
@@ -30,6 +30,7 @@ pub(crate) struct DevFrontend {
 struct Inner {
     child: Mutex<Child>,
     upstream: String,
+    tunnels: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl DevFrontend {
@@ -38,7 +39,6 @@ impl DevFrontend {
         command.args(["run", "dev"]).current_dir(&config.frontend_dir).stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(unix)]
         {
-            use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
         let mut child = command.spawn()?;
@@ -85,7 +85,7 @@ impl DevFrontend {
                 return Err(std::io::Error::other("frontend exited before readiness"));
             }
         };
-        let inner = Arc::new(Inner { child: Mutex::new(child), upstream });
+        let inner = Arc::new(Inner { child: Mutex::new(child), upstream, tunnels: Mutex::new(Vec::new()) });
         Ok(Self { inner })
     }
 
@@ -93,36 +93,53 @@ impl DevFrontend {
         let websocket = request.headers().get(header::UPGRADE).and_then(|value| value.to_str().ok()).is_some_and(|value| value.eq_ignore_ascii_case("websocket"));
         if websocket { return self.proxy_websocket(request).await; }
         let (parts, body) = request.into_parts();
-        let body = to_bytes(body, 16 * 1024 * 1024).await.map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let body = body.into_data_stream().map(|result| result.map_err(std::io::Error::other));
         let target = format!("{}{}", self.inner.upstream, uri_path_with_query(&parts.uri));
         let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
         let client = Client::new();
-        let mut builder = client.request(method, target).body(body.to_vec());
+        let mut builder = client.request(method, target).body(reqwest::Body::wrap_stream(body));
         for (name, value) in &parts.headers {
-            if !super::cache::is_hop_by_hop(name) { builder = builder.header(name, value); }
+            if super::cache::is_forwardable(name, &parts.headers) { builder = builder.header(name, value); }
         }
         let response = builder.send().await.map_err(std::io::Error::other)?;
         let status = StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
         let mut headers = HeaderMap::new();
         for (name, value) in response.headers() {
-            if !super::cache::is_hop_by_hop(name) {
+            if super::cache::is_forwardable(name, response.headers()) {
                 if let Ok(value) = HeaderValue::from_bytes(value.as_bytes()) { headers.append(name, value); }
             }
         }
-        let body = response.bytes().await.map_err(std::io::Error::other)?.to_vec();
-        Ok(make_response(status, headers, Body::from(body)))
+        let body = response.bytes_stream().map(|result| result.map_err(std::io::Error::other));
+        Ok(make_response(status, headers, Body::from_stream(body)))
     }
 
     async fn proxy_websocket(&self, request: Request<Body>) -> std::io::Result<axum::response::Response<Body>> {
         let (parts, _) = request.into_parts();
         let key = parts.headers.get("sec-websocket-key").and_then(|value| value.to_str().ok()).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing websocket key"))?.to_owned();
         let target = format!("{}{}", self.inner.upstream.replace("http://", "ws://").replace("https://", "wss://"), uri_path_with_query(&parts.uri));
+        let mut builder = tokio_tungstenite::tungstenite::http::Request::builder().uri(&target).header("Connection", "Upgrade").header("Upgrade", "websocket").header("Sec-WebSocket-Version", "13").header("Sec-WebSocket-Key", key.clone());
+        if let Ok(url) = reqwest::Url::parse(&target) {
+            if let Some(host) = url.host_str() {
+                let host = format!("{}{}", host, url.port().map(|port| format!(":{port}")).unwrap_or_default());
+                builder = builder.header("Host", host);
+            }
+        }
+        for (name, value) in &parts.headers {
+            if name.as_str() != "sec-websocket-key" && super::cache::is_forwardable(name, &parts.headers) { builder = builder.header(name, value); }
+        }
+        let custom = parts.headers.contains_key("cookie") || parts.headers.contains_key("authorization") || parts.headers.contains_key("sec-websocket-protocol");
+        let (upstream, upstream_response) = if custom {
+            let upstream_request = builder.body(()).map_err(std::io::Error::other)?;
+            connect_async(upstream_request).await.map_err(std::io::Error::other)?
+        } else {
+            connect_async(target).await.map_err(std::io::Error::other)?
+        };
         let upgrade = hyper::upgrade::on(Request::from_parts(parts, Body::empty()));
         let accept = derive_accept_key(key.as_bytes());
-        tokio::spawn(async move {
+        let selected_protocol = upstream_response.headers().get("sec-websocket-protocol").cloned();
+        let handle = tokio::spawn(async move {
             let Ok(upgraded) = upgrade.await else { return; };
-            let Ok((upstream, _)) = connect_async(target).await else { return; };
-            let mut client = tokio_tungstenite::WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None).await;
+            let client = tokio_tungstenite::WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None).await;
             let (mut upstream_sink, mut upstream_stream) = upstream.split();
             let (mut client_sink, mut client_stream) = client.split();
             loop {
@@ -142,13 +159,18 @@ impl DevFrontend {
                 }
             }
         });
+        self.inner.tunnels.lock().await.push(handle);
         let mut headers = HeaderMap::new();
         headers.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
         headers.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
         headers.insert("sec-websocket-accept", HeaderValue::from_str(&accept).unwrap());
+        if let Some(protocol) = selected_protocol { headers.insert("sec-websocket-protocol", HeaderValue::from_bytes(protocol.as_bytes()).unwrap()); }
         Ok(make_response(StatusCode::SWITCHING_PROTOCOLS, headers, Body::empty()))
     }
     pub(crate) async fn shutdown(self) {
+        let mut tunnels = self.inner.tunnels.lock().await;
+        for handle in tunnels.drain(..) { handle.abort(); let _ = handle.await; }
+        drop(tunnels);
         let mut child = self.inner.child.lock().await;
         terminate(&mut child).await;
     }
@@ -185,10 +207,9 @@ fn strip_ansi(value: &str) -> String {
 
 async fn terminate(child: &mut Child) {
     #[cfg(unix)]
-    {
-        if let Some(pid) = child.id() { unsafe { libc::kill(-(pid as i32), libc::SIGTERM); } }
-    }
-    let _ = child.start_kill();
+    if let Some(pid) = child.id() { unsafe { libc::kill(-(pid as i32), libc::SIGTERM); } }
     let _ = timeout(Duration::from_secs(2), child.wait()).await;
-    if child.id().is_some() { let _ = child.kill().await; }
+    #[cfg(unix)]
+    if let Some(pid) = child.id() { unsafe { libc::kill(-(pid as i32), libc::SIGKILL); } }
+    if child.id().is_some() { let _ = child.kill().await; let _ = child.wait().await; }
 }

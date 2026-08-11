@@ -102,6 +102,41 @@ async fn proxies_http_and_keeps_excluded_paths_local() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn proxies_non_get_body_and_query() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+    let upstream = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let upstream_task = tokio::spawn(async move {
+        let (mut stream, _) = upstream.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 1024];
+        loop {
+            let count = stream.read(&mut buffer).await.unwrap();
+            if count == 0 { break; }
+            request.extend_from_slice(&buffer[..count]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") && request.ends_with(b"payload") { break; }
+        }
+        let text = String::from_utf8_lossy(&request);
+        assert!(text.starts_with("POST /submit?q=1"));
+        assert!(text.contains("x-client: yes"));
+        stream.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").await.unwrap();
+    });
+    let dir = tempdir().unwrap();
+    let root = OutputRoot::new(dir.path()).unwrap();
+    let fake = executable(dir.path(), &format!("printf 'http://{}\\n'; sleep 10", upstream_addr));
+    let config = HttpConfig { bind: "127.0.0.1:0".parse().unwrap(), enabled: true, dev_frontend: Some(DevFrontendConfig { frontend_dir: dir.path().to_owned(), executable: fake, startup_timeout: Duration::from_secs(1) }) };
+    let mut server = HttpServer::bind(config, root).await.unwrap();
+    let client = reqwest::Client::new();
+    let response = client.post(format!("http://{}/submit?q=1", server.local_addr().unwrap())).header("x-client", "yes").body("payload").send().await.unwrap();
+    assert_eq!(response.status(), 202);
+    assert_eq!(response.text().await.unwrap(), "ok");
+    server.shutdown().await.unwrap();
+    upstream_task.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn tunnels_websocket_echo() {
     let _guard = PROCESS_TEST_LOCK.lock().unwrap();
     use futures_util::{SinkExt, StreamExt};

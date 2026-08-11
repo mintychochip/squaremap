@@ -36,7 +36,12 @@ async fn serves_files_headers_and_missing_tile_contract() {
     assert_eq!(head.headers()[reqwest::header::CONTENT_LENGTH], "3");
     assert!(head.bytes().await.unwrap().is_empty());
 
-    let not_modified = client.get(format!("{base}/tiles/settings.json")).header(reqwest::header::IF_NONE_MATCH, etag).send().await.unwrap();
+    let not_modified = client.get(format!("{base}/tiles/settings.json")).header(reqwest::header::IF_NONE_MATCH, etag.clone()).send().await.unwrap();
+
+    let wildcard = client.get(format!("{base}/tiles/settings.json")).header(reqwest::header::IF_NONE_MATCH, "*").send().await.unwrap();
+    assert_eq!(wildcard.status(), StatusCode::NOT_MODIFIED);
+    let weak = client.get(format!("{base}/tiles/settings.json")).header(reqwest::header::IF_NONE_MATCH, format!("W/{etag}")).send().await.unwrap();
+    assert_eq!(weak.status(), StatusCode::NOT_MODIFIED);
     assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
     assert!(not_modified.bytes().await.unwrap().is_empty());
 

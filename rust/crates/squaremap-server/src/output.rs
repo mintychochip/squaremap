@@ -3,15 +3,18 @@ use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
 
 #[derive(Debug)]
 pub struct OutputRoot {
     root: PathBuf,
+    root_dir: Arc<File>,
     writes: Arc<Mutex<()>>,
 }
 
 impl Clone for OutputRoot {
-    fn clone(&self) -> Self { Self { root: self.root.clone(), writes: Arc::clone(&self.writes) } }
+    fn clone(&self) -> Self { Self { root: self.root.clone(), root_dir: Arc::clone(&self.root_dir), writes: Arc::clone(&self.writes) } }
 }
 
 impl OutputRoot {
@@ -28,7 +31,8 @@ impl OutputRoot {
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "output root is not a directory"));
         }
-        Ok(Self { root, writes: Arc::new(Mutex::new(())) })
+        let root_dir = Arc::new(File::open(&root)?);
+        Ok(Self { root, root_dir, writes: Arc::new(Mutex::new(())) })
     }
 
     pub fn path(&self) -> &Path { &self.root }
@@ -36,6 +40,10 @@ impl OutputRoot {
     pub fn atomic_write<P: AsRef<Path>>(&self, relative: P, bytes: &[u8]) -> io::Result<()> {
         let _guard = self.writes.lock().map_err(|_| io::Error::other("output lock poisoned"))?;
         let relative = validate_relative(relative.as_ref())?;
+        #[cfg(unix)]
+        { return self.atomic_write_unix(&relative, bytes); }
+        #[cfg(not(unix))]
+        let _ = (&relative, bytes);
         let target = self.prepare_parent(&relative)?;
         if let Ok(meta) = fs::symlink_metadata(&target) {
             if meta.file_type().is_symlink() || !meta.is_file() {
@@ -62,8 +70,40 @@ impl OutputRoot {
         result
     }
 
+    #[cfg(unix)]
+    fn atomic_write_unix(&self, relative: &Path, bytes: &[u8]) -> io::Result<()> {
+        let mut components = relative.components().peekable();
+        let mut parent = self.root_dir.try_clone()?;
+        while let Some(Component::Normal(name)) = components.next() {
+            if components.peek().is_none() {
+                let target = name.to_str().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "non-UTF8 path"))?;
+                let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+                let temp = format!(".{}.squaremap-{}-{}", target, std::process::id(), stamp);
+                let temp_c = std::ffi::CString::new(temp).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
+                let target_c = std::ffi::CString::new(target).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
+                let fd = unsafe { libc::openat(parent.as_raw_fd(), temp_c.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW, 0o600) };
+                if fd < 0 { return Err(io::Error::last_os_error()); }
+                let mut file = unsafe { File::from_raw_fd(fd) };
+                let result = (|| { file.write_all(bytes)?; file.flush()?; file.sync_all()?; let rc = unsafe { libc::renameat(parent.as_raw_fd(), temp_c.as_ptr(), parent.as_raw_fd(), target_c.as_ptr()) }; if rc != 0 { return Err(io::Error::last_os_error()); } unsafe { libc::fsync(parent.as_raw_fd()) }; Ok(()) })();
+                if result.is_err() { unsafe { libc::unlinkat(parent.as_raw_fd(), temp_c.as_ptr(), 0); } }
+                return result;
+            }
+            let name = name.to_str().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "non-UTF8 path"))?;
+            let c = std::ffi::CString::new(name).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
+            let mut fd = unsafe { libc::openat(parent.as_raw_fd(), c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW) };
+            if fd < 0 && io::Error::last_os_error().kind() == io::ErrorKind::NotFound {
+                if unsafe { libc::mkdirat(parent.as_raw_fd(), c.as_ptr(), 0o755) } != 0 && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists { return Err(io::Error::last_os_error()); }
+                fd = unsafe { libc::openat(parent.as_raw_fd(), c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW) };
+            }
+            if fd < 0 { return Err(io::Error::last_os_error()); }
+            parent = unsafe { File::from_raw_fd(fd) };
+        }
+        Err(io::Error::new(io::ErrorKind::InvalidInput, "empty path"))
+    }
     pub(crate) fn open_file(&self, relative: &Path) -> io::Result<Option<(File, fs::Metadata)>> {
         let relative = validate_relative(relative)?;
+        #[cfg(unix)]
+        { return self.open_file_unix(&relative); }
         let path = self.root.join(&relative);
         let mut current = self.root.clone();
         for component in relative.components() {
@@ -85,6 +125,36 @@ impl OutputRoot {
         let metadata = file.metadata()?;
         if !metadata.is_file() { return Ok(None); }
         Ok(Some((file, metadata)))
+    }
+    #[cfg(unix)]
+    fn open_file_unix(&self, relative: &Path) -> io::Result<Option<(File, fs::Metadata)>> {
+        let mut components = relative.components().peekable();
+        let mut parent = self.root_dir.try_clone()?;
+        while let Some(Component::Normal(name)) = components.next() {
+            let name = name.to_str().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "non-UTF8 path"))?;
+            let c = std::ffi::CString::new(name).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
+            if components.peek().is_some() {
+                let fd = unsafe { libc::openat(parent.as_raw_fd(), c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW) };
+                if fd < 0 {
+                    let error = io::Error::last_os_error();
+                    if error.kind() == io::ErrorKind::NotFound { return Ok(None); }
+                    return Err(error);
+                }
+                parent = unsafe { File::from_raw_fd(fd) };
+            } else {
+                let fd = unsafe { libc::openat(parent.as_raw_fd(), c.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW) };
+                if fd < 0 {
+                    let error = io::Error::last_os_error();
+                    if error.kind() == io::ErrorKind::NotFound { return Ok(None); }
+                    return Err(error);
+                }
+                let file = unsafe { File::from_raw_fd(fd) };
+                let metadata = file.metadata()?;
+                if !metadata.is_file() { return Ok(None); }
+                return Ok(Some((file, metadata)));
+            }
+        }
+        Ok(None)
     }
 
     fn prepare_parent(&self, relative: &Path) -> io::Result<PathBuf> {
