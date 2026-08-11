@@ -208,7 +208,7 @@ async fn drains_sustained_logs_after_readiness() {
     let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let dir = tempdir().unwrap();
     let marker = dir.path().join("drained");
-    let script = format!("i=0; while [ $i -lt 20000 ]; do printf 'log-%s-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' \"$i\"; i=$((i+1)); done; printf done > '{}'; printf 'http://127.0.0.1:9\\n'; sleep 10", marker.display());
+    let script = format!("printf 'http://127.0.0.1:9\\n'; i=0; while [ $i -lt 20000 ]; do printf 'log-%s-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' \"$i\"; i=$((i+1)); done; printf done > '{}'; sleep 10", marker.display());
     let root = OutputRoot::new(dir.path()).unwrap();
     let fake = executable(dir.path(), &script);
     let config = HttpConfig { bind: "127.0.0.1:0".parse().unwrap(), enabled: true, dev_frontend: Some(DevFrontendConfig { frontend_dir: dir.path().to_owned(), executable: fake, startup_timeout: Duration::from_secs(2) }) };
@@ -224,6 +224,8 @@ async fn drains_sustained_logs_after_readiness() {
 #[cfg(unix)]
 #[tokio::test]
 async fn shutdown_cancels_infinite_proxy_response() {
+    use futures_util::StreamExt;
+    use tokio::sync::oneshot;
     use tokio::io::AsyncWriteExt;
     let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let upstream = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -241,13 +243,19 @@ async fn shutdown_cancels_infinite_proxy_response() {
     let fake = executable(dir.path(), &format!("printf 'http://{}\\n'; sleep 10", upstream_addr));
     let config = HttpConfig { bind: "127.0.0.1:0".parse().unwrap(), enabled: true, dev_frontend: Some(DevFrontendConfig { frontend_dir: dir.path().to_owned(), executable: fake, startup_timeout: Duration::from_secs(1) }) };
     let mut server = HttpServer::bind(config, root).await.unwrap();
+    let (ready_tx, ready_rx) = oneshot::channel();
     let client_task = tokio::spawn({
         let url = format!("http://{}/stream", server.local_addr().unwrap());
-        async move { let _ = reqwest::get(url).await; }
+        async move {
+            let response = reqwest::get(url).await.unwrap();
+            let _ = ready_tx.send(());
+            let mut body = response.bytes_stream();
+            while body.next().await.is_some() {}
+        }
     });
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::timeout(Duration::from_secs(1), ready_rx).await.unwrap().unwrap();
     tokio::time::timeout(Duration::from_secs(1), server.shutdown()).await.unwrap().unwrap();
-    client_task.abort();
+    tokio::time::timeout(Duration::from_secs(1), client_task).await.unwrap().unwrap();
     let _ = upstream_task.await;
 }
 
@@ -258,11 +266,14 @@ async fn shutdown_cancels_stalled_websocket_handshake() {
     let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let upstream = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let upstream_addr = upstream.local_addr().unwrap();
+    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let upstream_task = tokio::spawn(async move {
         let (mut stream, _) = upstream.accept().await.unwrap();
+        let _ = accepted_tx.send(());
         let mut byte = [0_u8; 1];
         let _ = stream.read(&mut byte).await;
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        let _ = release_rx.await;
     });
     let dir = tempdir().unwrap();
     let root = OutputRoot::new(dir.path()).unwrap();
@@ -270,17 +281,17 @@ async fn shutdown_cancels_stalled_websocket_handshake() {
     let config = HttpConfig { bind: "127.0.0.1:0".parse().unwrap(), enabled: true, dev_frontend: Some(DevFrontendConfig { frontend_dir: dir.path().to_owned(), executable: fake, startup_timeout: Duration::from_secs(1) }) };
     let mut server = HttpServer::bind(config, root).await.unwrap();
     let public = format!("ws://{}/hmr", server.local_addr().unwrap());
-    let client_task = tokio::spawn(async move { let _ = tokio_tungstenite::connect_async(public).await; });
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let client_task = tokio::spawn(async move { tokio_tungstenite::connect_async(public).await });
+    tokio::time::timeout(Duration::from_secs(1), accepted_rx).await.unwrap().unwrap();
     tokio::time::timeout(Duration::from_secs(1), server.shutdown()).await.unwrap().unwrap();
-    client_task.abort();
+    tokio::time::timeout(Duration::from_secs(1), client_task).await.unwrap().unwrap();
+    let _ = release_tx.send(());
     let _ = upstream_task.await;
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn websocket_forwards_headers_and_selected_protocol() {
-    use futures_util::StreamExt;
     use tokio_tungstenite::tungstenite::handshake::server::{Request as WsRequest, Response as WsResponse};
     let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let upstream = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -344,6 +355,30 @@ async fn shutdown_kills_descendant_process_group() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("descendant process survived shutdown");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn startup_failure_kills_saved_process_group_descendant() {
+    let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let dir = tempdir().unwrap();
+    let pid_file = dir.path().join("failed-descendant.pid");
+    let script = format!("sleep 30 & child=$!; echo $child > '{}'; printf 'http://127.0.0.1:9\\n'; exit 0", pid_file.display());
+    let root = OutputRoot::new(dir.path()).unwrap();
+    let fake = executable(dir.path(), &script);
+    let config = HttpConfig { bind: "127.0.0.1:0".parse().unwrap(), enabled: true, dev_frontend: Some(DevFrontendConfig { frontend_dir: dir.path().to_owned(), executable: fake, startup_timeout: Duration::from_secs(1) }) };
+    assert!(HttpServer::bind(config, root).await.is_err());
+    let pid = loop {
+        if let Ok(value) = std::fs::read_to_string(&pid_file) {
+            break value.trim().parse::<u32>().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    for _ in 0..100 {
+        if !std::path::Path::new(&format!("/proc/{pid}")).exists() { return; }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("startup descendant survived failure cleanup");
 }
 
 #[cfg(windows)]

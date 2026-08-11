@@ -70,7 +70,11 @@ impl HttpServer {
         if let Some(mut task) = self.task.take() {
             match tokio::time::timeout(std::time::Duration::from_millis(500), &mut task).await {
                 Ok(result) => result.map_err(std::io::Error::other)??,
-                Err(_) => { task.abort(); let _ = task.await; }
+                Err(_) => {
+                    task.abort();
+                    let _ = task.await;
+                    return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "HTTP server shutdown timed out"));
+                }
             }
         }
         Ok(())

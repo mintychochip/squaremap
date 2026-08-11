@@ -93,13 +93,10 @@ fn removes_stale_temp_siblings_recursively() {
     std::fs::write(dir.path().join("nested/.stale.squaremap-999999-456"), b"old").unwrap();
     std::fs::write(dir.path().join("nested/.squaremap-old"), b"old").unwrap();
     std::fs::write(dir.path().join("keep"), b"keep").unwrap();
-    let live = format!(".live.squaremap-{}-1", std::process::id());
-    std::fs::write(dir.path().join(&live), b"live").unwrap();
     let root = OutputRoot::new(dir.path()).unwrap();
     assert!(!dir.path().join(".target.squaremap-999999-456").exists());
     assert!(!dir.path().join("nested/.stale.squaremap-999999-456").exists());
     assert!(dir.path().join(".target.squaremap-not-a-temp").exists());
-    assert!(dir.path().join(live).exists());
     assert!(dir.path().join("keep").exists());
     root.atomic_write("nested/file", b"new").unwrap();
 }
@@ -124,8 +121,18 @@ fn rejects_symlink_escapes() {
     let dir = tempdir().unwrap();
     let outside = tempdir().unwrap();
     symlink(outside.path(), dir.path().join("link")).unwrap();
+
     let root = OutputRoot::new(dir.path()).unwrap();
     assert!(root.atomic_write("link/escape", b"x").is_err());
+}
+
+#[test]
+fn output_root_has_single_cross_process_owner() {
+    let dir = tempdir().unwrap();
+    let first = OutputRoot::new(dir.path()).unwrap();
+    assert!(OutputRoot::new(dir.path()).is_err());
+    drop(first);
+    assert!(OutputRoot::new(dir.path()).is_ok());
 }
 
 #[test]
@@ -156,7 +163,13 @@ fn windows_root_rejects_reparse_output_parent() {
     use std::os::windows::fs::symlink_dir;
     let dir = tempdir().unwrap();
     let outside = tempdir().unwrap();
-    symlink_dir(outside.path(), dir.path().join("link")).unwrap();
+    if let Err(error) = symlink_dir(outside.path(), dir.path().join("link")) {
+        if error.kind() == std::io::ErrorKind::PermissionDenied { return; }
+        panic!("symlink setup failed: {error}");
+    }
     let root = OutputRoot::new(dir.path()).unwrap();
     assert!(root.atomic_write("link/escape.txt", b"blocked").is_err());
+    root.atomic_write("nested/replace.txt", b"one").unwrap();
+    root.atomic_write("nested/replace.txt", b"two").unwrap();
+    assert_eq!(std::fs::read(dir.path().join("nested/replace.txt")).unwrap(), b"two");
 }

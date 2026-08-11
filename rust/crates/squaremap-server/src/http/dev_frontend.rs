@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::{handshake::derive_accept_key, protocol::Role}};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug)]
 pub struct DevFrontendConfig {
@@ -27,15 +28,31 @@ pub struct DevFrontendConfig {
 pub(crate) struct DevFrontend {
     inner: Arc<Inner>,
 }
+
+#[cfg(windows)]
+struct JobHandle(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+unsafe impl Send for JobHandle {}
+#[cfg(windows)]
+unsafe impl Sync for JobHandle {}
+
+#[cfg(windows)]
+impl Drop for JobHandle {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0); }
+    }
+}
 struct Inner {
     child: Mutex<Child>,
     upstream: String,
     tunnels: Mutex<Vec<JoinHandle<()>>>,
     log_tasks: Mutex<Vec<JoinHandle<()>>>,
+    cancel: CancellationToken,
     #[cfg(unix)]
     pgid: i32,
     #[cfg(windows)]
-    job: windows_sys::Win32::Foundation::HANDLE,
+    job: JobHandle,
 }
 
 impl DevFrontend {
@@ -60,14 +77,14 @@ impl DevFrontend {
         let stdout = match child.stdout.take() {
             Some(stdout) => stdout,
             None => {
-                terminate(&mut child, #[cfg(unix)] pgid, #[cfg(windows)] job).await;
+                terminate(&mut child, #[cfg(unix)] pgid, #[cfg(windows)] &job).await;
                 return Err(std::io::Error::other("frontend stdout unavailable"));
             }
         };
         let stderr = match child.stderr.take() {
             Some(stderr) => stderr,
             None => {
-                terminate(&mut child, #[cfg(unix)] pgid, #[cfg(windows)] job).await;
+                terminate(&mut child, #[cfg(unix)] pgid, #[cfg(windows)] &job).await;
                 return Err(std::io::Error::other("frontend stderr unavailable"));
             }
         };
@@ -79,7 +96,7 @@ impl DevFrontend {
         let upstream = loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                terminate(&mut child, #[cfg(unix)] pgid, #[cfg(windows)] job).await;
+                terminate(&mut child, #[cfg(unix)] pgid, #[cfg(windows)] &job).await;
                 return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "frontend URL readiness timeout"));
             }
             match timeout(remaining.min(Duration::from_millis(50)), receiver.recv()).await {
@@ -87,24 +104,24 @@ impl DevFrontend {
                     if let Some(url) = find_loopback_url(&line) { break url; }
                 }
                 Ok(None) => {
-                    terminate(&mut child, #[cfg(unix)] pgid, #[cfg(windows)] job).await;
+                    terminate(&mut child, #[cfg(unix)] pgid, #[cfg(windows)] &job).await;
                     return Err(std::io::Error::other("frontend exited before readiness"));
                 }
                 Err(_) => {
                     if Instant::now() >= deadline {
-                        terminate(&mut child, #[cfg(unix)] pgid, #[cfg(windows)] job).await;
+                        terminate(&mut child, #[cfg(unix)] pgid, #[cfg(windows)] &job).await;
                         return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "frontend URL readiness timeout"));
                     }
                 }
             }
             if let Ok(Some(_)) = child.try_wait() {
-                terminate(&mut child, #[cfg(unix)] pgid, #[cfg(windows)] job).await;
+                terminate(&mut child, #[cfg(unix)] pgid, #[cfg(windows)] &job).await;
                 return Err(std::io::Error::other("frontend exited before readiness"));
             }
         };
         tokio::time::sleep(Duration::from_millis(10)).await;
         if let Ok(Some(_)) = child.try_wait() {
-            terminate(&mut child, #[cfg(unix)] pgid, #[cfg(windows)] job).await;
+            terminate(&mut child, #[cfg(unix)] pgid, #[cfg(windows)] &job).await;
             return Err(std::io::Error::other("frontend exited immediately after readiness"));
         }
         let drain_task = tokio::spawn(async move { while receiver.recv().await.is_some() {} });
@@ -113,6 +130,7 @@ impl DevFrontend {
             upstream,
             tunnels: Mutex::new(Vec::new()),
             log_tasks: Mutex::new(vec![stdout_task, stderr_task, drain_task]),
+            cancel: CancellationToken::new(),
             #[cfg(unix)]
             pgid,
             #[cfg(windows)]
@@ -133,7 +151,10 @@ impl DevFrontend {
         for (name, value) in &parts.headers {
             if super::cache::is_forwardable(name, &parts.headers) { builder = builder.header(name, value); }
         }
-        let response = builder.send().await.map_err(std::io::Error::other)?;
+        let response = tokio::select! {
+            _ = self.inner.cancel.cancelled() => return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "frontend proxy cancelled")),
+            result = builder.send() => result.map_err(std::io::Error::other)?,
+        };
         let status = StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
         let mut headers = HeaderMap::new();
         for (name, value) in response.headers() {
@@ -141,7 +162,8 @@ impl DevFrontend {
                 if let Ok(value) = HeaderValue::from_bytes(value.as_bytes()) { headers.append(name, value); }
             }
         }
-        let body = response.bytes_stream().map(|result| result.map_err(std::io::Error::other));
+        let cancel = self.inner.cancel.clone();
+        let body = response.bytes_stream().map(|result| result.map_err(std::io::Error::other)).take_until(cancel.cancelled_owned());
         Ok(make_response(status, headers, Body::from_stream(body)))
     }
 
@@ -157,23 +179,35 @@ impl DevFrontend {
             }
         }
         for (name, value) in &parts.headers {
-            if name.as_str() != "sec-websocket-key" && super::cache::is_forwardable(name, &parts.headers) { builder = builder.header(name, value); }
+            if !matches!(name.as_str(), "sec-websocket-key" | "sec-websocket-version" | "connection" | "upgrade" | "host")
+                && super::cache::is_forwardable(name, &parts.headers)
+            {
+                builder = builder.header(name, value);
+            }
         }
         let upstream_request = builder.body(()).map_err(std::io::Error::other)?;
-        let (upstream, upstream_response) = timeout(Duration::from_secs(10), connect_async(upstream_request))
-            .await
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "websocket upstream handshake timeout"))?
-            .map_err(std::io::Error::other)?;
-        let upgrade = hyper::upgrade::on(Request::from_parts(parts, Body::empty()));
+        let handshake = timeout(Duration::from_secs(10), connect_async(upstream_request));
+        let (upstream, upstream_response) = tokio::select! {
+            _ = self.inner.cancel.cancelled() => return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "frontend websocket cancelled")),
+            result = handshake => result
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "websocket upstream handshake timeout"))?
+                .map_err(std::io::Error::other)?,
+        };
         let accept = derive_accept_key(key.as_bytes());
+        let upgrade = hyper::upgrade::on(Request::from_parts(parts, Body::empty()));
         let selected_protocol = upstream_response.headers().get("sec-websocket-protocol").cloned();
+        let cancel = self.inner.cancel.clone();
         let handle = tokio::spawn(async move {
-            let Ok(upgraded) = upgrade.await else { return; };
+            let upgraded = tokio::select! {
+                _ = cancel.cancelled() => return,
+                result = upgrade => match result { Ok(value) => value, Err(_) => return },
+            };
             let client = tokio_tungstenite::WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None).await;
             let (mut upstream_sink, mut upstream_stream) = upstream.split();
             let (mut client_sink, mut client_stream) = client.split();
             loop {
                 tokio::select! {
+                    _ = cancel.cancelled() => break,
                     message = client_stream.next() => {
                         match message {
                             Some(Ok(message)) => if upstream_sink.send(message).await.is_err() { break; },
@@ -204,14 +238,20 @@ impl DevFrontend {
         Ok(make_response(StatusCode::SWITCHING_PROTOCOLS, headers, Body::empty()))
     }
     pub(crate) async fn shutdown(self) {
+        self.inner.cancel.cancel();
         let mut tunnels = self.inner.tunnels.lock().await;
         for handle in tunnels.drain(..) { handle.abort(); let _ = handle.await; }
         drop(tunnels);
-        let mut logs = self.inner.log_tasks.lock().await;
-        for handle in logs.drain(..) { handle.abort(); let _ = handle.await; }
-        drop(logs);
         let mut child = self.inner.child.lock().await;
-        terminate(&mut child, #[cfg(unix)] self.inner.pgid, #[cfg(windows)] self.inner.job).await;
+        terminate(&mut child, #[cfg(unix)] self.inner.pgid, #[cfg(windows)] &self.inner.job).await;
+        drop(child);
+        let mut logs = self.inner.log_tasks.lock().await;
+        for handle in logs.drain(..) {
+            match timeout(Duration::from_secs(1), handle).await {
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
     }
 }
 fn find_loopback_url(line: &str) -> Option<String> {
@@ -276,8 +316,8 @@ where
 }
 
 #[cfg(windows)]
-fn create_job(pid: Option<u32>) -> std::io::Result<windows_sys::Win32::Foundation::HANDLE> {
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+fn create_job(pid: Option<u32>) -> std::io::Result<JobHandle> {
+    use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
         JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -286,7 +326,7 @@ fn create_job(pid: Option<u32>) -> std::io::Result<windows_sys::Win32::Foundatio
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
     let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
     if job.is_null() { return Err(std::io::Error::last_os_error()); }
-    let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
     info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     let set = unsafe {
         SetInformationJobObject(
@@ -311,7 +351,7 @@ fn create_job(pid: Option<u32>) -> std::io::Result<windows_sys::Win32::Foundatio
         unsafe { CloseHandle(job); }
         return Err(std::io::Error::last_os_error());
     }
-    Ok(job as HANDLE)
+    Ok(JobHandle(job))
 }
 
 #[cfg(unix)]
@@ -323,11 +363,8 @@ async fn terminate(child: &mut Child, pgid: i32) {
 }
 
 #[cfg(windows)]
-async fn terminate(child: &mut Child, job: windows_sys::Win32::Foundation::HANDLE) {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    if timeout(Duration::from_secs(2), child.wait()).await.is_err() {
-        let _ = child.kill().await;
-        let _ = child.wait().await;
-    }
-    unsafe { CloseHandle(job); }
+async fn terminate(child: &mut Child, job: &JobHandle) {
+    use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+    let _ = unsafe { TerminateJobObject(job.0, 1) };
+    let _ = timeout(Duration::from_secs(2), child.wait()).await;
 }
