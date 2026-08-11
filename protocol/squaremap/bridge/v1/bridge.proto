@@ -107,10 +107,135 @@ message Shutdown {
 
 message ConfigReplace {
   uint64 revision = 1;
-  bool http_enabled = 2;
-  uint32 http_port = 3;
-  string web_root = 4;
-  uint32 max_in_flight_snapshots = 5;
+  GlobalSettings global = 2;
+  AdvancedSettings advanced = 3;
+  WorldSettings world = 4;
+  LocaleSettings locale = 5;
+  RenderSettings render = 6;
+  UiSettings ui = 7;
+}
+
+message GlobalSettings {
+  string language_file = 1;
+  bool debug_mode = 2;
+  bool update_checker = 3;
+  string web_address = 4;
+  string web_directory = 5;
+  bool update_web_directory = 6;
+  bool compress_images = 7;
+  float compression_ratio = 8;
+  bool http_enabled = 9;
+  string http_bind = 10;
+  uint32 http_port = 11;
+  bool flush_json_immediately = 12;
+  string main_command_label = 13;
+  repeated string main_command_aliases = 14;
+}
+
+message AdvancedSettings {
+  repeated string invisible_blocks = 1;
+  repeated string iterate_up_base_blocks = 2;
+  repeated ColorOverride biome_foliage_color_overrides = 3;
+  repeated ColorOverride biome_grass_color_overrides = 4;
+  repeated ColorOverride biome_water_color_overrides = 5;
+  repeated ColorOverride block_color_overrides = 6;
+}
+
+message ColorOverride {
+  string registry_key = 1;
+  uint32 color = 2;
+}
+
+message WorldSettings {
+  bool map_enabled = 1;
+  string map_display_name = 2;
+  sint32 map_order = 3;
+  string map_icon = 4;
+  sint32 max_render_threads = 5;
+  bool map_iterate_up = 6;
+  sint32 map_max_height = 7;
+  bool map_biomes_enabled = 8;
+  uint32 map_biomes_blend = 9;
+  bool map_glass_clear = 10;
+  bool map_lava_checkerboard = 11;
+  bool map_water_clear = 12;
+  bool map_water_checkerboard = 13;
+  sint32 zoom_max = 14;
+  sint32 zoom_default = 15;
+  sint32 zoom_extra = 16;
+  bool background_render_enabled = 17;
+  uint32 background_render_max_chunks_per_interval = 18;
+  uint32 background_render_interval_seconds = 19;
+  sint32 background_render_max_threads = 20;
+  bool player_tracker_enabled = 21;
+  uint32 player_tracker_update_interval = 22;
+  bool player_tracker_show_controls = 23;
+  bool player_tracker_default_hidden = 24;
+  sint32 player_tracker_priority = 25;
+  sint32 player_tracker_z_index = 26;
+  bool player_tracker_nameplate_enabled = 27;
+  bool player_tracker_nameplate_show_head = 28;
+  string player_tracker_nameplate_heads_url = 29;
+  bool player_tracker_nameplate_show_armor = 30;
+  bool player_tracker_nameplate_show_health = 31;
+  bool player_tracker_hide_invisible = 32;
+  bool player_tracker_hide_spectators = 33;
+  bool player_tracker_hide_map_invisibility_equipment = 34;
+  bool player_tracker_use_display_name = 35;
+  uint32 marker_api_update_interval_seconds = 36;
+  bool spawn_marker_icon_enabled = 37;
+  bool spawn_marker_icon_show_controls = 38;
+  bool spawn_marker_icon_default_hidden = 39;
+  sint32 spawn_marker_icon_layer_priority = 40;
+  sint32 spawn_marker_icon_z_index = 41;
+  bool worldborder_marker_enabled = 42;
+  bool worldborder_marker_show_controls = 43;
+  bool worldborder_marker_default_hidden = 44;
+  sint32 worldborder_marker_layer_priority = 45;
+  sint32 worldborder_marker_z_index = 46;
+  repeated VisibilityLimit visibility_limits = 47;
+}
+
+message LocaleSettings {
+  string language = 1;
+  string ui_title = 2;
+  string coordinates_html = 3;
+  string player_tracker_label = 4;
+  string sidebar_player_list_label = 5;
+  string sidebar_world_list_label = 6;
+  string spawn_marker_label = 7;
+  string world_border_marker_label = 8;
+}
+
+message RenderSettings {
+  bool progress_logging_enabled = 1;
+  uint32 progress_logging_interval_seconds = 2;
+  bool background_enabled = 3;
+  uint32 background_max_chunks_per_interval = 4;
+  uint32 background_interval_seconds = 5;
+  sint32 background_max_threads = 6;
+}
+
+message UiSettings {
+  bool coordinates_enabled = 1;
+  bool link_enabled = 2;
+  string sidebar_pinned = 3;
+}
+
+enum VisibilityLimitKind {
+  VISIBILITY_LIMIT_KIND_UNSPECIFIED = 0;
+  VISIBILITY_LIMIT_KIND_WORLD_BORDER = 1;
+  VISIBILITY_LIMIT_KIND_CIRCLE = 2;
+  VISIBILITY_LIMIT_KIND_RECTANGLE = 3;
+  VISIBILITY_LIMIT_KIND_POLYGON = 4;
+}
+
+message VisibilityLimit {
+  VisibilityLimitKind kind = 1;
+  double center_x = 2;
+  double center_z = 3;
+  double radius = 4;
+  repeated Point points = 5;
 }
 
 message BridgePolicyReplace {
@@ -166,13 +291,52 @@ message WorldIdentity {
   uint64 epoch = 3;
 }
 
+message Spawn {
+  sint32 x = 1;
+  sint32 z = 2;
+}
+
+message PlayerTrackerSettings {
+  bool enabled = 1;
+  uint32 update_interval = 2;
+  string label = 3;
+  bool show_controls = 4;
+  bool default_hidden = 5;
+  sint32 priority = 6;
+  sint32 z_index = 7;
+  bool nameplate_enabled = 8;
+  bool nameplate_show_heads = 9;
+  string nameplate_heads_url = 10;
+  bool nameplate_show_armor = 11;
+  bool nameplate_show_health = 12;
+  bool hide_invisible = 13;
+  bool hide_spectators = 14;
+  bool hide_map_invisibility_equipment = 15;
+  bool use_display_names = 16;
+}
+
+message ZoomSettings {
+  sint32 max = 1;
+  sint32 def = 2;
+  sint32 extra = 3;
+}
+
 message World {
   WorldIdentity identity = 1;
   string display_name = 2;
-  string dimension = 3;
-  sint32 min_y = 4;
-  sint32 max_y = 5;
-  bool ceiling = 6;
+  string icon = 3;
+  sint32 order = 4;
+  string environment = 5;
+  bool enabled = 6;
+  Spawn spawn = 7;
+  PlayerTrackerSettings player_tracker = 8;
+  ZoomSettings zoom = 9;
+  uint32 marker_update_interval = 10;
+  uint32 tiles_update_interval = 11;
+  sint32 min_y = 12;
+  sint32 max_y = 13;
+  bool ceiling = 14;
+  WorldSettings settings = 15;
 }
 
 message WorldUpsert {
@@ -198,27 +362,97 @@ message WorldStateReplace {
 message Player {
   bytes uuid = 1;
   string name = 2;
-  sint32 x = 3;
-  sint32 y = 4;
-  sint32 z = 5;
-  float yaw = 6;
-  bool hidden = 7;
+  optional sint32 x = 3;
+  optional sint32 y = 4;
+  optional sint32 z = 5;
+  optional sint32 yaw = 6;
+  optional string display_name = 7;
+  WorldIdentity world = 8;
+  optional uint32 armor = 9;
+  optional uint32 health = 10;
 }
 
 message PlayersReplace {
   uint64 revision = 1;
   repeated Player players = 2;
+  uint32 max_players = 3;
+}
+
+message Point {
+  double x = 1;
+  double z = 2;
+}
+
+message MarkerStyle {
+  bool stroke = 1;
+  string stroke_color = 2;
+  uint32 stroke_weight = 3;
+  double stroke_opacity = 4;
+  bool fill = 5;
+  optional string fill_color = 6;
+  double fill_opacity = 7;
+  string fill_rule = 8;
+}
+
+message MarkerTooltip {
+  optional string click = 1;
+  optional string hover = 2;
+}
+
+message MarkerIcon {
+  Point point = 1;
+  Point tooltip_anchor = 2;
+  Point anchor = 3;
+  string image = 4;
+  sint32 size_x = 5;
+  sint32 size_z = 6;
+}
+
+message MarkerCircle {
+  Point center = 1;
+  double radius = 2;
+}
+
+message MarkerEllipse {
+  Point center = 1;
+  double radius_x = 2;
+  double radius_z = 3;
+}
+
+message MarkerRectangle {
+  Point point1 = 1;
+  Point point2 = 2;
+}
+
+message MarkerPolyline {
+  repeated PointList lines = 1;
+}
+
+message PointList {
+  repeated Point points = 1;
+}
+
+message MarkerPolygon {
+  repeated Point main_polygon = 1;
+  repeated PointList negative_space = 2;
+}
+
+message MarkerMultiPolygon {
+  repeated MarkerPolygon polygons = 1;
 }
 
 message Marker {
-  string id = 1;
-  WorldIdentity world = 2;
-  string label = 3;
-  sint32 x = 4;
-  sint32 y = 5;
-  sint32 z = 6;
-  string icon = 7;
-  bool visible = 8;
+  MarkerStyle style = 1;
+  MarkerTooltip tooltip = 2;
+  oneof geometry {
+    MarkerIcon icon = 10;
+    MarkerCircle circle = 11;
+    MarkerEllipse ellipse = 12;
+    MarkerRectangle rectangle = 13;
+    MarkerPolyline polyline = 14;
+    MarkerPolygon polygon = 15;
+    MarkerMultiPolygon multi_polygon = 16;
+  }
 }
 
 message MarkerLayer {
@@ -226,11 +460,16 @@ message MarkerLayer {
   string label = 2;
   repeated Marker markers = 3;
   bool visible = 4;
+  bool show_controls = 5;
+  bool default_hidden = 6;
+  sint32 layer_priority = 7;
+  sint32 z_index = 8;
 }
 
 message MarkerLayersReplace {
   uint64 revision = 1;
   repeated MarkerLayer layers = 2;
+  WorldIdentity world = 3;
 }
 
 message Icon {
@@ -286,6 +525,11 @@ message Heightmap {
   repeated sint32 heights = 1;
 }
 
+message ChunkSnapshotBody {
+  repeated ChunkSection sections = 1;
+  Heightmap surface_heightmap = 2;
+}
+
 message ChunkSnapshot {
   WorldIdentity world = 1;
   ChunkCoordinate coordinate = 2;
@@ -293,11 +537,11 @@ message ChunkSnapshot {
   sint32 max_y = 4;
   bool ceiling = 5;
   uint64 revision = 6;
-  repeated ChunkSection sections = 7;
-  Heightmap surface_heightmap = 8;
-  uint32 uncompressed_bytes = 9;
-  uint32 crc32c = 10;
-  bytes compressed_payload = 11;
+  uint32 uncompressed_length = 7;
+  uint32 crc32c = 8;
+  // zstd-compressed serialization of ChunkSnapshotBody. The length and CRC32C
+  // cover the uncompressed serialized ChunkSnapshotBody bytes.
+  bytes compressed_body = 9;
 }
 
 enum ChunkMissingReason {
