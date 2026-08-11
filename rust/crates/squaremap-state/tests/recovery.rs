@@ -249,6 +249,70 @@ async fn render_job_update_and_legacy_import_are_atomic_strict_idempotent_and_re
 }
 
 #[tokio::test]
+async fn legacy_import_preserves_unowned_zero_progress_resume_jobs() {
+    let dir = tempdir().unwrap();
+    let files = dir.path().join("world");
+    fs::create_dir_all(&files).unwrap();
+    fs::write(files.join("dirty_chunks.json"), br#"[]"#).unwrap();
+    fs::write(files.join("resume_render.json"), br#"[[{"x":1,"z":2},true]]"#).unwrap();
+    let repository = Repository::open(dir.path().join("state.sqlite")).await.unwrap();
+    let world = world(1);
+    repository.apply_world(world.clone()).await.unwrap();
+    let mut live = RenderJob::new(world.id(), JobKind::Resume, b"live-zero".to_vec());
+    live.state = JobState::Resumable;
+    repository.create_render_job(live.clone()).await.unwrap();
+    repository.import_legacy_state(&world.id(), &files).await.unwrap();
+    fs::write(files.join("resume_render.json"), br#"[[{"x":9,"z":9},false]]"#).unwrap();
+    repository.import_legacy_state(&world.id(), &files).await.unwrap();
+    let recovered = repository.recover().await.unwrap();
+    assert_eq!(recovered.jobs[0].payload, b"live-zero");
+    assert_eq!(recovered.jobs[0].completed_chunks, 0);
+}
+
+#[tokio::test]
+async fn render_job_updates_cannot_resurrect_terminal_state_or_reduce_progress() {
+    let dir = tempdir().unwrap();
+    let repository = Repository::open(dir.path().join("state.sqlite")).await.unwrap();
+    let world = world(1);
+    repository.apply_world(world.clone()).await.unwrap();
+    let mut job = RenderJob::new(world.id(), JobKind::Full, b"job".to_vec());
+    job.state = JobState::Running;
+    job.completed_chunks = 5;
+    repository.create_render_job(job.clone()).await.unwrap();
+    let mut reduced = job.clone();
+    reduced.completed_chunks = 3;
+    assert!(repository.update_render_job(reduced).await.is_err());
+    let mut terminal = job.clone();
+    terminal.state = JobState::Completed;
+    repository.update_render_job(terminal.clone()).await.unwrap();
+    let mut resurrected = terminal.clone();
+    resurrected.state = JobState::Running;
+    assert!(repository.update_render_job(resurrected).await.is_err());
+}
+
+#[tokio::test]
+async fn malformed_legacy_marker_hash_is_rejected_without_mutation() {
+    let dir = tempdir().unwrap();
+    let files = dir.path().join("world");
+    let db = dir.path().join("state.sqlite");
+    fs::create_dir_all(&files).unwrap();
+    fs::write(files.join("dirty_chunks.json"), br#"[{"x":1,"z":2}]"#).unwrap();
+    fs::write(files.join("resume_render.json"), br#"[[{"x":3,"z":4},true]]"#).unwrap();
+    let repository = Repository::open(&db).await.unwrap();
+    let world = world(1);
+    repository.apply_world(world.clone()).await.unwrap();
+    repository.import_legacy_state(&world.id(), &files).await.unwrap();
+    drop(repository);
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection.execute("UPDATE legacy_imports SET content_sha256=?1", [vec![1_u8]]).unwrap();
+    drop(connection);
+    let repository = Repository::open(&db).await.unwrap();
+    let before = repository.recover().await.unwrap();
+    assert!(repository.import_legacy_state(&world.id(), &files).await.is_err());
+    assert_eq!(repository.recover().await.unwrap(), before);
+}
+
+#[tokio::test]
 async fn conflicting_job_ids_and_malformed_recovered_blobs_are_rejected() {
     let dir = tempdir().unwrap();
     let db = dir.path().join("state.sqlite");

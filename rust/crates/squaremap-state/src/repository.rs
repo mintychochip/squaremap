@@ -171,8 +171,15 @@ impl Repository {
         self.blocking(move |connection| {
             let transaction = connection.transaction()?;
             ensure_current_world(&transaction, &job.world)?;
-            let changed = transaction.execute("UPDATE render_jobs SET state=?1,payload=?2,completed_chunks=?3 WHERE id=?4 AND namespace=?5 AND value=?6 AND epoch=?7", params![job.state as i64, job.payload, job.completed_chunks as i64, job.id, job.world.namespace, job.world.value, job.world.epoch as i64])?;
-            if changed == 0 { return Err(RepositoryError::Schema("render job does not exist".into())); }
+            let existing: Option<(i64, i64, Vec<u8>)> = transaction.query_row("SELECT state,completed_chunks,payload FROM render_jobs WHERE id=?1 AND namespace=?2 AND value=?3 AND epoch=?4", params![job.id, job.world.namespace, job.world.value, job.world.epoch as i64], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
+            let Some((state, progress, payload)) = existing else { return Err(RepositoryError::Schema("render job does not exist".into())); };
+            if decode_state(state).is_err() || progress < 0 || payload.len() > MAX_PAYLOAD_BYTES { return Err(RepositoryError::Schema("existing render job row is malformed".into())); }
+            let exact = state == job.state as i64 && progress == job.completed_chunks as i64 && payload == job.payload;
+            if (state == JobState::Completed as i64 || state == JobState::Failed as i64) && !exact { return Err(RepositoryError::Schema("terminal render job cannot be changed".into())); }
+            if (job.completed_chunks as i64) < progress { return Err(RepositoryError::Schema("render job progress cannot decrease".into())); }
+            if exact { transaction.commit()?; return Ok(()); }
+            transaction.execute("DELETE FROM legacy_imports WHERE relative_path=?1", params![legacy_key(&job.world, "resume_render.payload.sha256")])?;
+            transaction.execute("UPDATE render_jobs SET state=?1,payload=?2,completed_chunks=?3 WHERE id=?4 AND namespace=?5 AND value=?6 AND epoch=?7", params![job.state as i64, job.payload, job.completed_chunks as i64, job.id, job.world.namespace, job.world.value, job.world.epoch as i64])?;
             transaction.commit()?;
             Ok(())
         }).await
@@ -207,18 +214,16 @@ impl Repository {
 fn open_connection(path: &Path) -> Result<Connection, RepositoryError> {
     if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
     let existed_nonempty = std::fs::metadata(path).map(|metadata| metadata.len() != 0).unwrap_or(false);
-    let connection = Connection::open(path)?;
+    let mut connection = Connection::open(path)?;
     let object_count: i64 = connection.query_row("SELECT count(*) FROM sqlite_master WHERE type IN ('table','index','trigger','view') AND name NOT LIKE 'sqlite_%'", [], |row| row.get(0))?;
     let application_id: i64 = connection.query_row("PRAGMA application_id", [], |row| row.get(0))?;
     if object_count == 0 {
         if existed_nonempty { return Err(RepositoryError::Schema("nonempty database has no supported schema".into())); }
         if application_id != 0 && application_id != APPLICATION_ID { return Err(RepositoryError::Schema("wrong application ID".into())); }
-        connection.execute_batch("PRAGMA application_id=0x53514D50; BEGIN IMMEDIATE;")?;
-        if let Err(error) = connection.execute_batch(SCHEMA) {
-            let _ = connection.execute_batch("ROLLBACK");
-            return Err(error.into());
-        }
-        connection.execute_batch("COMMIT;")?;
+        let transaction = connection.transaction()?;
+        transaction.execute_batch("PRAGMA application_id=0x53514D50;")?;
+        transaction.execute_batch(SCHEMA)?;
+        transaction.commit()?;
     } else {
         if application_id != APPLICATION_ID { return Err(RepositoryError::Schema("wrong application ID".into())); }
         validate_schema(&connection)?;
@@ -351,6 +356,16 @@ fn import_parsed(connection: &mut Connection, world: &WorldId, parsed: &ParsedLe
     for file in parsed.files() {
         let relative_path = legacy_key(world, &file.relative_path);
         let prior: Option<Vec<u8>> = transaction.query_row("SELECT content_sha256 FROM legacy_imports WHERE relative_path=?1", params![relative_path], |row| row.get(0)).optional()?;
+        if let Some(hash) = &prior {
+            if hash.len() != 32 { return Err(RepositoryError::Schema("legacy marker hash must be exactly 32 bytes".into())); }
+        }
+        if file.relative_path.ends_with("resume_render.json") {
+            let ownership_key = legacy_key(world, "resume_render.payload.sha256");
+            let ownership: Option<Vec<u8>> = transaction.query_row("SELECT content_sha256 FROM legacy_imports WHERE relative_path=?1", params![ownership_key], |row| row.get(0)).optional()?;
+            if let Some(hash) = ownership {
+                if hash.len() != 32 { return Err(RepositoryError::Schema("legacy ownership hash must be exactly 32 bytes".into())); }
+            }
+        }
         if prior.as_deref() == Some(file.sha256.as_slice()) { continue; }
         if file.relative_path.ends_with("dirty_chunks.json") {
             for coordinate in &parsed.dirty {
@@ -358,10 +373,33 @@ fn import_parsed(connection: &mut Connection, world: &WorldId, parsed: &ParsedLe
             }
         } else {
             let payload = parsed.resume_payload.clone().unwrap_or_default();
+            let mut payload_hash = Sha256::new();
+            payload_hash.update(&payload);
+            let payload_hash = payload_hash.finalize().to_vec();
             let id = deterministic_job_id(world, JobKind::Resume);
-            transaction.execute("INSERT INTO render_jobs(id,namespace,value,epoch,kind,state,payload,completed_chunks) VALUES(?1,?2,?3,?4,?5,?6,?7,0) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,state=excluded.state,completed_chunks=0 WHERE render_jobs.state=?8 AND render_jobs.completed_chunks=0", params![id, world.namespace, world.value, epoch, JobKind::Resume as i64, JobState::Resumable as i64, payload, JobState::Resumable as i64])?;
+            let ownership_key = legacy_key(world, "resume_render.payload.sha256");
+            let ownership: Option<Vec<u8>> = transaction.query_row("SELECT content_sha256 FROM legacy_imports WHERE relative_path=?1", params![ownership_key], |row| row.get(0)).optional()?;
+            if let Some(hash) = &ownership {
+                if hash.len() != 32 { return Err(RepositoryError::Schema("legacy ownership hash must be exactly 32 bytes".into())); }
+            }
+            let existing: Option<(i64, Vec<u8>, i64)> = transaction.query_row("SELECT state,payload,completed_chunks FROM render_jobs WHERE id=?1", params![id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
+            match existing {
+                None => {
+                    transaction.execute("INSERT INTO render_jobs(id,namespace,value,epoch,kind,state,payload,completed_chunks) VALUES(?1,?2,?3,?4,?5,?6,?7,0)", params![id, world.namespace, world.value, epoch, JobKind::Resume as i64, JobState::Resumable as i64, payload])?;
+                    transaction.execute("INSERT INTO legacy_imports(relative_path,content_sha256,imported_at_epoch_seconds) VALUES(?1,?2,?3) ON CONFLICT(relative_path) DO UPDATE SET content_sha256=excluded.content_sha256,imported_at_epoch_seconds=excluded.imported_at_epoch_seconds", params![ownership_key, payload_hash, now])?;
+                }
+                Some((state, current_payload, progress)) => {
+                    let mut current_hash = Sha256::new();
+                    current_hash.update(&current_payload);
+                    let owned_and_untouched = ownership.as_deref() == Some(current_hash.finalize().as_slice()) && state == JobState::Resumable as i64 && progress == 0;
+                    if owned_and_untouched {
+                        transaction.execute("UPDATE render_jobs SET payload=?1,state=?2,completed_chunks=0 WHERE id=?3", params![payload, JobState::Resumable as i64, id])?;
+                        transaction.execute("INSERT INTO legacy_imports(relative_path,content_sha256,imported_at_epoch_seconds) VALUES(?1,?2,?3) ON CONFLICT(relative_path) DO UPDATE SET content_sha256=excluded.content_sha256,imported_at_epoch_seconds=excluded.imported_at_epoch_seconds", params![ownership_key, payload_hash, now])?;
+                    }
+                }
+            }
         }
-        transaction.execute("INSERT INTO legacy_imports(relative_path,content_sha256,imported_at_epoch_seconds) VALUES(?1,?2,?3) ON CONFLICT(relative_path) DO UPDATE SET content_sha256=excluded.content_sha256, imported_at_epoch_seconds=excluded.imported_at_epoch_seconds", params![relative_path, file.sha256, now])?;
+        transaction.execute("INSERT INTO legacy_imports(relative_path,content_sha256,imported_at_epoch_seconds) VALUES(?1,?2,?3) ON CONFLICT(relative_path) DO UPDATE SET content_sha256=excluded.content_sha256,imported_at_epoch_seconds=excluded.imported_at_epoch_seconds", params![relative_path, file.sha256, now])?;
     }
     transaction.commit()?;
     Ok(())
