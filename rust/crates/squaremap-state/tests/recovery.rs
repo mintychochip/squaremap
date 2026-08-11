@@ -270,6 +270,29 @@ async fn legacy_import_preserves_unowned_zero_progress_resume_jobs() {
 }
 
 #[tokio::test]
+async fn unrelated_full_job_update_does_not_clear_resume_ownership() {
+    let dir = tempdir().unwrap();
+    let files = dir.path().join("world");
+    fs::create_dir_all(&files).unwrap();
+    fs::write(files.join("dirty_chunks.json"), br#"[]"#).unwrap();
+    fs::write(files.join("resume_render.json"), br#"[[{"x":1,"z":2},true]]"#).unwrap();
+    let repository = Repository::open(dir.path().join("state.sqlite")).await.unwrap();
+    let world = world(1);
+    repository.apply_world(world.clone()).await.unwrap();
+    repository.import_legacy_state(&world.id(), &files).await.unwrap();
+    let mut full = RenderJob::new(world.id(), JobKind::Full, b"full".to_vec());
+    full.state = JobState::Running;
+    repository.create_render_job(full.clone()).await.unwrap();
+    full.payload = b"full-live".to_vec();
+    repository.update_render_job(full).await.unwrap();
+    fs::write(files.join("resume_render.json"), br#"[[{"x":9,"z":9},false]]"#).unwrap();
+    repository.import_legacy_state(&world.id(), &files).await.unwrap();
+    let recovered = repository.recover().await.unwrap();
+    let resume = recovered.jobs.iter().find(|job| job.kind == JobKind::Resume).unwrap();
+    assert_eq!(resume.payload, br#"[[{"x":9,"z":9},false]]"#);
+}
+
+#[tokio::test]
 async fn render_job_updates_cannot_resurrect_terminal_state_or_reduce_progress() {
     let dir = tempdir().unwrap();
     let repository = Repository::open(dir.path().join("state.sqlite")).await.unwrap();
@@ -288,6 +311,28 @@ async fn render_job_updates_cannot_resurrect_terminal_state_or_reduce_progress()
     let mut resurrected = terminal.clone();
     resurrected.state = JobState::Running;
     assert!(repository.update_render_job(resurrected).await.is_err());
+}
+
+#[tokio::test]
+async fn oversized_legacy_marker_hash_is_rejected_without_mutation() {
+    let dir = tempdir().unwrap();
+    let files = dir.path().join("world");
+    let db = dir.path().join("state.sqlite");
+    fs::create_dir_all(&files).unwrap();
+    fs::write(files.join("dirty_chunks.json"), br#"[]"#).unwrap();
+    fs::write(files.join("resume_render.json"), br#"[[{"x":3,"z":4},true]]"#).unwrap();
+    let repository = Repository::open(&db).await.unwrap();
+    let world = world(1);
+    repository.apply_world(world.clone()).await.unwrap();
+    repository.import_legacy_state(&world.id(), &files).await.unwrap();
+    drop(repository);
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection.execute("UPDATE legacy_imports SET content_sha256=zeroblob(?1)", [17 * 1024 * 1024_i64]).unwrap();
+    drop(connection);
+    let repository = Repository::open(&db).await.unwrap();
+    let before = repository.recover().await.unwrap();
+    assert!(repository.import_legacy_state(&world.id(), &files).await.is_err());
+    assert_eq!(repository.recover().await.unwrap(), before);
 }
 
 #[tokio::test]

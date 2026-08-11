@@ -14,9 +14,9 @@ After implementation, the required recovery command passed:
 
 ```text
 $ cargo test --manifest-path rust/Cargo.toml -p squaremap-state --test recovery
-running 13 tests
-.............
-test result: ok. 13 passed; 0 failed
+running 15 tests
+...............
+test result: ok. 15 passed; 0 failed
 ```
 
 The session integration was exercised with the specifically permitted focused suite:
@@ -41,7 +41,8 @@ No formatter, linter, or project-wide test suite was run.
 
 ## Self-review
 
-- Review regressions were first run against commit `064c207` before implementation: the expanded recovery suite ran 13 tests and failed 3 (unowned zero-progress live resume overwrite, terminal/progress update, and malformed marker hash). After the fixes, the same recovery suite passed 13/13, and the focused session suite passed 12/12.
-- Review-fix self-review: existing malformed databases are structurally validated before WAL; removal tombstones preserve highest epochs; importer parsing and hashing execute in the pre-permitted blocking closure with confinement and hard read bounds; recovery validates all returned blobs, IDs, text, and numbers; dirty/checkpoint and durable-before-Ack paths remain unchanged.
+- Review regressions were first run against commit `064c207`: 13 tests ran and 3 failed; after those fixes recovery passed 13/13 and session passed 12/12.
+- Final follow-up RED was run against commit `4061bc5` with the corrected unrelated-Full regression: 15 tests ran and 1 failed before implementation. After the fixes, recovery passed 15/15 and `session_ordering` passed 12/12.
+- Final self-review: render ownership is cleared only for the deterministic Resume job, marker lookups read only SQLite length plus a 33-byte prefix into a fixed array, and all prior/ownership marker paths use the bounded helper.
 
 Atomic task commit: this commit; SHA recorded externally
