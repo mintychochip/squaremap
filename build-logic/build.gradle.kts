@@ -20,4 +20,9 @@ dependencies {
   implementation(libs.mod.publish.plugin)
   implementation(libs.loom)
   implementation(libs.paperweightUserdev)
+  testImplementation(kotlin("test-junit5"))
+}
+
+tasks.test {
+  useJUnitPlatform()
 }
