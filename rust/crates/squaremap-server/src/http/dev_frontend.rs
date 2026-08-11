@@ -49,14 +49,14 @@ impl DevFrontend {
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                let line = if line.len() > 16 * 1024 { line[..16 * 1024].to_owned() } else { line };
+                let line = bound_line(line);
                 if stdout_sender.send(line).await.is_err() { break; }
             }
         });
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                let line = if line.len() > 16 * 1024 { line[..16 * 1024].to_owned() } else { line };
+                let line = bound_line(line);
                 if sender.send(line).await.is_err() { break; }
             }
         });
@@ -76,8 +76,10 @@ impl DevFrontend {
                     return Err(std::io::Error::other("frontend exited before readiness"));
                 }
                 Err(_) => {
-                    terminate(&mut child).await;
-                    return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "frontend URL readiness timeout"));
+                    if Instant::now() >= deadline {
+                        terminate(&mut child).await;
+                        return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "frontend URL readiness timeout"));
+                    }
                 }
             }
             if let Ok(Some(_)) = child.try_wait() {
@@ -85,6 +87,10 @@ impl DevFrontend {
                 return Err(std::io::Error::other("frontend exited before readiness"));
             }
         };
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        if let Ok(Some(_)) = child.try_wait() {
+            return Err(std::io::Error::other("frontend exited immediately after readiness"));
+        }
         let inner = Arc::new(Inner { child: Mutex::new(child), upstream, tunnels: Mutex::new(Vec::new()) });
         Ok(Self { inner })
     }
@@ -159,7 +165,9 @@ impl DevFrontend {
                 }
             }
         });
-        self.inner.tunnels.lock().await.push(handle);
+        let mut tunnels = self.inner.tunnels.lock().await;
+        tunnels.retain(|handle| !handle.is_finished());
+        tunnels.push(handle);
         let mut headers = HeaderMap::new();
         headers.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
         headers.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
@@ -175,32 +183,36 @@ impl DevFrontend {
         terminate(&mut child).await;
     }
 }
-
-
 fn find_loopback_url(line: &str) -> Option<String> {
     let clean = strip_ansi(line);
-    for scheme in ["http://", "https://"] {
-        let Some(start) = clean.find(scheme) else { continue };
-        let rest = &clean[start..];
-        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-        let candidate = rest[..end].trim_end_matches('/');
-        let parsed = reqwest::Url::parse(candidate).ok()?;
-        let host = parsed.host_str()?;
+    for token in clean.split_whitespace() {
+        let candidate = token.trim_matches(|character: char| ",;()[]{}".contains(character)).trim_end_matches('/');
+        let parsed = match reqwest::Url::parse(candidate) { Ok(parsed) => parsed, Err(_) => continue };
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.port().is_none() { continue; }
+        let host = match parsed.host_str() { Some(host) => host, None => continue };
         let loopback = host.parse::<IpAddr>().map(|ip| ip.is_loopback()).unwrap_or_else(|_| host.eq_ignore_ascii_case("localhost"));
-        if loopback && parsed.port().is_some() { return Some(candidate.to_owned()); }
+        if loopback { return Some(candidate.to_owned()); }
     }
     None
 }
 
+fn bound_line(line: String) -> String {
+    const LIMIT: usize = 16 * 1024;
+    if line.len() <= LIMIT { return line; }
+    let mut end = LIMIT;
+    while end > 0 && !line.is_char_boundary(end) { end -= 1; }
+    line[..end].to_owned()
+}
+
 fn strip_ansi(value: &str) -> String {
     let mut result = String::with_capacity(value.len());
-    let mut bytes = value.bytes();
-    while let Some(byte) = bytes.next() {
-        if byte == 0x1b {
-            if bytes.next() == Some(b'[') {
-                for byte in bytes.by_ref() { if (b'@'..=b'~').contains(&byte) { break; } }
+    let mut chars = value.chars();
+    while let Some(character) = chars.next() {
+        if character == '\u{1b}' {
+            if chars.next() == Some('[') {
+                for character in chars.by_ref() { if ('@'..='~').contains(&character) { break; } }
             }
-        } else { result.push(byte as char); }
+        } else { result.push(character); }
     }
     result
 }

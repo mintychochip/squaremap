@@ -26,7 +26,7 @@ impl HttpConfig {
 pub struct HttpServer {
     addr: Option<SocketAddr>,
     stop: Option<oneshot::Sender<()>>,
-    task: Option<tokio::task::JoinHandle<()>>,
+    task: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
     dev: Option<dev_frontend::DevFrontend>,
 }
 
@@ -46,13 +46,18 @@ impl HttpServer {
                 return Err(error);
             }
         };
-        let addr = listener.local_addr()?;
+        let addr = match listener.local_addr() {
+            Ok(addr) => addr,
+            Err(error) => {
+                if let Some(dev) = dev { dev.shutdown().await; }
+                return Err(error);
+            }
+        };
         let (stop_tx, stop_rx) = oneshot::channel();
         let state = Arc::new(AppState { root, dev: dev.as_ref().map(|frontend| frontend.clone()) });
         let router = Router::new().fallback(handle_request).with_state(state);
         let task = tokio::spawn(async move {
-            let result = axum::serve(listener, router).with_graceful_shutdown(async { let _ = stop_rx.await; }).await;
-            let _ = result;
+            axum::serve(listener, router).with_graceful_shutdown(async { let _ = stop_rx.await; }).await.map_err(std::io::Error::other)
         });
         Ok(Self { addr: Some(addr), stop: Some(stop_tx), task: Some(task), dev })
     }
@@ -60,9 +65,14 @@ impl HttpServer {
     pub fn local_addr(&self) -> Option<SocketAddr> { self.addr }
 
     pub async fn shutdown(&mut self) -> std::io::Result<()> {
-        if let Some(stop) = self.stop.take() { let _ = stop.send(()); }
-        if let Some(task) = self.task.take() { let _ = task.await; }
         if let Some(dev) = self.dev.take() { dev.shutdown().await; }
+        if let Some(stop) = self.stop.take() { let _ = stop.send(()); }
+        if let Some(mut task) = self.task.take() {
+            match tokio::time::timeout(std::time::Duration::from_millis(500), &mut task).await {
+                Ok(result) => result.map_err(std::io::Error::other)??,
+                Err(_) => { task.abort(); let _ = task.await; }
+            }
+        }
         Ok(())
     }
 }

@@ -31,7 +31,8 @@ impl OutputRoot {
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "output root is not a directory"));
         }
-        let root_dir = Arc::new(File::open(&root)?);
+        cleanup_stale(&root)?;
+        let root_dir = Arc::new(open_root_handle(&root)?);
         Ok(Self { root, root_dir, writes: Arc::new(Mutex::new(())) })
     }
 
@@ -84,7 +85,7 @@ impl OutputRoot {
                 let fd = unsafe { libc::openat(parent.as_raw_fd(), temp_c.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW, 0o600) };
                 if fd < 0 { return Err(io::Error::last_os_error()); }
                 let mut file = unsafe { File::from_raw_fd(fd) };
-                let result = (|| { file.write_all(bytes)?; file.flush()?; file.sync_all()?; let rc = unsafe { libc::renameat(parent.as_raw_fd(), temp_c.as_ptr(), parent.as_raw_fd(), target_c.as_ptr()) }; if rc != 0 { return Err(io::Error::last_os_error()); } unsafe { libc::fsync(parent.as_raw_fd()) }; Ok(()) })();
+                let result = (|| { file.write_all(bytes)?; file.flush()?; file.sync_all()?; let rc = unsafe { libc::renameat(parent.as_raw_fd(), temp_c.as_ptr(), parent.as_raw_fd(), target_c.as_ptr()) }; if rc != 0 { return Err(io::Error::last_os_error()); } if unsafe { libc::fsync(parent.as_raw_fd()) } != 0 { return Err(io::Error::last_os_error()); } Ok(()) })();
                 if result.is_err() { unsafe { libc::unlinkat(parent.as_raw_fd(), temp_c.as_ptr(), 0); } }
                 return result;
             }
@@ -176,6 +177,30 @@ impl OutputRoot {
         Ok(current)
     }
 }
+#[cfg(unix)]
+fn open_root_handle(root: &Path) -> io::Result<File> {
+    let path = std::ffi::CString::new(root.as_os_str().as_encoded_bytes()).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL root"))?;
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW) };
+    if fd < 0 { return Err(io::Error::last_os_error()); }
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+#[cfg(not(unix))]
+fn open_root_handle(root: &Path) -> io::Result<File> { File::open(root) }
+fn cleanup_stale(directory: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() { continue; }
+        if metadata.is_dir() {
+            cleanup_stale(&path)?;
+        } else if path.file_name().is_some_and(|name| name.to_string_lossy().starts_with(".squaremap-")) {
+            let _ = fs::remove_file(path);
+        }
+    }
+    Ok(())
+}
 pub(crate) fn validate_relative(path: &Path) -> io::Result<PathBuf> {
     if path.as_os_str().to_string_lossy().contains('\\') {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "backslash path"));
@@ -200,9 +225,14 @@ pub(crate) fn validate_relative(path: &Path) -> io::Result<PathBuf> {
 fn replace_file(temp: &Path, target: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
-        // Windows rename is not replace-existing. Remove only a previously validated regular target.
-        if target.exists() { fs::remove_file(target)?; }
+        use std::os::windows::ffi::OsStrExt;
+        let temp: Vec<u16> = temp.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let target: Vec<u16> = target.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let result = unsafe { windows_sys::Win32::Storage::FileSystem::MoveFileExW(temp.as_ptr(), target.as_ptr(), windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH) };
+        if result == 0 { return Err(io::Error::last_os_error()); }
+        return Ok(());
     }
+    #[cfg(not(windows))]
     fs::rename(temp, target)
 }
 

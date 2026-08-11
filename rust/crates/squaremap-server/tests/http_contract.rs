@@ -81,7 +81,21 @@ fn atomic_writes_are_root_confined() {
     for path in ["../escape", "/tmp/escape", "nested/../escape", "nested\\escape", "nested/a\0b"] {
         assert!(root.atomic_write(path, b"bad").is_err(), "{path:?}");
     }
+
     assert!(dir.path().join("nested").read_dir().unwrap().all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with('.')));
+}
+#[test]
+fn removes_stale_temp_siblings_recursively() {
+    let dir = tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("nested")).unwrap();
+    std::fs::write(dir.path().join(".squaremap-old"), b"old").unwrap();
+    std::fs::write(dir.path().join("nested/.squaremap-old"), b"old").unwrap();
+    std::fs::write(dir.path().join("keep"), b"keep").unwrap();
+    let root = OutputRoot::new(dir.path()).unwrap();
+    assert!(!dir.path().join(".squaremap-old").exists());
+    assert!(!dir.path().join("nested/.squaremap-old").exists());
+    assert!(dir.path().join("keep").exists());
+    root.atomic_write("nested/file", b"new").unwrap();
 }
 
 #[tokio::test]

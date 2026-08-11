@@ -19,7 +19,7 @@ fn executable(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
 #[cfg(unix)]
 #[tokio::test]
 async fn rejects_non_loopback_and_early_exit() {
-    let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+    let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let dir = tempdir().unwrap();
     let root = OutputRoot::new(dir.path()).unwrap();
     let fake = executable(dir.path(), "printf '\\033[31mhttp://192.0.2.1:1\\033[0m\\n'");
@@ -39,7 +39,7 @@ async fn rejects_non_loopback_and_early_exit() {
 #[tokio::test]
 async fn readiness_timeout_reaps_fake_process() {
     let dir = tempdir().unwrap();
-    let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+    let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let root = OutputRoot::new(dir.path()).unwrap();
     let fake = executable(dir.path(), "sleep 10");
     let config = HttpConfig {
@@ -56,9 +56,39 @@ async fn readiness_timeout_reaps_fake_process() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn scans_multiple_candidates_and_delayed_readiness() {
+    let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let dir = tempdir().unwrap();
+    let root = OutputRoot::new(dir.path()).unwrap();
+    let fake = executable(dir.path(), "sleep 0.1; printf 'http://192.0.2.1:1 http://127.0.0.1:9\\n'; sleep 10");
+    let config = HttpConfig { bind: "127.0.0.1:0".parse().unwrap(), enabled: true, dev_frontend: Some(DevFrontendConfig { frontend_dir: dir.path().to_owned(), executable: fake, startup_timeout: Duration::from_secs(1) }) };
+    let mut server = HttpServer::bind(config, root).await.unwrap();
+    server.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn rejects_immediate_exit_after_url_and_multibyte_logs() {
+    let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let dir = tempdir().unwrap();
+    let root = OutputRoot::new(dir.path()).unwrap();
+    let fake = executable(dir.path(), "printf 'http://127.0.0.1:9\\n'; exit 0");
+    let config = HttpConfig { bind: "127.0.0.1:0".parse().unwrap(), enabled: true, dev_frontend: Some(DevFrontendConfig { frontend_dir: dir.path().to_owned(), executable: fake, startup_timeout: Duration::from_secs(1) }) };
+    assert!(HttpServer::bind(config, root).await.is_err());
+    let dir = tempdir().unwrap();
+    let root = OutputRoot::new(dir.path()).unwrap();
+    let long_line = "é".repeat(9000);
+    let fake = executable(dir.path(), &format!("printf '{}\\nhttp://127.0.0.1:9\\n'; sleep 10", long_line));
+    let config = HttpConfig { bind: "127.0.0.1:0".parse().unwrap(), enabled: true, dev_frontend: Some(DevFrontendConfig { frontend_dir: dir.path().to_owned(), executable: fake, startup_timeout: Duration::from_secs(1) }) };
+    let mut server = HttpServer::bind(config, root).await.unwrap();
+    server.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn proxies_http_and_keeps_excluded_paths_local() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+    let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let upstream = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let upstream_addr = upstream.local_addr().unwrap();
     let upstream_task = tokio::spawn(async move {
@@ -104,7 +134,7 @@ async fn proxies_http_and_keeps_excluded_paths_local() {
 #[tokio::test]
 async fn proxies_non_get_body_and_query() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+    let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let upstream = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let upstream_addr = upstream.local_addr().unwrap();
     let upstream_task = tokio::spawn(async move {
@@ -138,9 +168,9 @@ async fn proxies_non_get_body_and_query() {
 #[cfg(unix)]
 #[tokio::test]
 async fn tunnels_websocket_echo() {
-    let _guard = PROCESS_TEST_LOCK.lock().unwrap();
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
+    let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let upstream = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let upstream_addr = upstream.local_addr().unwrap();
     let upstream_task = tokio::spawn(async move {

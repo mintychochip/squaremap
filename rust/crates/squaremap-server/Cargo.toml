@@ -27,3 +27,6 @@ tokio-util = { version = "0.7.16", features = ["io"] }
 libc.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59.0", features = ["Win32_Storage_FileSystem"] }

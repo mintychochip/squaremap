@@ -16,7 +16,7 @@ Focused contract tests now pass:
 
 ```text
 cargo test --manifest-path rust/Cargo.toml -p squaremap-server --test http_contract --test dev_frontend
-cargo test: 10 passed (2 suites, 15 warnings; existing protocol/session warnings only)
+cargo test: 13 passed (2 suites, 15 warnings; existing protocol/session warnings only)
 ```
 
 The tests cover static index/JSON/PNG responses, GET/HEAD, explicit MIME and length headers, quoted/weak/wildcard ETags and 304, tile cache headers and missing-PNG behavior, non-tile 404, method/path rejection, root-confined writes, symlink rejection, disabled mode, dev URL rejection/readiness timeout, HTTP POST body/query/status forwarding, HTTP and WebSocket forwarding, and local tile exclusions.
@@ -44,8 +44,8 @@ Fetching `/` returned HTTP 200 and 1952 bytes. Fetching `/tiles/missing.png` ret
 
 Dev startup runs the injected executable exactly as `bun run dev` in the configured frontend directory, merges bounded stdout/stderr line capture, continues draining logs after readiness, accepts only loopback URLs before the configured timeout, tracks and cancels WebSocket tunnels, and terminates the Unix process group on readiness, bind, and shutdown failures. HTTP shutdown is idempotent, stops the listener before the frontend child, and disabled mode never binds.
 
-## Review-fix verification
+## Follow-up review-fix verification
 
-Against `faf3de1`, the new POST and wildcard/weak-validator tests initially reproduced the method-routing and validator failures. The final focused run passed 10 tests. Review fixes add directory-handle `openat`/`renameat` confinement on Unix, streaming proxy/static bodies, `Connection` token filtering, loopback fixture binding, bounded post-readiness log draining, and tracked WebSocket cancellation. Final smoke used `READY http_addr=127.0.0.1:39953`, fetched `/` (1952 bytes) and `/tiles/missing.png` (0 bytes), then SIGTERM exited 0. `--help` remained valid.
+Against `4bbabca`, the added delayed-readiness/multiple-candidate/immediate-exit/UTF-8 and stale-temp regressions first produced genuine RED: delayed readiness timed out at the 50 ms poll and multiple URL candidates were not scanned; immediate child exit was accepted. The final exact focused command passed 13 tests. Final smoke printed `READY http_addr=127.0.0.1:38883`; `/` saved 1952 bytes, `/tiles/missing.png` saved 0 bytes, and SIGTERM exited 0. `--help` remained valid.
 
 Atomic task commit: this commit; SHA recorded externally.
