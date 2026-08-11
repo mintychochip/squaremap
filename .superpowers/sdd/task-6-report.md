@@ -32,7 +32,7 @@ CC_x86_64_pc_windows_gnu=gcc AR_x86_64_pc_windows_gnu=ar cargo check --manifest-
 `--help` remained valid and printed both `bridge` and `serve-fixture` usage. The latest fixture smoke launched `serve-fixture --root web --bind 127.0.0.1:0`; it printed exactly one readiness line:
 
 ```text
-READY http_addr=127.0.0.1:46647
+READY http_addr=127.0.0.1:41921
 ```
 
 Fetching `/` returned HTTP 200 with `Content-Length: 1952`; the process was terminated with SIGTERM and exited 0 after the graceful signal path.
@@ -41,8 +41,8 @@ Fetching `/` returned HTTP 200 with `Content-Length: 1952`; the process was term
 
 - URI percent decoding occurs once; malformed encodings, NUL, backslash, encoded separators, absolute/prefix/current/parent components, and symlink components are rejected.
 - HTTP reads and output writes share `validate_relative` and component checks; reserved owner/temp internals are rejected.
-- Unix output reads/writes traverse directory handles with `openat(..., O_NOFOLLOW)`; Windows uses `cap_std::fs::Dir` capability-relative traversal and same-parent rename; temporary files are exclusive and cleaned on errors.
-- Output roots acquire a cross-platform exclusive owner lock before cleanup, so stale cleanup cannot remove another live writer's temporary file.
+- Unix output roots open stable `/` or `.` anchors and traverse/create each component with `openat`/`mkdirat` and `O_NOFOLLOW`; Windows anchors at the volume/current-directory capability and opens each component with `OPEN_REPARSE_POINT`, validating the opened handle before advancing. HTTP reads and output writes then traverse capability-relative handles; temporary files are exclusive and cleaned on errors.
+- Output roots acquire a cross-platform exclusive owner lock before cleanup; Windows validates the opened lock handle as a non-reparse regular file, so stale cleanup cannot remove another live writer's temporary file.
 - Opened file handles supply metadata used for strong quoted ETags; matching `If-None-Match` returns 304 before body reading.
 - Missing tiles are only synthesized for the exact `tiles` first component and `.png` extension; `/tiles2` is not an exclusion.
 - Proxy bodies use bounded streaming adapters rather than whole-body copies; request/response hop-by-hop filtering parses `Connection` extension tokens and suppresses Host forwarding.
@@ -54,4 +54,4 @@ Dev startup runs the injected executable exactly as `bun run dev` in the configu
 
 ## Final review-fix verification
 
-The final focused command passed 24 tests, the Windows target check passed with the required compiler environment, CLI help remained valid, and fixture smoke printed exactly one readiness line and exited 0 after SIGTERM. The final changes also create the Windows Job Object before spawning the suspended process, assign the Tokio Child raw process handle before resume, and validate opened root attributes.
+The final focused command passed 24 tests, including live-owner reserved-temp rejection and missing-component symlink rejection; the Windows target check and Windows-gated test compilation passed with the required compiler environment; CLI help remained valid; and fixture smoke printed exactly one readiness line and exited 0 after SIGTERM. The final changes also create the Windows Job Object before spawning the suspended process, assign the Tokio Child raw process handle before resume, validate opened root and owner-lock attributes, and eliminate ambient root creation.

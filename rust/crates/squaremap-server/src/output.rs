@@ -35,14 +35,7 @@ impl Clone for OutputRoot {
 impl OutputRoot {
     pub fn new(root: impl AsRef<Path>) -> io::Result<Self> {
         let configured = root.as_ref();
-        let root_dir = match open_root_handle(configured) {
-            Ok(root_dir) => root_dir,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                fs::create_dir_all(configured)?;
-                open_root_handle(configured)?
-            }
-            Err(error) => return Err(error),
-        };
+        let root_dir = open_root_handle(configured)?;
         let display_root = if configured.is_absolute() {
             configured.to_owned()
         } else {
@@ -206,10 +199,45 @@ impl OutputRoot {
 }
 #[cfg(unix)]
 fn open_root_handle(root: &Path) -> io::Result<File> {
-    let path = std::ffi::CString::new(root.as_os_str().as_encoded_bytes()).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL root"))?;
-    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW) };
-    if fd < 0 { return Err(io::Error::last_os_error()); }
-    Ok(unsafe { File::from_raw_fd(fd) })
+    let mut parent = if root.is_absolute() {
+        let path = std::ffi::CString::new("/").unwrap();
+        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+        if fd < 0 { return Err(io::Error::last_os_error()); }
+        unsafe { File::from_raw_fd(fd) }
+    } else {
+        let path = std::ffi::CString::new(".").unwrap();
+        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+        if fd < 0 { return Err(io::Error::last_os_error()); }
+        unsafe { File::from_raw_fd(fd) }
+    };
+    let mut saw_component = false;
+    for component in root.components() {
+        let Component::Normal(name) = component else {
+            match component {
+                Component::RootDir | Component::CurDir => continue,
+                Component::ParentDir | Component::Prefix(_) => return Err(io::Error::new(io::ErrorKind::InvalidInput, "unsafe output root")),
+                Component::Normal(_) => unreachable!(),
+            }
+        };
+        saw_component = true;
+        let name = std::ffi::CString::new(name.as_encoded_bytes()).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL root"))?;
+        let mut fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+        if fd < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::NotFound { return Err(error); }
+            if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o755) } != 0 {
+                let mkdir_error = io::Error::last_os_error();
+                if mkdir_error.kind() != io::ErrorKind::AlreadyExists { return Err(mkdir_error); }
+            }
+            fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+        }
+        if fd < 0 { return Err(io::Error::last_os_error()); }
+        parent = unsafe { File::from_raw_fd(fd) };
+    }
+    if !saw_component && root.as_os_str().is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty output root"));
+    }
+    Ok(parent)
 }
 #[cfg(unix)]
 fn validate_open_root(root: &File) -> io::Result<()> {
@@ -247,14 +275,28 @@ fn open_owner_lock(root: &File) -> io::Result<File> {
 fn open_owner_lock(root: &cap_std::fs::Dir) -> io::Result<File> {
     use cap_std::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
-    if let Ok(metadata) = root.symlink_metadata(".squaremap-owner.lock") {
-        if metadata.file_type().is_symlink() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "owner lock symlink"));
-        }
-    }
     let mut options = cap_std::fs::OpenOptions::new();
     options.read(true).write(true).create(true).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    Ok(root.open_with(".squaremap-owner.lock", &options)?.into_std())
+    let file = root.open_with(".squaremap-owner.lock", &options)?.into_std();
+    validate_windows_regular_file(&file)?;
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn validate_windows_regular_file(file: &File) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+    };
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "owner lock is not a regular file"));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -286,33 +328,74 @@ fn cleanup_stale_dir(directory: &cap_std::fs::Dir) -> io::Result<()> {
 }
 
 #[cfg(windows)]
+fn open_windows_directory(parent: &cap_std::fs::Dir, name: &std::ffi::OsStr) -> io::Result<cap_std::fs::Dir> {
+    use cap_std::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true).custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    let file = parent.open_with(name, &options)?.into_std();
+    validate_windows_directory_handle(&file)?;
+    Ok(cap_std::fs::Dir::from_std_file(file))
+}
+
+#[cfg(windows)]
 fn open_root_handle(root: &Path) -> io::Result<cap_std::fs::Dir> {
-    use std::os::windows::ffi::OsStrExt;
-    use std::os::windows::io::FromRawHandle;
-    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-    use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, GetFileAttributesW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE, INVALID_FILE_ATTRIBUTES, OPEN_EXISTING,
-    };
-    let path: Vec<u16> = root.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-    let attributes = unsafe { GetFileAttributesW(path.as_ptr()) };
-    if attributes == INVALID_FILE_ATTRIBUTES || attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 || attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "output root is not a real directory"));
+    use std::path::Prefix;
+    if root.as_os_str().is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty output root"));
     }
-    let handle = unsafe {
-        CreateFileW(
-            path.as_ptr(),
-            FILE_GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            std::ptr::null(),
-            OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-            std::ptr::null_mut(),
-        )
+    let mut components = root.components().peekable();
+    let mut parent = if root.is_absolute() {
+        let Some(Component::Prefix(prefix)) = components.next() else {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "absolute root missing volume"));
+        };
+        let mut anchor = PathBuf::from(prefix.as_os_str());
+        if matches!(prefix.kind(), Prefix::Disk(_)) {
+            anchor.push("\\");
+        }
+        cap_std::fs::Dir::open_ambient_dir(anchor, cap_std::ambient_authority())?
+    } else {
+        if components.peek().is_some_and(|component| matches!(component, Component::Prefix(_) | Component::RootDir)) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "unsafe relative output root"));
+        }
+        cap_std::fs::Dir::open_ambient_dir(".", cap_std::ambient_authority())?
     };
-    if handle == INVALID_HANDLE_VALUE { return Err(io::Error::last_os_error()); }
-    Ok(cap_std::fs::Dir::from_std_file(unsafe { File::from_raw_handle(handle as _) }))
+    for component in components {
+        let Component::Normal(name) = component else {
+            match component {
+                Component::RootDir | Component::CurDir => continue,
+                Component::ParentDir | Component::Prefix(_) => return Err(io::Error::new(io::ErrorKind::InvalidInput, "unsafe output root")),
+                Component::Normal(_) => unreachable!(),
+            }
+        };
+        parent = match open_windows_directory(&parent, name) {
+            Ok(dir) => dir,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                parent.create_dir(name)?;
+                open_windows_directory(&parent, name)?
+            }
+            Err(error) => return Err(error),
+        };
+    }
+    validate_open_root(&parent)?;
+    Ok(parent)
+}
+
+#[cfg(windows)]
+fn validate_windows_directory_handle(file: &File) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+    };
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "output root component is not a real directory"));
+    }
+    Ok(())
 }
 
 static LAST_TEMP_STAMP: AtomicU64 = AtomicU64::new(0);

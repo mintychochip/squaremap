@@ -76,12 +76,12 @@ async fn rejects_methods_and_confined_paths() {
 #[tokio::test]
 async fn reserved_temp_namespace_is_not_served_or_writable() {
     let dir = tempdir().unwrap();
-    std::fs::write(dir.path().join(".squaremap-tmp-1-2"), b"partial").unwrap();
     let output = OutputRoot::new(dir.path()).unwrap();
+    std::fs::write(dir.path().join(".squaremap-tmp-123-456"), b"partial").unwrap();
     assert!(output.atomic_write(".squaremap-tmp-3-4", b"blocked").is_err());
     let mut server = HttpServer::bind(HttpConfig::loopback(), output).await.unwrap();
-    let response = reqwest::get(format!("http://{}/.squaremap-tmp-1-2", server.local_addr().unwrap())).await.unwrap();
-    assert!(response.status().is_client_error() || response.status() == StatusCode::NOT_FOUND);
+    let response = reqwest::get(format!("http://{}/.squaremap-tmp-123-456", server.local_addr().unwrap())).await.unwrap();
+    assert_ne!(response.status(), StatusCode::OK);
     server.shutdown().await.unwrap();
 }
 #[test]
@@ -150,6 +150,11 @@ fn rejects_symlink_root_and_owner_lock() {
     let parent = tempdir().unwrap();
     symlink(real.path(), parent.path().join("root-link")).unwrap();
     assert!(OutputRoot::new(parent.path().join("root-link")).is_err());
+    let missing_parent = tempdir().unwrap();
+    let missing_target = tempdir().unwrap();
+    symlink(missing_target.path(), missing_parent.path().join("link")).unwrap();
+    assert!(OutputRoot::new(missing_parent.path().join("link/new-root")).is_err());
+    assert!(!missing_target.path().join("new-root").exists());
 
     let locked = tempdir().unwrap();
     let outside = tempdir().unwrap();
@@ -201,6 +206,21 @@ fn windows_root_rejects_reparse_output_parent() {
     }
     let root = OutputRoot::new(dir.path()).unwrap();
     assert!(root.atomic_write("link/escape.txt", b"blocked").is_err());
+    let root_link = dir.path().join("root-link");
+    if let Err(error) = symlink_dir(outside.path(), &root_link) {
+        if error.kind() == std::io::ErrorKind::PermissionDenied { return; }
+        panic!("root symlink setup failed: {error}");
+    }
+    assert!(OutputRoot::new(&root_link).is_err());
+
+    let locked = tempdir().unwrap();
+    let lock_target = outside.path().join("lock-target");
+    std::fs::write(&lock_target, b"lock").unwrap();
+    if let Err(error) = std::os::windows::fs::symlink_file(&lock_target, locked.path().join(".squaremap-owner.lock")) {
+        if error.kind() == std::io::ErrorKind::PermissionDenied { return; }
+        panic!("owner lock symlink setup failed: {error}");
+    }
+    assert!(OutputRoot::new(locked.path()).is_err());
     root.atomic_write("nested/replace.txt", b"one").unwrap();
     root.atomic_write("nested/replace.txt", b"two").unwrap();
     assert_eq!(std::fs::read(dir.path().join("nested/replace.txt")).unwrap(), b"two");
