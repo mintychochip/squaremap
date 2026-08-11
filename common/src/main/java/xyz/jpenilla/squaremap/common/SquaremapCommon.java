@@ -6,6 +6,7 @@ import com.google.inject.Singleton;
 import java.io.IOException;
 import java.lang.reflect.Method;
 import java.util.List;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ForkJoinPool;
 import javax.imageio.ImageIO;
 import net.kyori.adventure.audience.Audience;
@@ -14,6 +15,10 @@ import org.checkerframework.checker.nullness.qual.NonNull;
 import org.checkerframework.framework.qual.DefaultQualifier;
 import xyz.jpenilla.squaremap.api.Squaremap;
 import xyz.jpenilla.squaremap.api.SquaremapProvider;
+import xyz.jpenilla.squaremap.common.bridge.process.BackendMode;
+import xyz.jpenilla.squaremap.common.bridge.process.BridgeBootstrapConfig;
+import xyz.jpenilla.squaremap.common.bridge.process.BridgeConnection;
+import xyz.jpenilla.squaremap.common.bridge.process.SidecarSupervisor;
 import xyz.jpenilla.squaremap.common.command.Commands;
 import xyz.jpenilla.squaremap.common.config.Config;
 import xyz.jpenilla.squaremap.common.config.ConfigManager;
@@ -27,7 +32,6 @@ import xyz.jpenilla.squaremap.common.util.Components;
 import xyz.jpenilla.squaremap.common.util.ReflectionUtil;
 import xyz.jpenilla.squaremap.common.util.SquaremapJarAccess;
 import xyz.jpenilla.squaremap.common.updatechecker.UpdateChecker;
-
 @DefaultQualifier(NonNull.class)
 @Singleton
 public final class SquaremapCommon {
@@ -40,6 +44,10 @@ public final class SquaremapCommon {
     private final Commands commands;
     private final SquaremapJarAccess squaremapJar;
     private final JsonCache jsonCache;
+    private final BridgeBootstrapConfig bootstrapConfig;
+    private final SidecarSupervisor sidecarSupervisor;
+    private BridgeConnection bridgeConnection;
+    private boolean sidecarLaunchAttempted;
 
     @Inject
     private SquaremapCommon(
@@ -51,7 +59,9 @@ public final class SquaremapCommon {
         final WorldManagerImpl worldManager,
         final Commands commands,
         final SquaremapJarAccess squaremapJar,
-        final JsonCache jsonCache
+        final JsonCache jsonCache,
+        final BridgeBootstrapConfig bootstrapConfig,
+        final SidecarSupervisor sidecarSupervisor
     ) {
         this.injector = injector;
         this.platform = platform;
@@ -62,6 +72,8 @@ public final class SquaremapCommon {
         this.commands = commands;
         this.squaremapJar = squaremapJar;
         this.jsonCache = jsonCache;
+        this.bootstrapConfig = bootstrapConfig;
+        this.sidecarSupervisor = sidecarSupervisor;
     }
 
     public void init() {
@@ -73,6 +85,7 @@ public final class SquaremapCommon {
     }
 
     private void start() {
+        this.startSidecarIfNeeded();
         this.squaremapJar.extract("web", this.directoryProvider.webDirectory(), Config.UPDATE_WEB_DIR);
         LevelBiomeColorData.loadImages(this.directoryProvider);
         this.worldManager.start();
@@ -81,6 +94,25 @@ public final class SquaremapCommon {
             IntegratedServer.startServer(this.directoryProvider, this.jsonCache);
         } else {
             Logging.logger().info(Messages.LOG_INTERNAL_WEB_DISABLED);
+        }
+    }
+
+    private void startSidecarIfNeeded() {
+        if (this.bootstrapConfig.backendMode() == BackendMode.JAVA || this.sidecarLaunchAttempted) {
+            return;
+        }
+        this.sidecarLaunchAttempted = true;
+        try {
+            this.bridgeConnection = this.sidecarSupervisor.start(this.bootstrapConfig)
+                .toCompletableFuture()
+                .join();
+        } catch (final CompletionException failure) {
+            this.bridgeConnection = null;
+            if (this.bootstrapConfig.backendMode() == BackendMode.SHADOW) {
+                Logging.logger().warn("Shadow sidecar failed to launch; Java remains primary", failure.getCause());
+            } else {
+                throw failure;
+            }
         }
     }
 
@@ -139,5 +171,10 @@ public final class SquaremapCommon {
     public void shutdown() {
         this.shutdownApi();
         this.stop();
+        if (this.bridgeConnection != null) {
+            this.bridgeConnection.close();
+            this.bridgeConnection = null;
+        }
+        this.sidecarSupervisor.close();
     }
 }

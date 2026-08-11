@@ -1,0 +1,17 @@
+[package]
+name = "squaremap-server"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+base64 = "0.22.1"
+hex.workspace = true
+prost.workspace = true
+rand = "0.9.2"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["fmt", "env-filter"] }
+tokio = { workspace = true, features = ["net", "time", "rt-multi-thread"] }
+zeroize = "1.8.1"
+squaremap-protocol = { path = "../squaremap-protocol" }

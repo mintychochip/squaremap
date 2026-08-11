@@ -23,6 +23,12 @@ protobuf {
   }
 }
 
+sourceSets {
+  test {
+    java.srcDir("src/testFixtures/java")
+  }
+}
+
 tasks.test {
   useJUnitPlatform()
 }
