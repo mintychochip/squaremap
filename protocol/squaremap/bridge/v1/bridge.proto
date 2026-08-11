@@ -36,6 +36,8 @@ message Envelope {
     RenderCommand render_command = 60;
     RenderProgress render_progress = 61;
     RenderResult render_result = 62;
+    ControlRequest control_request = 63;
+    ControlResult control_result = 64;
     BackendHealth backend_health = 70;
   }
 }
@@ -91,6 +93,7 @@ message ProtocolError {
   string message = 2;
   bool fatal = 3;
   uint64 offending_sequence = 4;
+  uint64 config_revision = 5;
 }
 
 enum ShutdownReason {
@@ -113,6 +116,14 @@ message ConfigReplace {
   LocaleSettings locale = 5;
   RenderSettings render = 6;
   UiSettings ui = 7;
+  repeated WorldConfig worlds = 8;
+  optional bool player_privacy_enabled = 9;
+  optional bool event_capture_enabled = 10;
+}
+
+message WorldConfig {
+  WorldIdentity identity = 1;
+  WorldSettings settings = 2;
 }
 
 message GlobalSettings {
@@ -249,6 +260,8 @@ message BridgePolicyReplace {
   uint32 max_uncompressed_snapshot_bytes = 4;
   uint32 max_pending_dirty_chunks = 5;
   uint32 snapshot_credits = 6;
+  bool player_privacy_enabled = 7;
+  bool event_capture_enabled = 8;
 }
 
 enum BlockTransparency {
@@ -574,6 +587,60 @@ enum RenderCommandKind {
   RENDER_COMMAND_KIND_CANCEL = 4;
   RENDER_COMMAND_KIND_PAUSE = 5;
   RENDER_COMMAND_KIND_RESUME = 6;
+}
+enum ControlKind {
+  CONTROL_KIND_UNSPECIFIED = 0;
+  CONTROL_KIND_FULL_RENDER = 1;
+  CONTROL_KIND_RADIUS_RENDER = 2;
+  CONTROL_KIND_CANCEL_RENDER = 3;
+  CONTROL_KIND_PAUSE_RENDERS = 4;
+  CONTROL_KIND_RESET_MAP = 5;
+  CONTROL_KIND_RELOAD = 6;
+  CONTROL_KIND_HEALTH = 7;
+}
+
+message ControlRequest {
+  ControlKind kind = 1;
+  WorldIdentity world = 2;
+  sint32 center_x = 3;
+  sint32 center_z = 4;
+  uint32 radius = 5;
+}
+
+enum BackendResultCode {
+  BACKEND_RESULT_CODE_UNSPECIFIED = 0;
+  BACKEND_RESULT_CODE_FULL_RENDER_STARTED = 1;
+  BACKEND_RESULT_CODE_RADIUS_RENDER_STARTED = 2;
+  BACKEND_RESULT_CODE_RENDER_IN_PROGRESS = 3;
+  BACKEND_RESULT_CODE_RENDER_NOT_IN_PROGRESS = 4;
+  BACKEND_RESULT_CODE_RENDER_CANCELLED = 5;
+  BACKEND_RESULT_CODE_RENDERS_PAUSED = 6;
+  BACKEND_RESULT_CODE_RENDERS_RESUMED = 7;
+  BACKEND_RESULT_CODE_MAP_RESET = 8;
+  BACKEND_RESULT_CODE_RELOADED = 9;
+  BACKEND_RESULT_CODE_HEALTHY = 10;
+  BACKEND_RESULT_CODE_UNKNOWN_WORLD = 11;
+  BACKEND_RESULT_CODE_INVALID_REQUEST = 12;
+  BACKEND_RESULT_CODE_INVALID_CONFIG = 13;
+  BACKEND_RESULT_CODE_BACKEND_UNAVAILABLE = 14;
+  BACKEND_RESULT_CODE_BACKEND_TIMEOUT = 15;
+  BACKEND_RESULT_CODE_FAILED = 16;
+}
+
+message BackendSubstitution {
+  string key = 1;
+  oneof value {
+    string text = 2;
+    sint64 integer = 3;
+    bool boolean = 4;
+    WorldIdentity world_identity = 5;
+  }
+}
+
+message ControlResult {
+  BackendResultCode code = 1;
+  repeated BackendSubstitution substitutions = 2;
+  uint64 rendered_chunks = 3;
 }
 
 message RenderCommand {

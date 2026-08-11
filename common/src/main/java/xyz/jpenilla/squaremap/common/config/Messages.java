@@ -55,6 +55,14 @@ public final class Messages {
     public static ComponentMessage PAUSED_RENDER = new ComponentMessage("<green>Paused renders for <world>");
     @MessageKey("unpaused-renders")
     public static ComponentMessage UNPAUSED_RENDER = new ComponentMessage("<green>Unpaused renders for <world>");
+    @MessageKey("command.message.backend-unavailable")
+    public static ComponentMessage BACKEND_UNAVAILABLE_MESSAGE = new ComponentMessage("<red>Squaremap backend is unavailable.");
+    @MessageKey("command.message.backend-timeout")
+    public static ComponentMessage BACKEND_TIMEOUT_MESSAGE = new ComponentMessage("<red>Squaremap backend request timed out.");
+    @MessageKey("command.message.backend-invalid-request")
+    public static ComponentMessage BACKEND_INVALID_REQUEST_MESSAGE = new ComponentMessage("<red>Invalid backend request.");
+    @MessageKey("command.message.backend-invalid-config")
+    public static ComponentMessage BACKEND_INVALID_CONFIG_MESSAGE = new ComponentMessage("<red>Squaremap backend configuration was rejected.");
 
     @MessageKey("command.message.console-must-specify-player")
     public static ComponentMessage CONSOLE_MUST_SPECIFY_PLAYER = new ComponentMessage("<red>You must specify a target player when running this command from console");

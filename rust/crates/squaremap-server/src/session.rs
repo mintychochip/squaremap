@@ -130,6 +130,7 @@ impl Session {
                     message: "authenticated session ID does not match; full bootstrap replacement required".to_string(),
                     fatal: true,
                     offending_sequence: envelope.sequence,
+                    config_revision: 0,
                 }),
             });
         }
@@ -151,6 +152,7 @@ impl Session {
                         message: format!("sequence gap: expected {expected}, actual {actual}; full bootstrap replacement required"),
                         fatal: true,
                         offending_sequence: actual,
+                        config_revision: 0,
                     }),
                 })
             }
@@ -239,5 +241,54 @@ impl<F: Future> Future for PanicSafe<F> {
             Ok(Poll::Pending) => Poll::Pending,
             Err(panic) => Poll::Ready(Err(panic)),
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use squaremap_protocol::wire::{envelope, ControlKind, ControlRequest};
+    use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
+
+    fn control(sequence: u64) -> Envelope {
+        Envelope {
+            protocol_major: 1,
+            protocol_minor: 0,
+            session_id: vec![1; SESSION_ID_BYTES],
+            sequence,
+            correlation_id: sequence,
+            payload: Some(envelope::Payload::ControlRequest(ControlRequest { kind: ControlKind::Health as i32, ..Default::default() })),
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_sequence_does_not_run_mutating_handler() {
+        let mut session = Session::new([1; SESSION_ID_BYTES]);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let first_calls = calls.clone();
+        let first = session.process(control(1), move |_| {
+            first_calls.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        }).await.unwrap();
+        assert_eq!(first.ack().unwrap().status, squaremap_protocol::wire::AckStatus::Accepted as i32);
+        let duplicate_calls = calls.clone();
+        let duplicate = session.process(control(1), move |_| {
+            duplicate_calls.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        }).await.unwrap();
+        assert_eq!(duplicate.ack().unwrap().status, squaremap_protocol::wire::AckStatus::Duplicate as i32);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn sequence_gap_rejects_without_running_handler() {
+        let mut session = Session::new([1; SESSION_ID_BYTES]);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gap_calls = calls.clone();
+        let outcome = session.process(control(2), move |_| {
+            gap_calls.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        }).await.unwrap();
+        assert!(outcome.protocol_error().is_some());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }

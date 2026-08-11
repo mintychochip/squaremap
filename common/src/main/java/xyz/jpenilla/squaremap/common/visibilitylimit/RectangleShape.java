@@ -15,6 +15,10 @@ final class RectangleShape implements VisibilityShape {
     private final int maxBlockX;
     private final int minBlockZ;
     private final int maxBlockZ;
+    int minBlockX() { return this.minBlockX; }
+    int maxBlockX() { return this.maxBlockX; }
+    int minBlockZ() { return this.minBlockZ; }
+    int maxBlockZ() { return this.maxBlockZ; }
 
     private final int minChunkX;
     private final int maxChunkX;
@@ -31,11 +35,11 @@ final class RectangleShape implements VisibilityShape {
      *
      * @param min Minimum location, inclusive.
      * @param max Maximum location, also inclusive.
-     * @throws IllegalArgumentException If min > max.
+     * @throws IllegalArgumentException If min is not strictly below max on either axis.
      */
     RectangleShape(final BlockPos min, final BlockPos max) throws IllegalArgumentException {
-        if (min.getX() > max.getX() || min.getZ() > max.getZ()) {
-            throw new IllegalArgumentException("min > max: min=" + min + " max=" + max);
+        if (min.getX() >= max.getX() || min.getZ() >= max.getZ()) {
+            throw new IllegalArgumentException("rectangle bounds must have positive width and height: min=" + min + " max=" + max);
         }
 
         this.minBlockX = min.getX();

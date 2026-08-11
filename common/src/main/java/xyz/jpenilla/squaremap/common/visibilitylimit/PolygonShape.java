@@ -10,6 +10,7 @@ import xyz.jpenilla.squaremap.common.util.Numbers;
 @DefaultQualifier(NonNull.class)
 final class PolygonShape implements VisibilityShape {
     private final List<Point> points;
+    List<Point> points() { return this.points; }
     private final Bounds bounds;
 
     public PolygonShape(final List<Point> points) {

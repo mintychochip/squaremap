@@ -4,13 +4,15 @@ import com.google.inject.Inject;
 import org.checkerframework.checker.nullness.qual.NonNull;
 import org.checkerframework.framework.qual.DefaultQualifier;
 import org.incendo.cloud.context.CommandContext;
+import xyz.jpenilla.squaremap.common.backend.BackendController;
+import xyz.jpenilla.squaremap.common.backend.BackendResult;
 import xyz.jpenilla.squaremap.common.command.Commander;
 import xyz.jpenilla.squaremap.common.command.Commands;
+import xyz.jpenilla.squaremap.common.command.BackendCommandMessages;
 import xyz.jpenilla.squaremap.common.command.PlayerCommander;
 import xyz.jpenilla.squaremap.common.command.SquaremapCommand;
 import xyz.jpenilla.squaremap.common.config.Messages;
 import xyz.jpenilla.squaremap.common.data.MapWorldInternal;
-import xyz.jpenilla.squaremap.common.task.render.RenderFactory;
 import xyz.jpenilla.squaremap.common.util.CommandUtil;
 import xyz.jpenilla.squaremap.common.util.Components;
 
@@ -19,38 +21,35 @@ import static xyz.jpenilla.squaremap.common.command.argument.parser.MapWorldPars
 
 @DefaultQualifier(NonNull.class)
 public final class FullRenderCommand extends SquaremapCommand {
-    private final RenderFactory renderFactory;
+    private final BackendController backend;
 
     @Inject
-    private FullRenderCommand(
-        final Commands commands,
-        final RenderFactory renderFactory
-    ) {
+    private FullRenderCommand(final Commands commands, final BackendController backend) {
         super(commands);
-        this.renderFactory = renderFactory;
+        this.backend = backend;
     }
 
     @Override
     public void register() {
-        this.commands.registerSubcommand(builder ->
-            builder.literal("fullrender")
-                .optional("world", mapWorldParser(), richDescription(Messages.OPTIONAL_WORLD_ARGUMENT_DESCRIPTION))
-                .commandDescription(richDescription(Messages.FULLRENDER_COMMAND_DESCRIPTION))
-                .permission("squaremap.command.fullrender")
-                .handler(this::executeFullRender));
+        this.commands.registerSubcommand(builder -> builder.literal("fullrender")
+            .optional("world", mapWorldParser(), richDescription(Messages.OPTIONAL_WORLD_ARGUMENT_DESCRIPTION))
+            .commandDescription(richDescription(Messages.FULLRENDER_COMMAND_DESCRIPTION))
+            .permission("squaremap.command.fullrender")
+            .handler(this::executeFullRender));
     }
 
     private void executeFullRender(final CommandContext<Commander> context) {
         final Commander sender = context.sender();
         final MapWorldInternal world = CommandUtil.resolveWorld(context);
-        if (world.renderManager().isRendering()) {
-            sender.sendMessage(Messages.RENDER_IN_PROGRESS.withPlaceholders(Components.worldPlaceholder(world)));
-            return;
-        }
-
-        if (sender instanceof PlayerCommander) {
-            sender.sendMessage(Components.miniMessage(Messages.LOG_STARTED_FULLRENDER, Components.worldPlaceholder(world)));
-        }
-        world.renderManager().startRender(this.renderFactory.createFullRender(world));
+        this.backend.fullRender(world.identifier()).whenComplete((result, failure) -> {
+            final BackendResult outcome = failure == null ? result : BackendResult.of(BackendResult.Code.FAILED);
+            switch (outcome.code()) {
+                case FULL_RENDER_STARTED -> {
+                    if (sender instanceof PlayerCommander) sender.sendMessage(Components.miniMessage(Messages.LOG_STARTED_FULLRENDER, Components.worldPlaceholder(world)));
+                }
+                case RENDER_IN_PROGRESS -> sender.sendMessage(Messages.RENDER_IN_PROGRESS.withPlaceholders(Components.worldPlaceholder(world)));
+                default -> BackendCommandMessages.sendFailure(sender, outcome, Components.worldPlaceholder(world));
+            }
+        });
     }
 }

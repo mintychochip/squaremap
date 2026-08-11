@@ -7,7 +7,7 @@ import org.checkerframework.checker.nullness.qual.NonNull;
 import org.checkerframework.framework.qual.DefaultQualifier;
 import org.incendo.cloud.Command;
 import org.incendo.cloud.context.CommandContext;
-import xyz.jpenilla.squaremap.common.WorldManager;
+import xyz.jpenilla.squaremap.common.backend.BackendControllerSupport;
 import xyz.jpenilla.squaremap.common.command.Commander;
 import xyz.jpenilla.squaremap.common.command.Commands;
 import xyz.jpenilla.squaremap.common.command.SquaremapCommand;
@@ -24,15 +24,12 @@ import static org.incendo.cloud.parser.standard.IntegerParser.integerParser;
 
 @DefaultQualifier(NonNull.class)
 public final class ProgressLoggingCommand extends SquaremapCommand {
-    private final WorldManager worldManager;
+    private final BackendControllerSupport backend;
 
     @Inject
-    private ProgressLoggingCommand(
-        final Commands commands,
-        final WorldManager worldManager
-    ) {
+    private ProgressLoggingCommand(final Commands commands, final BackendControllerSupport backend) {
         super(commands);
-        this.worldManager = worldManager;
+        this.backend = backend;
     }
 
     @Override
@@ -65,9 +62,8 @@ public final class ProgressLoggingCommand extends SquaremapCommand {
     private void executeToggle(final CommandContext<Commander> context) {
         Config.toggleProgressLogging();
 
-        this.worldManager.worlds()
-            .forEach(mapWorld -> mapWorld.renderManager().restartRenderProgressLogging());
-
+        this.backend.restartProgressLogging();
+        this.backend.publishConfig();
         final ComponentLike message;
         if (Config.PROGRESS_LOGGING) {
             message = Messages.PROGRESSLOGGING_ENABLED_MESSAGE;
@@ -86,9 +82,8 @@ public final class ProgressLoggingCommand extends SquaremapCommand {
         final int seconds = context.get("seconds");
         Config.setLoggingInterval(seconds);
 
-        this.worldManager.worlds()
-            .forEach(mapWorld -> mapWorld.renderManager().restartRenderProgressLogging());
-
+        this.backend.restartProgressLogging();
+        this.backend.publishConfig();
         context.sender().sendMessage(Messages.PROGRESSLOGGING_SET_RATE_MESSAGE.withPlaceholders(Components.placeholder("seconds", seconds)));
     }
 }

@@ -26,10 +26,13 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import xyz.jpenilla.squaremap.bridge.v1.Envelope;
 import xyz.jpenilla.squaremap.bridge.v1.HelloAck;
 import xyz.jpenilla.squaremap.bridge.v1.Shutdown;
 import xyz.jpenilla.squaremap.bridge.v1.ShutdownReason;
+import xyz.jpenilla.squaremap.bridge.v1.BridgePolicyReplace;
+import xyz.jpenilla.squaremap.common.bridge.protocol.FrameLimits;
 import xyz.jpenilla.squaremap.common.bridge.protocol.FrameCodec;
 import xyz.jpenilla.squaremap.common.bridge.outbox.BridgeEvent;
 import xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher;
@@ -95,7 +98,7 @@ public final class SidecarSupervisor implements AutoCloseable {
             }
             if (config.backendMode() == BackendMode.JAVA) {
                 final byte[] session = new byte[SESSION_ID_BYTES];
-                this.connection = new ManagedConnection(null, null, session, config.shutdownGrace(), true);
+                this.connection = new ManagedConnection(null, null, session, config.shutdownGrace(), true, 1L);
                 this.lifecycleState = LifecycleState.READY;
                 this.startFuture.complete(this.connection);
                 return this.startFuture;
@@ -119,6 +122,11 @@ public final class SidecarSupervisor implements AutoCloseable {
     public boolean isClosed() {
         synchronized (this.lock) {
             return this.lifecycleState == LifecycleState.FAILED || this.lifecycleState == LifecycleState.CLOSED;
+        }
+    }
+    public BridgeConnection currentConnection() {
+        synchronized (this.lock) {
+            return this.connection;
         }
     }
 
@@ -232,7 +240,8 @@ public final class SidecarSupervisor implements AutoCloseable {
                 this.process,
                 sessionId,
                 config.shutdownGrace(),
-                false
+                false,
+                hello.getSequence() + 2L
             );
             synchronized (this.lock) {
                 if (this.lifecycleState != LifecycleState.STARTING || this.closed) {
@@ -447,40 +456,75 @@ public final class SidecarSupervisor implements AutoCloseable {
         private final Process process;
         private final byte[] sessionId;
         private final AtomicBoolean closed = new AtomicBoolean();
+        private final AtomicBoolean failureSignaled = new AtomicBoolean();
         private final Duration shutdownGrace;
         private final boolean noProcess;
         private final BridgePublisher publisher;
+        private final InboundSequenceTracker inboundSequences;
+        private volatile FrameLimits frameLimits = FrameLimits.DEFAULT;
+        private volatile Consumer<Envelope> responseListener = ignored -> {};
+        private volatile Consumer<Throwable> failureListener = ignored -> {};
 
         private ManagedConnection(final SocketChannel socket, final Process process, final byte[] sessionId,
-                                  final Duration shutdownGrace, final boolean noProcess) {
+                                  final Duration shutdownGrace, final boolean noProcess, final long inboundSequence) {
             this.socket = socket;
             this.process = process;
             this.sessionId = sessionId.clone();
             this.shutdownGrace = shutdownGrace;
             this.noProcess = noProcess;
+            this.inboundSequences = new InboundSequenceTracker(inboundSequence);
             this.publisher = new BridgePublisher(this.sessionId, sent -> {
-                if (this.socket != null) FrameCodec.write(this.socket, sent.envelope());
+                if (this.socket != null) FrameCodec.write(this.socket, sent.envelope(), this.frameLimits);
+            });
+            this.publisher.setFailureListener(failure -> {
+                this.signalFailure(failure);
+                SidecarSupervisor.this.failStart(failure);
             });
         }
+
         @Override public byte[] sessionId() { return this.sessionId.clone(); }
         @Override public boolean isClosed() { return this.closed.get(); }
         @Override public BridgePublisher.PublishResult publish(final BridgeEvent event) { return this.publisher.publish(event); }
+        @Override public BridgePublisher.ControlDisposition cancelControl(final long correlationId) { return this.publisher.cancelControl(correlationId); }
+        @Override public void applyPolicy(final BridgePolicyReplace policy) {
+            this.frameLimits = new FrameLimits(policy.getMaxControlFrameBytes(), policy.getMaxSnapshotFrameBytes(), policy.getMaxUncompressedSnapshotBytes());
+            this.publisher.applyPolicy(policy);
+        }
+        @Override public void setResponseListener(final Consumer<Envelope> listener) {
+            this.responseListener = java.util.Objects.requireNonNull(listener, "listener");
+        }
+        @Override public void setFailureListener(final Consumer<Throwable> listener) {
+            this.failureListener = java.util.Objects.requireNonNull(listener, "listener");
+        }
+
         private void readFrames() {
             if (this.socket == null) return;
             try {
                 while (!this.closed.get()) {
-                    final Envelope envelope = FrameCodec.read(this.socket);
-                    if (envelope.getProtocolMajor() != 1 || !java.util.Arrays.equals(envelope.getSessionId().toByteArray(), this.sessionId)) {
-                        throw new SecurityException("invalid bridge response session");
+                    final Envelope envelope = FrameCodec.read(this.socket, this.frameLimits);
+                    if (!this.inboundSequences.accept(envelope.getSequence())) {
+                        throw new SecurityException("bridge response sequence gap or duplicate");
                     }
                     if (envelope.hasAck()) this.publisher.acknowledge(envelope);
                     else if (envelope.hasProtocolError() && envelope.getProtocolError().getFatal()) throw new IOException("fatal bridge protocol error");
+                    else this.responseListener.accept(envelope);
                 }
             } catch (final Exception failure) {
-                if (!this.closed.get()) SidecarSupervisor.this.failStart(failure);
+                if (!this.closed.get()) {
+                    this.signalFailure(failure);
+                    SidecarSupervisor.this.failStart(failure);
+                }
             }
         }
+
+        private void signalFailure(final Throwable failure) {
+            if (this.failureSignaled.compareAndSet(false, true)) {
+                this.failureListener.accept(failure);
+            }
+        }
+
         @Override public void close() {
+            this.signalFailure(new IOException("bridge connection closed"));
             this.publisher.close();
             if (this.noProcess) {
                 this.closed.set(true);

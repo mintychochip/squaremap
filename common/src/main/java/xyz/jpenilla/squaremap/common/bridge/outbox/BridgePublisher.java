@@ -8,9 +8,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Consumer;
+import java.util.concurrent.Semaphore;
 import xyz.jpenilla.squaremap.bridge.v1.Ack;
 import xyz.jpenilla.squaremap.bridge.v1.AckStatus;
-import java.util.concurrent.Semaphore;
 import xyz.jpenilla.squaremap.bridge.v1.ChunkCoordinate;
 import xyz.jpenilla.squaremap.bridge.v1.ChunkDirty;
 import xyz.jpenilla.squaremap.bridge.v1.Envelope;
@@ -27,6 +28,10 @@ public final class BridgePublisher implements AutoCloseable {
         ACCEPTED,
         COALESCED,
         RESYNC_MARKED
+    }
+    public enum ControlDisposition {
+        RECALLED,
+        DISPATCHED
     }
 
     @FunctionalInterface
@@ -53,11 +58,14 @@ public final class BridgePublisher implements AutoCloseable {
     private final Map<Long, InFlight> inFlight = new HashMap<>();
     private final int maxDirtyKeys;
     private final int maxReplacementKeys;
+    private volatile int policyMaxDirtyKeys = Integer.MAX_VALUE;
+    private volatile int policyMaxReplacementKeys = Integer.MAX_VALUE;
     private boolean dispatching;
     private boolean signaled;
     private boolean closed;
     private boolean writerClosed;
     private Throwable failure;
+    private Consumer<Throwable> failureListener = ignored -> {};
     private long sentCount;
     private long nextSequence;
     private long generation;
@@ -101,6 +109,22 @@ public final class BridgePublisher implements AutoCloseable {
         synchronized (this.lock) {
             return this.failure;
         }
+    }
+    public void setFailureListener(final Consumer<Throwable> listener) {
+        this.failureListener = Objects.requireNonNull(listener, "listener");
+    }
+    public ControlDisposition cancelControl(final long correlationId) {
+        synchronized (this.lock) {
+            this.current.remove("control:" + correlationId);
+            this.outbox.removeControl(correlationId);
+            final boolean dispatched = this.inFlight.entrySet().removeIf(entry -> entry.getValue().event() instanceof BridgeEvent.Control control
+                && control.correlationId() == correlationId);
+            return dispatched ? ControlDisposition.DISPATCHED : ControlDisposition.RECALLED;
+        }
+    }
+    public void applyPolicy(final xyz.jpenilla.squaremap.bridge.v1.BridgePolicyReplace policy) {
+        this.policyMaxDirtyKeys = Math.max(1, policy.getMaxPendingDirtyChunks());
+        this.policyMaxReplacementKeys = Math.max(1, policy.getSnapshotCredits());
     }
 
     public boolean hasPending() {
@@ -146,16 +170,9 @@ public final class BridgePublisher implements AutoCloseable {
             if (sent == null || sent.generation() != this.generation) {
                 return;
             }
-            if (sent.event() instanceof BridgeEvent.DirtyChunk dirty) {
-                final Object identity = identity(dirty);
-                if (Objects.equals(this.current.get(identity), dirty)) {
-                    this.current.remove(identity);
-                }
-            } else if (sent.event() instanceof BridgeEvent.ResyncWorld resync) {
-                final Object identity = identity(resync);
-                if (Objects.equals(this.current.get(identity), resync)) {
-                    this.current.remove(identity);
-                }
+            final Object identity = identity(sent.event());
+            if (Objects.equals(this.current.get(identity), sent.event())) {
+                this.current.remove(identity);
             }
         }
     }
@@ -241,11 +258,13 @@ public final class BridgePublisher implements AutoCloseable {
     }
 
     private PublishResult offerCurrent(final BridgeEvent event) {
+        if (event instanceof BridgeEvent.Control control) {
+            this.current.put(identity(control), control);
+            return this.outbox.offer(control);
+        }
         if (event instanceof BridgeEvent.ReplaceState state) {
             final Object identity = identity(state);
-            if (!this.current.containsKey(identity) && this.replacementCount() >= this.maxReplacementKeys) {
-                throw new IllegalStateException("replacement-state key bound exceeded");
-            }
+            if (!this.current.containsKey(identity) && this.replacementCount() >= Math.min(this.maxReplacementKeys, this.policyMaxReplacementKeys)) throw new IllegalStateException("replacement-state key bound exceeded");
             this.current.put(identity, state);
             return this.outbox.offer(state);
         }
@@ -265,7 +284,7 @@ public final class BridgePublisher implements AutoCloseable {
         if (previous instanceof BridgeEvent.DirtyChunk old && dirty.revision() <= old.revision()) {
             return PublishResult.COALESCED;
         }
-        if (previous == null && this.dirtyCount() >= this.maxDirtyKeys) {
+        if (previous == null && this.dirtyCount() >= Math.min(this.maxDirtyKeys, this.policyMaxDirtyKeys)) {
             this.removeDirtyFor(dirty.world(), dirty.epoch());
             final BridgeEvent.ResyncWorld marker = new BridgeEvent.ResyncWorld(dirty.world(), dirty.epoch());
             this.current.put(identity(marker), marker);
@@ -392,9 +411,11 @@ public final class BridgePublisher implements AutoCloseable {
     }
 
     private void failLocked(final Throwable cause) {
+        if (this.failure != null) return;
         this.failure = cause;
         this.closed = true;
         this.signal.release();
+        this.failureListener.accept(cause);
     }
 
     private void signalLocked() {
@@ -407,22 +428,32 @@ public final class BridgePublisher implements AutoCloseable {
     private static Object identity(final BridgeEvent event) {
         return switch (event) {
             case BridgeEvent.ReplaceState state -> "state:" + state.key();
+            case BridgeEvent.Control control -> "control:" + control.correlationId();
             case BridgeEvent.DirtyChunk dirty -> new DirtyIdentity(dirty.world(), dirty.epoch(), dirty.x(), dirty.z());
             case BridgeEvent.ResyncWorld resync -> new WorldIdentityKey(resync.world(), resync.epoch());
         };
     }
-
     private static Envelope toEnvelope(final BridgeEvent event, final long sequence, final byte[] sessionId) {
+        final byte[] session = sessionId.clone();
+        if (event instanceof BridgeEvent.Control control) {
+            return control.payload().toBuilder()
+                .setProtocolMajor(1)
+                .setProtocolMinor(0)
+                .setSessionId(com.google.protobuf.ByteString.copyFrom(session))
+                .setSequence(sequence)
+                .setCorrelationId(control.correlationId())
+                .build();
+        }
         final Envelope.Builder builder = Envelope.newBuilder()
             .setProtocolMajor(1)
             .setProtocolMinor(0)
-            .setSessionId(ByteString.copyFrom(sessionId))
+            .setSessionId(com.google.protobuf.ByteString.copyFrom(session))
             .setSequence(sequence);
         if (event instanceof BridgeEvent.ReplaceState state) {
             return state.payload().toBuilder()
                 .setProtocolMajor(1)
                 .setProtocolMinor(0)
-                .setSessionId(ByteString.copyFrom(sessionId))
+                .setSessionId(com.google.protobuf.ByteString.copyFrom(session))
                 .setSequence(sequence)
                 .build();
         }

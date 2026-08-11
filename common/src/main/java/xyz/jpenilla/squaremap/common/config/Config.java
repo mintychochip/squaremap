@@ -51,12 +51,16 @@ public final class Config extends AbstractConfig {
     public static List<String> BRIDGE_SIDECAR_COMMAND = List.of();
     public static String BRIDGE_RUST_OUTPUT_ROOT = "";
     public static int BRIDGE_STARTUP_TIMEOUT_SECONDS = 30;
+    public static boolean BRIDGE_PLAYER_PRIVACY_ENABLED = true;
+    public static boolean BRIDGE_EVENT_CAPTURE_ENABLED = true;
 
     private static void bridgeSettings() {
         BRIDGE_BACKEND_MODE = config.getString("settings.bridge.backend-mode", BRIDGE_BACKEND_MODE);
         BRIDGE_SIDECAR_COMMAND = config.getList(String.class, "settings.bridge.sidecar-command", BRIDGE_SIDECAR_COMMAND);
         BRIDGE_RUST_OUTPUT_ROOT = config.getString("settings.bridge.rust-output-root", BRIDGE_RUST_OUTPUT_ROOT);
         BRIDGE_STARTUP_TIMEOUT_SECONDS = config.getInt("settings.bridge.startup-timeout-seconds", BRIDGE_STARTUP_TIMEOUT_SECONDS);
+        BRIDGE_PLAYER_PRIVACY_ENABLED = config.getBoolean("settings.bridge.player-privacy-enabled", BRIDGE_PLAYER_PRIVACY_ENABLED);
+        BRIDGE_EVENT_CAPTURE_ENABLED = config.getBoolean("settings.bridge.event-capture-enabled", BRIDGE_EVENT_CAPTURE_ENABLED);
     }
 
     public static String WEB_DIR = "web";

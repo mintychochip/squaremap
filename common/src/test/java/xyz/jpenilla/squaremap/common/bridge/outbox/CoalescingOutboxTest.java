@@ -9,6 +9,7 @@ import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
@@ -222,6 +223,27 @@ class CoalescingOutboxTest {
             publisher.close();
         }
     }
+    @Test
+    void controlCanBeRemovedBeforeDrain() {
+        final CoalescingOutbox outbox = new CoalescingOutbox();
+        outbox.offer(new BridgeEvent.Control(44, Envelope.newBuilder().setControlRequest(xyz.jpenilla.squaremap.bridge.v1.ControlRequest.getDefaultInstance()).build()));
+        assertTrue(outbox.removeControl(44));
+        assertTrue(outbox.drain().isEmpty());
+    }
+
+    @Test
+    void publisherReportsWriterFailureOnce() {
+        final AtomicInteger failures = new AtomicInteger();
+        final BridgePublisher publisher = new BridgePublisher(SESSION, sent -> { throw new IllegalStateException("writer"); });
+        publisher.setFailureListener(ignored -> failures.incrementAndGet());
+        try {
+            publisher.publish(new BridgeEvent.Control(45, Envelope.newBuilder().setControlRequest(xyz.jpenilla.squaremap.bridge.v1.ControlRequest.getDefaultInstance()).build()));
+            assertTrue(publisher.awaitSent(1, Duration.ofSeconds(2)) || publisher.failure() != null);
+            assertEquals(1, failures.get());
+        } finally {
+            publisher.close();
+        }
+    }
 
     @Test
     void writerFailurePreservesPendingAndExposesCause() {
@@ -260,6 +282,38 @@ class CoalescingOutboxTest {
         assertTrue(entered.await(2, TimeUnit.SECONDS));
         publisher.close();
         assertFalse(publisher.hasWriterThread());
+    }
+
+    @Test
+    void batchExtractedControlRequiresSessionFence() throws Exception {
+        final CountDownLatch entered = new CountDownLatch(1);
+        final CountDownLatch released = new CountDownLatch(1);
+        final AtomicBoolean sessionOpen = new AtomicBoolean(true);
+        final AtomicBoolean executed = new AtomicBoolean();
+        final BridgePublisher publisher = new BridgePublisher(SESSION, new BridgePublisher.Writer() {
+            @Override
+            public void write(final BridgePublisher.Sent ignored) throws Exception {
+                entered.countDown();
+                released.await();
+                if (sessionOpen.get()) executed.set(true);
+            }
+            @Override
+            public void close() {
+                sessionOpen.set(false);
+                released.countDown();
+            }
+        });
+        try {
+            publisher.publish(new BridgeEvent.Control(46, Envelope.newBuilder()
+                .setControlRequest(xyz.jpenilla.squaremap.bridge.v1.ControlRequest.getDefaultInstance()).build()));
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            assertEquals(BridgePublisher.ControlDisposition.DISPATCHED, publisher.cancelControl(46));
+            publisher.close();
+            assertFalse(executed.get());
+        } finally {
+            publisher.close();
+            released.countDown();
+        }
     }
 
     @Test

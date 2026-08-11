@@ -17,6 +17,9 @@ final class CircleShape implements VisibilityShape {
     private final int centerX;
     private final int centerZ;
     private final int radius;
+    int centerX() { return this.centerX; }
+    int centerZ() { return this.centerZ; }
+    int radius() { return this.radius; }
     private final int radiusSquared;
 
     public CircleShape(final int centerX, final int centerZ, final int radius) {

@@ -4,7 +4,7 @@ import java.util.Objects;
 import xyz.jpenilla.squaremap.bridge.v1.Envelope;
 
 /** Immutable bridge updates that can be coalesced without losing durable state. */
-public sealed interface BridgeEvent permits BridgeEvent.ReplaceState, BridgeEvent.DirtyChunk, BridgeEvent.ResyncWorld {
+public sealed interface BridgeEvent permits BridgeEvent.ReplaceState, BridgeEvent.DirtyChunk, BridgeEvent.ResyncWorld, BridgeEvent.Control {
     record WorldKey(String namespace, String value) implements Comparable<WorldKey> {
         public WorldKey {
             Objects.requireNonNull(namespace, "namespace");
@@ -28,18 +28,22 @@ public sealed interface BridgeEvent permits BridgeEvent.ReplaceState, BridgeEven
     record DirtyChunk(WorldKey world, long epoch, int x, int z, long revision) implements BridgeEvent {
         public DirtyChunk {
             Objects.requireNonNull(world, "world");
-            if (epoch < 0 || revision < 0) {
-                throw new IllegalArgumentException("epoch and revision must be non-negative");
-            }
+            if (epoch < 0 || revision < 0) throw new IllegalArgumentException("epoch and revision must be non-negative");
         }
     }
 
     record ResyncWorld(WorldKey world, long epoch) implements BridgeEvent {
         public ResyncWorld {
             Objects.requireNonNull(world, "world");
-            if (epoch < 0) {
-                throw new IllegalArgumentException("epoch must be non-negative");
-            }
+            if (epoch < 0) throw new IllegalArgumentException("epoch must be non-negative");
+        }
+    }
+
+    record Control(long correlationId, Envelope payload) implements BridgeEvent {
+        public Control {
+            Objects.requireNonNull(payload, "payload");
+            if (correlationId <= 0) throw new IllegalArgumentException("correlation ID must be positive");
+            if (!payload.hasControlRequest()) throw new IllegalArgumentException("control event requires ControlRequest payload");
         }
     }
 }

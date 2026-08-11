@@ -16,12 +16,14 @@ import org.checkerframework.checker.nullness.qual.NonNull;
 import org.checkerframework.framework.qual.DefaultQualifier;
 import xyz.jpenilla.squaremap.api.Squaremap;
 import xyz.jpenilla.squaremap.api.SquaremapProvider;
+import xyz.jpenilla.squaremap.common.backend.BackendControllerSupport;
 import xyz.jpenilla.squaremap.common.bridge.process.BackendMode;
 import xyz.jpenilla.squaremap.common.bridge.process.BridgeBootstrapConfig;
 import xyz.jpenilla.squaremap.common.bridge.process.BridgeConnection;
 import xyz.jpenilla.squaremap.common.bridge.process.SidecarSupervisor;
 import xyz.jpenilla.squaremap.common.command.Commands;
 import xyz.jpenilla.squaremap.common.config.Config;
+import xyz.jpenilla.squaremap.common.config.ConfigBridgeExporter;
 import xyz.jpenilla.squaremap.common.config.ConfigManager;
 import xyz.jpenilla.squaremap.common.config.Messages;
 import xyz.jpenilla.squaremap.common.data.DirectoryProvider;
@@ -39,6 +41,8 @@ public final class SquaremapCommon {
     private final Injector injector;
     private final SquaremapPlatform platform;
     private final DirectoryProvider directoryProvider;
+    private final ConfigBridgeExporter configExporter;
+    private final BackendControllerSupport backendSupport;
     private final ConfigManager configManager;
     private final AbstractPlayerManager playerManager;
     private final WorldManagerImpl worldManager;
@@ -56,6 +60,8 @@ public final class SquaremapCommon {
         final SquaremapPlatform platform,
         final DirectoryProvider directoryProvider,
         final ConfigManager configManager,
+        final ConfigBridgeExporter configExporter,
+        final BackendControllerSupport backendSupport,
         final AbstractPlayerManager playerManager,
         final WorldManagerImpl worldManager,
         final Commands commands,
@@ -67,6 +73,8 @@ public final class SquaremapCommon {
         this.injector = injector;
         this.platform = platform;
         this.directoryProvider = directoryProvider;
+        this.configExporter = configExporter;
+        this.backendSupport = backendSupport;
         this.configManager = configManager;
         this.playerManager = playerManager;
         this.worldManager = worldManager;
@@ -84,12 +92,22 @@ public final class SquaremapCommon {
         this.setupApi();
         this.commands.registerCommands();
     }
-
     private void start() {
+        this.start(true);
+    }
+
+    private void start(final boolean publishBridgeConfig) {
         this.startSidecarIfNeeded();
         this.squaremapJar.extract("web", this.directoryProvider.webDirectory(), Config.UPDATE_WEB_DIR);
         LevelBiomeColorData.loadImages(this.directoryProvider);
         this.worldManager.start();
+        if (publishBridgeConfig && this.bridgeConnection != null && this.bootstrapConfig.get().backendMode() != BackendMode.JAVA) {
+            this.backendSupport.publishConfig().whenComplete((result, failure) -> {
+                if (failure != null || result.code() != xyz.jpenilla.squaremap.common.backend.BackendResult.Code.HEALTHY) {
+                    Logging.logger().warn("Bridge configuration was not accepted", failure);
+                }
+            });
+        }
         this.platform.startCallback();
         if (Config.HTTPD_ENABLED) {
             IntegratedServer.startServer(this.directoryProvider, this.jsonCache);
@@ -133,19 +151,31 @@ public final class SquaremapCommon {
         this.jsonCache.clear();
     }
 
-    public void reload(final Audience audience) {
+    public void reload() {
         this.stop();
-
         this.configManager.reload();
         this.playerManager.reload();
-
         this.start();
+    }
 
+    public void reloadForBridge() {
+        this.stop();
+        this.configManager.reload();
+        this.playerManager.reload();
+        this.start(false);
+    }
+
+    public void reload(final Audience audience) {
+        this.reload();
         final Component success = Messages.PLUGIN_RELOADED.withPlaceholders(
             Components.placeholder("name", "squaremap"),
             Components.placeholder("version", this.platform.version())
         );
         audience.sendMessage(success);
+    }
+
+    public String version() {
+        return this.platform.version();
     }
 
     public void updateCheck() {
