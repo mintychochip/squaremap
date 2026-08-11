@@ -6,6 +6,9 @@ public final class FrameLimits {
     public static final long MAX_SNAPSHOT_BYTES = 67_108_864L;
     public static final long MAX_UNCOMPRESSED_SNAPSHOT_BYTES = 134_217_728L;
     public static final long MAX_SNAPSHOT_DECOMPRESSION_RATIO = 4096L;
+    /** Maximum zstd back-reference window shared with the Rust decoder. */
+    public static final int MAX_ZSTD_WINDOW_LOG = 23;
+    public static final long MAX_ZSTD_WINDOW_BYTES = 1L << MAX_ZSTD_WINDOW_LOG;
 
     public static final FrameLimits DEFAULT = new FrameLimits(
         MAX_CONTROL_BYTES,

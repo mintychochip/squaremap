@@ -15,7 +15,8 @@ import xyz.jpenilla.squaremap.bridge.v1.Envelope;
 /** Reads and writes bounded class/length-prefixed bridge envelopes. */
 public final class FrameCodec {
     private static final int PREFIX_BYTES = 5;
-    private static final ZstdDecompressor ZSTD_DECOMPRESSOR = new ZstdDecompressor();
+    private static final ThreadLocal<ZstdDecompressor> ZSTD_DECOMPRESSOR =
+        ThreadLocal.withInitial(ZstdDecompressor::new);
 
     private FrameCodec() {
     }
@@ -146,6 +147,9 @@ public final class FrameCodec {
             throw ProtocolException.snapshot("declared uncompressed length exceeds absolute limit");
         }
         final long ratioLimit;
+        if (declaredLength == 0) {
+            throw ProtocolException.zeroUncompressedLength();
+        }
         try {
             ratioLimit = Math.multiplyExact(
                 (long) compressedLength,
@@ -172,7 +176,7 @@ public final class FrameCodec {
         final byte[] uncompressed = new byte[(int) declaredLength];
         final int decompressedLength;
         try {
-            decompressedLength = ZSTD_DECOMPRESSOR.decompress(
+            decompressedLength = ZSTD_DECOMPRESSOR.get().decompress(
                 compressed,
                 0,
                 compressed.length,
@@ -281,6 +285,16 @@ public final class FrameCodec {
 
         private static ProtocolException earlyEof(final long expected, final long actual) {
             return new ProtocolException("early EOF", "early EOF", expected, actual, null);
+        }
+
+        private static ProtocolException zeroUncompressedLength() {
+            return new ProtocolException(
+                "zero uncompressed length",
+                "chunk snapshot body must not be empty",
+                1,
+                0,
+                null
+            );
         }
 
         private static ProtocolException noProgress(final long expected, final long actual) {

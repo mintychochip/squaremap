@@ -130,4 +130,67 @@ The resolved jar was inspected at `~/.gradle/caches/modules-2/files-2.1/io.airli
 
 - Read and write loops now reject `count == 0` immediately with the distinct `no progress` `ProtocolException`; finite one-byte partial I/O tests still pass.
 - The Aircompressor replacement changes only Java chunk-body compression/decompression and test fixture generation; frame limits, ratio checks, CRC/body checks, class validation, and unsigned lengths remain unchanged.
-- The final staged scope contains only the Task 2 Java dependency/codec/tests and this report update; no Rust production behavior changed in the review fix.
+- The first review-fix scope contained only the Task 2 Java dependency/codec/tests and this report update; the later follow-up review-fix scope adds the symmetric Rust/Java zstd policy and validation changes documented below.
+
+
+## Follow-up review-fix evidence
+
+### Thread safety, window policy, and zero-output RED
+
+The required focused Rust command was run after adding the new contract tests but before adding the corresponding production variants:
+
+```text
+cargo test --manifest-path rust/Cargo.toml -p squaremap-protocol --test frame_limits
+```
+
+Observed result: compilation failed as expected with two unresolved `SnapshotValidationReason` variants: `ZeroUncompressedLength` and `WindowLimit`.
+
+The exact focused Java command was also run before the zero-output production fix:
+
+```text
+./gradlew --no-daemon --no-configuration-cache :squaremap-common:test --tests '*FrameCodecTest'
+```
+
+Observed result: `20 tests completed, 1 failed`; `rejectsTruncatedMagicPrefixedZeroLengthSnapshot` failed because the old decoder returned successfully for standard zstd magic followed by truncated data when the declared output length was zero. The concurrent distinct-body test was included in this run.
+
+### Follow-up GREEN
+
+After the fixes, the exact focused Java command was rerun:
+
+```text
+./gradlew --no-daemon --no-configuration-cache :squaremap-common:test --tests '*FrameCodecTest'
+```
+
+Observed result: `BUILD SUCCESSFUL`; the focused XML report records `tests="21"`, `skipped="0"`, `failures="0"`, and `errors="0"`.
+
+The exact focused Rust command was rerun:
+
+```text
+cargo test --manifest-path rust/Cargo.toml -p squaremap-protocol --test frame_limits
+```
+
+Observed result: `18 passed` in the `frame_limits` suite.
+
+The Java decompressor is now `ThreadLocal<ZstdDecompressor>`, and the concurrent test repeatedly validates eight distinct bodies in parallel, including independent CRCs and write/read round trips. Rust configures its decoder with `FrameLimits::MAX_ZSTD_WINDOW_LOG` (23). Java uses Aircompressor 0.27, whose decoder applies the same 8 MiB maximum window; both suites reject a valid frame encoded with a larger 10 MiB window. Both suites also accept a 9,000,006-byte body encoded with the compliant 8 MiB window, preserving the separate 128 MiB decompressed-output limit.
+
+Both implementations reject `uncompressed_length == 0` before zstd decompression and before any output allocation. This closes the zero-output decoder bypass for a standard zstd magic prefix plus truncated garbage. The invariant is intentional: a valid serialized `ChunkSnapshotBody` is non-empty; `ChunkMissing` represents an absent chunk and is not encoded as an empty snapshot body.
+
+Allocation order remains bounded: fixed five-byte prefix, class-specific length check, bounded envelope allocation, protobuf decode, compressed-body bound, absolute/ratio/zero-length checks, then output allocation and decompression. The new zero-length check occurs before the ratio calculation and all decompressor calls; the Rust window limit is configured before reads from the decoder.
+
+### Dependency inspection
+
+The dependency check was rerun after the follow-up:
+
+```text
+./gradlew --no-daemon --no-configuration-cache :squaremap-common:dependencyInsight --dependency aircompressor --configuration runtimeClasspath
+```
+
+Observed resolution was only `io.airlift:aircompressor:0.27` on `runtimeClasspath` with `org.gradle.libraryelements=jar`, followed by `BUILD SUCCESSFUL`. The resolved jar contains no `.so`, `.dll`, `.dylib`, JNI, or native entries, and the resolved closure contains no native/JNI artifact.
+
+### Follow-up self-review
+
+- Shared zstd policy is named in both `FrameLimits` classes as `MAX_ZSTD_WINDOW_LOG = 23` and `MAX_ZSTD_WINDOW_BYTES = 1L << 23`; Rust applies the log directly to its decoder and Java's Aircompressor decoder enforces the same window bound.
+- Java decompressor mutable state is not shared across threads.
+- Zero declared output is rejected symmetrically before decompression, including on write.
+- High-window rejection, compliant-window large-body acceptance, concurrent validation, and zero-output bypass coverage are now in the focused contract tests.
+- No formatter, linter, project-wide suite, Task 3 work, or progress-ledger change was made.

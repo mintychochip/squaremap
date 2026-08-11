@@ -32,8 +32,10 @@ impl TryFrom<u8> for FrameClass {
 pub enum SnapshotValidationReason {
     CompressedBodyEmpty,
     CompressedBodyOversize { length: usize, max: u32 },
+    ZeroUncompressedLength,
     DeclaredUncompressedLength { length: u32, max: u32 },
     DecompressionRatio { compressed: usize, uncompressed: u32 },
+    WindowLimit { max_log: u32 },
     InvalidZstd(String),
     DecompressionIo(String),
     DecompressedLength { expected: u32, actual: usize },
@@ -84,8 +86,14 @@ impl fmt::Display for SnapshotValidationReason {
             Self::CompressedBodyOversize { length, max } => {
                 write!(formatter, "compressed body length {length} exceeds {max}")
             }
+            Self::ZeroUncompressedLength => {
+                formatter.write_str("uncompressed snapshot body length is zero")
+            }
             Self::DeclaredUncompressedLength { length, max } => {
                 write!(formatter, "declared uncompressed length {length} exceeds {max}")
+            }
+            Self::WindowLimit { max_log } => {
+                write!(formatter, "zstd window exceeds maximum log {max_log}")
             }
             Self::DecompressionRatio {
                 compressed,
@@ -185,6 +193,11 @@ fn validate_snapshot(
     }
 
     let declared = snapshot.uncompressed_length;
+    if declared == 0 {
+        return Err(snapshot_error(
+            SnapshotValidationReason::ZeroUncompressedLength,
+        ));
+    }
     if declared > limits.max_uncompressed_snapshot_bytes {
         return Err(snapshot_error(
             SnapshotValidationReason::DeclaredUncompressedLength {
@@ -205,11 +218,21 @@ fn validate_snapshot(
 
     let mut decoder = zstd::stream::read::Decoder::new(snapshot.compressed_body.as_slice())
         .map_err(|error| snapshot_error(SnapshotValidationReason::InvalidZstd(error.to_string())))?;
+    decoder
+        .window_log_max(FrameLimits::MAX_ZSTD_WINDOW_LOG)
+        .map_err(|error| snapshot_error(SnapshotValidationReason::InvalidZstd(error.to_string())))?;
     let mut uncompressed = Vec::with_capacity(declared as usize);
     let mut chunk = [0_u8; 8192];
     loop {
         let count = decoder.read(&mut chunk).map_err(|error| {
-            snapshot_error(SnapshotValidationReason::DecompressionIo(error.to_string()))
+            let message = error.to_string();
+            if message.contains("window") || message.contains("memory") {
+                snapshot_error(SnapshotValidationReason::WindowLimit {
+                    max_log: FrameLimits::MAX_ZSTD_WINDOW_LOG,
+                })
+            } else {
+                snapshot_error(SnapshotValidationReason::DecompressionIo(message))
+            }
         })?;
         if count == 0 {
             break;

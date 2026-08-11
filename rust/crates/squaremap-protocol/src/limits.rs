@@ -11,6 +11,9 @@ impl FrameLimits {
     pub const MAX_SNAPSHOT_BYTES: u32 = 67_108_864;
     pub const MAX_UNCOMPRESSED_SNAPSHOT_BYTES: u32 = 134_217_728;
     pub const MAX_SNAPSHOT_DECOMPRESSION_RATIO: u64 = 4096;
+    /// Maximum zstd back-reference window shared with Java's Aircompressor decoder.
+    pub const MAX_ZSTD_WINDOW_LOG: u32 = 23;
+    pub const MAX_ZSTD_WINDOW_BYTES: u64 = 1_u64 << Self::MAX_ZSTD_WINDOW_LOG;
 }
 
 impl Default for FrameLimits {

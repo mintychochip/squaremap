@@ -1,9 +1,10 @@
 use prost::Message;
 use squaremap_protocol::{
-    envelope, read_envelope, write_envelope, ChunkSnapshot, ChunkSnapshotBody, Envelope,
+    envelope, read_envelope, write_envelope, ChunkSection, ChunkSnapshot, ChunkSnapshotBody, Envelope,
     FrameClass, FrameError, FrameLimits,
 };
 use std::io;
+use std::io::Write;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
@@ -47,6 +48,40 @@ fn snapshot_envelope(uncompressed_length: u32, crc32c: u32) -> Envelope {
         })),
         ..Default::default()
     }
+}
+
+fn high_window_compressed() -> Vec<u8> {
+    let pattern: Vec<u8> = (0..1_048_576)
+        .map(|index| (index as u8).wrapping_mul(31).wrapping_add(17))
+        .collect();
+    let gap: Vec<u8> = (0..8_388_608)
+        .map(|index| (index as u8).wrapping_mul(13).wrapping_add(7))
+        .collect();
+    let mut body = vec![0xa2, 0x06, 0x80, 0x80, 0x80, 0x05];
+    body.extend_from_slice(&pattern);
+    body.extend_from_slice(&gap);
+    body.extend_from_slice(&pattern);
+    let mut encoder = zstd::stream::Encoder::new(Vec::new(), 0).expect("create encoder");
+    encoder.window_log(27).expect("set high window");
+    encoder.write_all(&body).expect("compress high-window body");
+    encoder.finish().expect("finish high-window body")
+}
+fn ordinary_large_body() -> Vec<u8> {
+    let payload_length = 9_000_000_u32;
+    let mut body = vec![0xa2, 0x06, 0xc0, 0xa8, 0xa5, 0x04];
+    let mut state = 0x1234_5678_u32;
+    for _ in 0..payload_length {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        body.push((state >> 24) as u8);
+    }
+    body
+}
+
+fn compress_with_window(body: &[u8], window_log: u32) -> Vec<u8> {
+    let mut encoder = zstd::stream::Encoder::new(Vec::new(), 0).expect("create encoder");
+    encoder.window_log(window_log).expect("set encoder window");
+    encoder.write_all(body).expect("compress body");
+    encoder.finish().expect("finish body")
 }
 
 fn frame(class: FrameClass, envelope: &Envelope) -> Vec<u8> {
@@ -207,6 +242,72 @@ async fn rejects_empty_or_invalid_zstd_body() {
     }
 }
 
+#[tokio::test]
+async fn rejects_truncated_magic_prefixed_zero_length_snapshot() {
+    let envelope = Envelope {
+        payload: Some(envelope::Payload::ChunkSnapshot(ChunkSnapshot {
+            compressed_body: vec![0x28, 0xb5, 0x2f, 0xfd, 0],
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let bytes = frame(FrameClass::ChunkSnapshot, &envelope);
+    let err = read_envelope(&mut &bytes[..], FrameLimits::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        FrameError::SnapshotValidation {
+            reason: squaremap_protocol::SnapshotValidationReason::ZeroUncompressedLength
+        }
+    ));
+}
+
+#[tokio::test]
+async fn rejects_snapshot_frame_with_window_above_shared_policy() {
+    let envelope = Envelope {
+        payload: Some(envelope::Payload::ChunkSnapshot(ChunkSnapshot {
+            uncompressed_length: 6_000_000,
+            compressed_body: high_window_compressed(),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let bytes = frame(FrameClass::ChunkSnapshot, &envelope);
+    let err = read_envelope(&mut &bytes[..], FrameLimits::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        FrameError::SnapshotValidation {
+            reason: squaremap_protocol::SnapshotValidationReason::WindowLimit { .. }
+        }
+    ));
+}
+
+#[tokio::test]
+async fn accepts_large_snapshot_with_compliant_window() {
+    let body = ordinary_large_body();
+    let compressed_body = compress_with_window(&body, FrameLimits::MAX_ZSTD_WINDOW_LOG);
+    let envelope = Envelope {
+        payload: Some(envelope::Payload::ChunkSnapshot(ChunkSnapshot {
+            uncompressed_length: body.len() as u32,
+            crc32c: crc32c::crc32c(&body),
+            compressed_body,
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let bytes = frame(FrameClass::ChunkSnapshot, &envelope);
+    let decoded = read_envelope(&mut &bytes[..], FrameLimits::default())
+        .await
+        .expect("large body with compliant window should decode");
+    assert!(matches!(
+        decoded.payload,
+        Some(envelope::Payload::ChunkSnapshot(_))
+    ));
+}
+
 
 #[tokio::test]
 async fn rejects_declared_snapshot_length_above_absolute_limit() {
@@ -229,8 +330,24 @@ async fn rejects_snapshot_crc_mismatch() {
 
 #[tokio::test]
 async fn accepts_valid_frame_split_across_one_byte_reads() {
-    let body = ChunkSnapshotBody::default().encode_to_vec();
-    let envelope = snapshot_envelope(body.len() as u32, crc32c::crc32c(&body));
+    let body = ChunkSnapshotBody {
+        sections: vec![ChunkSection {
+            section_y: 0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+    .encode_to_vec();
+    let compressed_body = zstd::stream::encode_all(&body[..], 0).expect("compress body");
+    let envelope = Envelope {
+        payload: Some(envelope::Payload::ChunkSnapshot(ChunkSnapshot {
+            uncompressed_length: body.len() as u32,
+            crc32c: crc32c::crc32c(&body),
+            compressed_body,
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
     let bytes = frame(FrameClass::ChunkSnapshot, &envelope);
     let mut reader = OneByteReader { bytes, position: 0 };
     let decoded = read_envelope(&mut reader, FrameLimits::default())
