@@ -1,8 +1,9 @@
 use fs2::FileExt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -33,27 +34,26 @@ impl Clone for OutputRoot {
 
 impl OutputRoot {
     pub fn new(root: impl AsRef<Path>) -> io::Result<Self> {
-        let root = root.as_ref();
-        if let Ok(metadata) = fs::symlink_metadata(root) {
-            if metadata.file_type().is_symlink() {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "output root symlink"));
+        let configured = root.as_ref();
+        let root_dir = match open_root_handle(configured) {
+            Ok(root_dir) => root_dir,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir_all(configured)?;
+                open_root_handle(configured)?
             }
-        }
-        fs::create_dir_all(root)?;
-        let root = fs::canonicalize(root)?;
-        let metadata = fs::symlink_metadata(&root)?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "output root is not a directory"));
-        }
-        let owner_lock = OpenOptions::new().read(true).write(true).create(true).open(root.join(".squaremap-owner.lock"))?;
+            Err(error) => return Err(error),
+        };
+        let display_root = if configured.is_absolute() {
+            configured.to_owned()
+        } else {
+            std::env::current_dir()?.join(configured)
+        };
+        let root_dir = Arc::new(root_dir);
+        validate_open_root(&root_dir)?;
+        let owner_lock = Arc::new(open_owner_lock(&root_dir)?);
         owner_lock.try_lock_exclusive().map_err(|error| io::Error::new(io::ErrorKind::AlreadyExists, format!("output root already owned: {error}")))?;
-        let owner_lock = Arc::new(owner_lock);
-        let root_dir = Arc::new(open_root_handle(&root)?);
-        #[cfg(unix)]
-        cleanup_stale(&root)?;
-        #[cfg(windows)]
-        cleanup_stale_windows(&root_dir)?;
-        Ok(Self { root, root_dir, owner_lock, writes: Arc::new(Mutex::new(())) })
+        cleanup_stale_cap(&root_dir)?;
+        Ok(Self { root: display_root, root_dir, owner_lock, writes: Arc::new(Mutex::new(())) })
     }
 
     pub fn path(&self) -> &Path { &self.root }
@@ -82,8 +82,7 @@ impl OutputRoot {
         while let Some(Component::Normal(name)) = components.next() {
             if components.peek().is_none() {
                 let target = name.to_str().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "non-UTF8 path"))?;
-                let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-                let temp = format!(".{}.squaremap-{}-{}", target, std::process::id(), stamp);
+                let temp = next_temp_name();
                 let temp_c = std::ffi::CString::new(temp).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
                 let target_c = std::ffi::CString::new(target).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
                 let fd = unsafe { libc::openat(parent.as_raw_fd(), temp_c.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW, 0o600) };
@@ -127,8 +126,7 @@ impl OutputRoot {
         while let Some(Component::Normal(name)) = components.next() {
             if components.peek().is_none() {
                 let target = name.to_str().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "non-UTF8 path"))?;
-                let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-                let temp = format!(".{}.squaremap-{}-{}", target, std::process::id(), stamp);
+                let temp = next_temp_name();
                 let mut options = cap_std::fs::OpenOptions::new();
                 options.write(true).create_new(true);
                 let mut file = parent.open_with(&temp, &options)?;
@@ -213,6 +211,79 @@ fn open_root_handle(root: &Path) -> io::Result<File> {
     if fd < 0 { return Err(io::Error::last_os_error()); }
     Ok(unsafe { File::from_raw_fd(fd) })
 }
+#[cfg(unix)]
+fn validate_open_root(root: &File) -> io::Result<()> {
+    let metadata = root.metadata()?;
+    if !metadata.is_dir() { return Err(io::Error::new(io::ErrorKind::InvalidInput, "output root is not a directory")); }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn validate_open_root(root: &cap_std::fs::Dir) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+    };
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(root.as_raw_handle() as _, &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "output root is not a real directory"));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn open_owner_lock(root: &File) -> io::Result<File> {
+    let name = std::ffi::CString::new(".squaremap-owner.lock").unwrap();
+    let fd = unsafe { libc::openat(root.as_raw_fd(), name.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW, 0o600) };
+    if fd < 0 { return Err(io::Error::last_os_error()); }
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+#[cfg(windows)]
+fn open_owner_lock(root: &cap_std::fs::Dir) -> io::Result<File> {
+    use cap_std::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+    if let Ok(metadata) = root.symlink_metadata(".squaremap-owner.lock") {
+        if metadata.file_type().is_symlink() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "owner lock symlink"));
+        }
+    }
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    Ok(root.open_with(".squaremap-owner.lock", &options)?.into_std())
+}
+
+#[cfg(unix)]
+fn cleanup_stale_cap(root: &File) -> io::Result<()> {
+    cleanup_stale_dir(&cap_std::fs::Dir::from_std_file(root.try_clone()?))
+}
+
+#[cfg(windows)]
+fn cleanup_stale_cap(root: &cap_std::fs::Dir) -> io::Result<()> {
+    cleanup_stale_dir(root)
+}
+
+fn cleanup_stale_dir(directory: &cap_std::fs::Dir) -> io::Result<()> {
+    for entry in directory.read_dir(".")? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() { continue; }
+        if file_type.is_dir() {
+            cleanup_stale_dir(&entry.open_dir()?)?;
+        } else if is_temp_name(&entry.file_name().to_string_lossy()) {
+            match entry.remove_file() {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
+}
 
 #[cfg(windows)]
 fn open_root_handle(root: &Path) -> io::Result<cap_std::fs::Dir> {
@@ -220,10 +291,15 @@ fn open_root_handle(root: &Path) -> io::Result<cap_std::fs::Dir> {
     use std::os::windows::io::FromRawHandle;
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        CreateFileW, GetFileAttributesW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE, INVALID_FILE_ATTRIBUTES, OPEN_EXISTING,
     };
     let path: Vec<u16> = root.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let attributes = unsafe { GetFileAttributesW(path.as_ptr()) };
+    if attributes == INVALID_FILE_ATTRIBUTES || attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 || attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "output root is not a real directory"));
+    }
     let handle = unsafe {
         CreateFileW(
             path.as_ptr(),
@@ -239,50 +315,21 @@ fn open_root_handle(root: &Path) -> io::Result<cap_std::fs::Dir> {
     Ok(cap_std::fs::Dir::from_std_file(unsafe { File::from_raw_handle(handle as _) }))
 }
 
-#[cfg(windows)]
-fn cleanup_stale_windows(directory: &cap_std::fs::Dir) -> io::Result<()> {
-    for entry in directory.read_dir(".")? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if file_type.is_symlink() { continue; }
-        if file_type.is_dir() {
-            let child = entry.open_dir()?;
-            cleanup_stale_windows(&child)?;
-        } else if is_temp_name(&entry.file_name().to_string_lossy()) {
-            match entry.remove_file() {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-        }
-    }
-    Ok(())
-}
-#[cfg(all(not(unix), not(windows)))]
-fn open_root_handle(root: &Path) -> io::Result<File> { File::open(root) }
-#[cfg(unix)]
-fn cleanup_stale(directory: &Path) -> io::Result<()> {
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        let path = entry.path();
-        let metadata = fs::symlink_metadata(&path)?;
-        if metadata.file_type().is_symlink() { continue; }
-        if metadata.is_dir() {
-            cleanup_stale(&path)?;
-        } else if path.file_name().is_some_and(|name| is_temp_name(&name.to_string_lossy())) {
-            match fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-        }
-    }
-    Ok(())
+static LAST_TEMP_STAMP: AtomicU64 = AtomicU64::new(0);
+
+fn next_temp_name() -> String {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos().min(u64::MAX as u128) as u64;
+    let previous = LAST_TEMP_STAMP.fetch_max(now, Ordering::Relaxed);
+    let stamp = previous.saturating_add(1).max(now);
+    LAST_TEMP_STAMP.store(stamp, Ordering::Relaxed);
+    format!(".squaremap-tmp-{}-{}", std::process::id(), stamp)
 }
 
+#[cfg(all(not(unix), not(windows)))]
+fn open_root_handle(root: &Path) -> io::Result<File> { File::open(root) }
+
 fn is_temp_name(name: &str) -> bool {
-    let Some((prefix, suffix)) = name.split_once(".squaremap-") else { return false };
-    if !prefix.starts_with('.') || prefix.len() <= 1 { return false; }
+    let Some(suffix) = name.strip_prefix(".squaremap-tmp-") else { return false };
     let mut fields = suffix.split('-');
     let Some(pid) = fields.next() else { return false };
     let Some(stamp) = fields.next() else { return false };

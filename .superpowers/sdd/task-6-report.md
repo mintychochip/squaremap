@@ -12,31 +12,30 @@ It failed during test compilation because `squaremap_server` had no library crat
 
 ## GREEN
 
-At the recorded review base `4c7b93b`, the required focused command had the exact baseline result:
+The focused contract command passes all current HTTP/output and development-frontend tests:
 
 ```text
 cargo test --manifest-path rust/Cargo.toml -p squaremap-server --test http_contract --test dev_frontend
-cargo test: 13 passed (2 suites, 15 warnings)
+cargo test: 24 passed (2 suites, 13 warnings, 0.00s)
 ```
 
-That baseline contained exactly two Task 6 unreachable-statement warnings; the remaining warnings were pre-existing protocol/session warnings. The follow-up regressions now pass after the third review:
+The tests cover static index/JSON/PNG responses, GET/HEAD, explicit MIME and length headers, quoted/weak/wildcard ETags and 304, tile cache headers and missing-PNG behavior, non-tile 404, method/path rejection, root-confined writes, symlink rejection, root/owner-lock symlink rejection, disabled mode, single-owner locking, dev URL rejection/readiness timeout, delayed readiness and multiple candidates, immediate exit, bounded multibyte/sustained logs after readiness, HTTP POST body/query/status forwarding, retained infinite-response cancellation, barrier-controlled stalled WebSocket-handshake cancellation, WebSocket header/subprotocol/origin forwarding, successful and startup-failure descendant process-group shutdown, concurrent atomic writes, reserved/malformed temp namespace handling, and local tile exclusions.
+
+The Windows-target check passed with the required cross-compilation environment:
 
 ```text
-cargo test --manifest-path rust/Cargo.toml -p squaremap-server --test http_contract --test dev_frontend
-cargo test: 21 passed (2 suites, 13 warnings)
+CC_x86_64_pc_windows_gnu=gcc AR_x86_64_pc_windows_gnu=ar cargo check --manifest-path rust/Cargo.toml -p squaremap-server --target x86_64-pc-windows-gnu
 ```
-
-The tests cover static index/JSON/PNG responses, GET/HEAD, explicit MIME and length headers, quoted/weak/wildcard ETags and 304, tile cache headers and missing-PNG behavior, non-tile 404, method/path rejection, root-confined writes, symlink rejection, disabled mode, single-owner locking, dev URL rejection/readiness timeout, delayed readiness and multiple candidates, immediate exit, bounded multibyte/sustained logs after readiness, HTTP POST body/query/status forwarding, retained infinite-response cancellation, barrier-controlled stalled WebSocket-handshake cancellation, WebSocket header/subprotocol forwarding, successful and startup-failure descendant process-group shutdown, concurrent atomic writes, and local tile exclusions.
 
 ## Smoke
 
 `--help` remained valid and printed both `bridge` and `serve-fixture` usage. The latest fixture smoke launched `serve-fixture --root web --bind 127.0.0.1:0`; it printed exactly one readiness line:
 
 ```text
-READY http_addr=127.0.0.1:46337
+READY http_addr=127.0.0.1:46647
 ```
 
-Fetching `/` returned HTTP 200; the combined header/body capture was 2100 bytes. The process was terminated with SIGTERM and exited 0 after the graceful signal path.
+Fetching `/` returned HTTP 200 with `Content-Length: 1952`; the process was terminated with SIGTERM and exited 0 after the graceful signal path.
 
 ## Security review
 
@@ -49,16 +48,10 @@ Fetching `/` returned HTTP 200; the combined header/body capture was 2100 bytes.
 - Proxy bodies use bounded streaming adapters rather than whole-body copies; request/response hop-by-hop filtering parses `Connection` extension tokens and suppresses Host forwarding.
 
 
-The Windows-target check passed with the required cross-compilation environment:
-
-```text
-CC_x86_64_pc_windows_gnu=gcc AR_x86_64_pc_windows_gnu=ar cargo check --manifest-path rust/Cargo.toml -p squaremap-server --target x86_64-pc-windows-gnu
-Finished `dev` profile [unoptimized + debuginfo] target(s)
-```
 ## Lifecycle review
 
 Dev startup runs the injected executable exactly as `bun run dev` in the configured frontend directory, uses bounded byte log decoding and drains/reaps readers after readiness, accepts only loopback URLs before the configured timeout, tracks and cancels WebSocket tunnels, and terminates the Unix process group or Windows Job Object on readiness, bind, and shutdown failures. HTTP shutdown signals the listener first, cancels in-flight proxy/tunnel work, terminates the frontend, then awaits the listener; timeout aborts return an error. Disabled mode never binds.
 
 ## Final review-fix verification
 
-Against `fc0591f`, the final focused command passed 21 tests, the Windows target check passed with the required compiler environment, CLI help remained valid, and fixture smoke printed exactly one readiness line and exited 0 after SIGTERM.
+The final focused command passed 24 tests, the Windows target check passed with the required compiler environment, CLI help remained valid, and fixture smoke printed exactly one readiness line and exited 0 after SIGTERM. The final changes also create the Windows Job Object before spawning the suspended process, assign the Tokio Child raw process handle before resume, and validate opened root attributes.

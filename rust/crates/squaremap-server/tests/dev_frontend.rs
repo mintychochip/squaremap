@@ -17,6 +17,12 @@ fn executable(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
 }
 
 #[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    let result = unsafe { libc::kill(pid as i32, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn rejects_non_loopback_and_early_exit() {
     let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -303,6 +309,9 @@ async fn websocket_forwards_headers_and_selected_protocol() {
             assert_eq!(request.headers().get("cookie").unwrap(), "sid=abc");
             assert_eq!(request.headers().get("authorization").unwrap(), "Bearer token");
             assert_eq!(request.headers().get("sec-websocket-protocol").unwrap(), "chat");
+            for name in ["host", "connection", "upgrade", "sec-websocket-key", "sec-websocket-version"] {
+                assert_eq!(request.headers().get_all(name).iter().count(), 1, "{name}");
+            }
             response.headers_mut().insert("sec-websocket-protocol", "chat".parse().unwrap());
             Ok(response)
         };
@@ -334,13 +343,49 @@ async fn websocket_forwards_headers_and_selected_protocol() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn websocket_origin_only_is_forwarded() {
+    use tokio_tungstenite::tungstenite::handshake::server::{Request as WsRequest, Response as WsResponse};
+    let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let upstream = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let upstream_task = tokio::spawn(async move {
+        let (stream, _) = upstream.accept().await.unwrap();
+        let callback = |request: &WsRequest, response: WsResponse| {
+            assert_eq!(request.headers().get("origin").unwrap(), "https://origin.test");
+            assert_eq!(request.headers().get_all("host").iter().count(), 1);
+            Ok(response)
+        };
+        let _ = tokio_tungstenite::accept_hdr_async(stream, callback).await.unwrap();
+    });
+    let dir = tempdir().unwrap();
+    let root = OutputRoot::new(dir.path()).unwrap();
+    let fake = executable(dir.path(), &format!("printf 'http://{}\\n'; sleep 10", upstream_addr));
+    let config = HttpConfig { bind: "127.0.0.1:0".parse().unwrap(), enabled: true, dev_frontend: Some(DevFrontendConfig { frontend_dir: dir.path().to_owned(), executable: fake, startup_timeout: Duration::from_secs(1) }) };
+    let mut server = HttpServer::bind(config, root).await.unwrap();
+    let request = tokio_tungstenite::tungstenite::http::Request::builder()
+        .uri(format!("ws://{}/hmr", server.local_addr().unwrap()))
+        .header("Host", server.local_addr().unwrap().to_string())
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .header("Origin", "https://origin.test")
+        .body(())
+        .unwrap();
+    let _ = tokio_tungstenite::connect_async(request).await.unwrap();
+    server.shutdown().await.unwrap();
+    upstream_task.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn shutdown_kills_descendant_process_group() {
     let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let dir = tempdir().unwrap();
     let pid_file = dir.path().join("descendant.pid");
-    let script = format!("sleep 30 & child=$!; echo $child > '{}'; printf 'http://127.0.0.1:9\\n'; wait", pid_file.display());
-    let root = OutputRoot::new(dir.path()).unwrap();
+    let script = format!("trap '' TERM; sh -c 'trap \"\" TERM; while :; do sleep 1; done' & child=$!; echo $child > '{}'; printf 'http://127.0.0.1:9\\n'; wait", pid_file.display());
     let fake = executable(dir.path(), &script);
+    let root = OutputRoot::new(dir.path()).unwrap();
     let config = HttpConfig { bind: "127.0.0.1:0".parse().unwrap(), enabled: true, dev_frontend: Some(DevFrontendConfig { frontend_dir: dir.path().to_owned(), executable: fake, startup_timeout: Duration::from_secs(1) }) };
     let mut server = HttpServer::bind(config, root).await.unwrap();
     let pid = loop {
@@ -351,7 +396,7 @@ async fn shutdown_kills_descendant_process_group() {
     };
     server.shutdown().await.unwrap();
     for _ in 0..100 {
-        if !std::path::Path::new(&format!("/proc/{pid}")).exists() { return; }
+        if !process_alive(pid) { return; }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("descendant process survived shutdown");
@@ -363,7 +408,7 @@ async fn startup_failure_kills_saved_process_group_descendant() {
     let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let dir = tempdir().unwrap();
     let pid_file = dir.path().join("failed-descendant.pid");
-    let script = format!("sleep 30 & child=$!; echo $child > '{}'; printf 'http://127.0.0.1:9\\n'; exit 0", pid_file.display());
+    let script = format!("sh -c 'trap \"\" TERM; while :; do sleep 1; done' & child=$!; echo $child > '{}'; printf 'http://127.0.0.1:9\\n'; exit 0", pid_file.display());
     let root = OutputRoot::new(dir.path()).unwrap();
     let fake = executable(dir.path(), &script);
     let config = HttpConfig { bind: "127.0.0.1:0".parse().unwrap(), enabled: true, dev_frontend: Some(DevFrontendConfig { frontend_dir: dir.path().to_owned(), executable: fake, startup_timeout: Duration::from_secs(1) }) };
@@ -375,7 +420,7 @@ async fn startup_failure_kills_saved_process_group_descendant() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     };
     for _ in 0..100 {
-        if !std::path::Path::new(&format!("/proc/{pid}")).exists() { return; }
+        if !process_alive(pid) { return; }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("startup descendant survived failure cleanup");

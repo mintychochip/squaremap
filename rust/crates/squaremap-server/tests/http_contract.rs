@@ -72,6 +72,18 @@ async fn rejects_methods_and_confined_paths() {
     server.shutdown().await.unwrap();
 }
 
+
+#[tokio::test]
+async fn reserved_temp_namespace_is_not_served_or_writable() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join(".squaremap-tmp-1-2"), b"partial").unwrap();
+    let output = OutputRoot::new(dir.path()).unwrap();
+    assert!(output.atomic_write(".squaremap-tmp-3-4", b"blocked").is_err());
+    let mut server = HttpServer::bind(HttpConfig::loopback(), output).await.unwrap();
+    let response = reqwest::get(format!("http://{}/.squaremap-tmp-1-2", server.local_addr().unwrap())).await.unwrap();
+    assert!(response.status().is_client_error() || response.status() == StatusCode::NOT_FOUND);
+    server.shutdown().await.unwrap();
+}
 #[test]
 fn atomic_writes_are_root_confined() {
     let dir = tempdir().unwrap();
@@ -87,15 +99,19 @@ fn atomic_writes_are_root_confined() {
 #[test]
 fn removes_stale_temp_siblings_recursively() {
     let dir = tempdir().unwrap();
-    std::fs::write(dir.path().join(".target.squaremap-999999-456"), b"old").unwrap();
+    std::fs::write(dir.path().join(".squaremap-tmp-999999-456"), b"old").unwrap();
     std::fs::write(dir.path().join(".target.squaremap-not-a-temp"), b"keep").unwrap();
+    std::fs::write(dir.path().join(".squaremap-tmp-999-456-extra"), b"keep").unwrap();
+    std::fs::write(dir.path().join(".squaremap-tmp-x-1"), b"keep").unwrap();
     std::fs::create_dir_all(dir.path().join("nested")).unwrap();
-    std::fs::write(dir.path().join("nested/.stale.squaremap-999999-456"), b"old").unwrap();
+    std::fs::write(dir.path().join("nested/.squaremap-tmp-999999-456"), b"old").unwrap();
     std::fs::write(dir.path().join("nested/.squaremap-old"), b"old").unwrap();
     std::fs::write(dir.path().join("keep"), b"keep").unwrap();
     let root = OutputRoot::new(dir.path()).unwrap();
-    assert!(!dir.path().join(".target.squaremap-999999-456").exists());
-    assert!(!dir.path().join("nested/.stale.squaremap-999999-456").exists());
+    assert!(!dir.path().join(".squaremap-tmp-999999-456").exists());
+    assert!(dir.path().join(".squaremap-tmp-999-456-extra").exists());
+    assert!(dir.path().join(".squaremap-tmp-x-1").exists());
+    assert!(!dir.path().join("nested/.squaremap-tmp-999999-456").exists());
     assert!(dir.path().join(".target.squaremap-not-a-temp").exists());
     assert!(dir.path().join("keep").exists());
     root.atomic_write("nested/file", b"new").unwrap();
@@ -124,6 +140,22 @@ fn rejects_symlink_escapes() {
 
     let root = OutputRoot::new(dir.path()).unwrap();
     assert!(root.atomic_write("link/escape", b"x").is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_symlink_root_and_owner_lock() {
+    use std::os::unix::fs::symlink;
+    let real = tempdir().unwrap();
+    let parent = tempdir().unwrap();
+    symlink(real.path(), parent.path().join("root-link")).unwrap();
+    assert!(OutputRoot::new(parent.path().join("root-link")).is_err());
+
+    let locked = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    std::fs::write(outside.path().join("lock"), b"lock").unwrap();
+    symlink(outside.path().join("lock"), locked.path().join(".squaremap-owner.lock")).unwrap();
+    assert!(OutputRoot::new(locked.path()).is_err());
 }
 
 #[test]

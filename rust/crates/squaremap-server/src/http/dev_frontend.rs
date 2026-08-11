@@ -17,6 +17,12 @@ use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::{handshake::derive_accept_key, protocol::Role}};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(windows)]
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtResumeProcess(process: windows_sys::Win32::Foundation::HANDLE) -> i32;
+}
+
 #[derive(Clone, Debug)]
 pub struct DevFrontendConfig {
     pub frontend_dir: PathBuf,
@@ -62,18 +68,24 @@ impl DevFrontend {
         command.args(["run", "dev"]).current_dir(&config.frontend_dir).stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(unix)]
         command.process_group(0);
+        #[cfg(windows)]
+        let job = create_job()?;
+        #[cfg(windows)]
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
         let mut child = command.spawn()?;
         #[cfg(unix)]
         let pgid = child.id().map(|id| id as i32).ok_or_else(|| std::io::Error::other("frontend process has no id"))?;
         #[cfg(windows)]
-        let job = match create_job(child.id()) {
-            Ok(job) => job,
-            Err(error) => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                return Err(error);
-            }
-        };
+        if let Err(error) = assign_job(&job, &child) {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(error);
+        }
+        #[cfg(windows)]
+        if let Err(error) = resume_process(&child) {
+            terminate(&mut child, &job).await;
+            return Err(error);
+        }
         let stdout = match child.stdout.take() {
             Some(stdout) => stdout,
             None => {
@@ -246,10 +258,10 @@ impl DevFrontend {
         terminate(&mut child, #[cfg(unix)] self.inner.pgid, #[cfg(windows)] &self.inner.job).await;
         drop(child);
         let mut logs = self.inner.log_tasks.lock().await;
-        for handle in logs.drain(..) {
-            match timeout(Duration::from_secs(1), handle).await {
-                Ok(_) => {}
-                Err(_) => {}
+        for mut handle in logs.drain(..) {
+            if timeout(Duration::from_secs(1), &mut handle).await.is_err() {
+                handle.abort();
+                let _ = handle.await;
             }
         }
     }
@@ -316,14 +328,13 @@ where
 }
 
 #[cfg(windows)]
-fn create_job(pid: Option<u32>) -> std::io::Result<JobHandle> {
+fn create_job() -> std::io::Result<JobHandle> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+        CreateJobObjectW, SetInformationJobObject,
         JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
     let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
     if job.is_null() { return Err(std::io::Error::last_os_error()); }
     let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
@@ -340,18 +351,22 @@ fn create_job(pid: Option<u32>) -> std::io::Result<JobHandle> {
         unsafe { CloseHandle(job); }
         return Err(std::io::Error::last_os_error());
     }
-    let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid.unwrap_or_default()) };
-    if process.is_null() {
-        unsafe { CloseHandle(job); }
-        return Err(std::io::Error::last_os_error());
-    }
-    let assigned = unsafe { AssignProcessToJobObject(job, process) };
-    unsafe { CloseHandle(process); }
-    if assigned == 0 {
-        unsafe { CloseHandle(job); }
-        return Err(std::io::Error::last_os_error());
-    }
     Ok(JobHandle(job))
+}
+
+#[cfg(windows)]
+fn assign_job(job: &JobHandle, child: &Child) -> std::io::Result<()> {
+    use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+    let process = child.raw_handle().ok_or_else(|| std::io::Error::other("frontend process handle unavailable"))?;
+    let assigned = unsafe { AssignProcessToJobObject(job.0, process as _) };
+    if assigned == 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
+}
+
+#[cfg(windows)]
+fn resume_process(child: &Child) -> std::io::Result<()> {
+    let process = child.raw_handle().ok_or_else(|| std::io::Error::other("frontend process handle unavailable"))?;
+    let status = unsafe { NtResumeProcess(process as _) };
+    if status == 0 { Ok(()) } else { Err(std::io::Error::from_raw_os_error(status)) }
 }
 
 #[cfg(unix)]
