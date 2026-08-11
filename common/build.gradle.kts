@@ -30,7 +30,7 @@ tasks.test {
 
 dependencies {
   api(libs.protobufJava)
-  api(libs.zstd)
+  implementation(libs.aircompressor)
   testImplementation(libs.junitJupiter)
   testRuntimeOnly(libs.junitPlatformLauncher)
 

@@ -4,7 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-import com.github.luben.zstd.Zstd;
+import io.airlift.compress.zstd.ZstdCompressor;
 import com.google.protobuf.ByteString;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -87,7 +87,7 @@ class FrameCodecTest {
 
     @Test
     void rejectsSnapshotDecompressionRatioAbove4096() {
-        final byte[] compressed = Zstd.compress(ChunkSnapshotBody.getDefaultInstance().toByteArray(), 3);
+        final byte[] compressed = compress(ChunkSnapshotBody.getDefaultInstance().toByteArray());
         final long declaredLength = compressed.length * 4096L + 1;
         assertProtocolFailure(frame(1, snapshotWithCompressed(declaredLength, 0, compressed).toByteArray()));
     }
@@ -95,16 +95,36 @@ class FrameCodecTest {
     @Test
     void rejectsEmptyOrInvalidZstdBody() {
         assertProtocolFailure(frame(1, snapshotWithCompressed(0, 0, new byte[0]).toByteArray()));
-        assertProtocolFailure(frame(1, snapshotWithCompressed(0, 0, new byte[] {(byte) 0xff}).toByteArray()));
+        assertProtocolFailure(frame(1, snapshotWithCompressed(0, 0, new byte[] {0x01, 0x02, 0x03}).toByteArray()));
     }
 
     @Test
     void rejectsUnsignedSnapshotLengthBeforeAllocation() {
-        final byte[] compressed = Zstd.compress(ChunkSnapshotBody.getDefaultInstance().toByteArray(), 3);
+        final byte[] compressed = compress(ChunkSnapshotBody.getDefaultInstance().toByteArray());
         assertProtocolFailure(frame(
             1,
             snapshotWithCompressed(0xffff_ffffL, 0, compressed).toByteArray()
         ));
+    }
+
+    @Test
+    void rejectsReadableChannelWithoutProgress() {
+        final FrameCodec.ProtocolException exception = assertThrows(
+            FrameCodec.ProtocolException.class,
+            () -> FrameCodec.read(new ZeroThenEofReadable())
+        );
+        assertEquals("no progress", exception.reason());
+        assertEquals(0, exception.actual());
+    }
+
+    @Test
+    void rejectsWritableChannelWithoutProgress() {
+        final FrameCodec.ProtocolException exception = assertThrows(
+            FrameCodec.ProtocolException.class,
+            () -> FrameCodec.write(new ZeroThenEofWritable(), hello())
+        );
+        assertEquals("no progress", exception.reason());
+        assertEquals(0, exception.actual());
     }
 
     @Test
@@ -139,9 +159,23 @@ class FrameCodecTest {
             .build();
     }
 
+    private static byte[] compress(final byte[] body) {
+        final ZstdCompressor compressor = new ZstdCompressor();
+        final byte[] compressed = new byte[compressor.maxCompressedLength(body.length)];
+        final int length = compressor.compress(
+            body,
+            0,
+            body.length,
+            compressed,
+            0,
+            compressed.length
+        );
+        return java.util.Arrays.copyOf(compressed, length);
+    }
+
     private static Envelope snapshot(final long uncompressedLength, final long crc32c) {
         final byte[] body = ChunkSnapshotBody.getDefaultInstance().toByteArray();
-        return snapshotWithCompressed(uncompressedLength, crc32c, Zstd.compress(body, 3));
+        return snapshotWithCompressed(uncompressedLength, crc32c, compress(body));
     }
 
     private static Envelope snapshotWithCompressed(
@@ -219,6 +253,28 @@ class FrameCodecTest {
         }
     }
 
+    private static final class ZeroThenEofReadable implements ReadableByteChannel {
+        private boolean first = true;
+
+        @Override
+        public int read(final ByteBuffer destination) {
+            if (this.first) {
+                this.first = false;
+                return 0;
+            }
+            return -1;
+        }
+
+        @Override
+        public boolean isOpen() {
+            return true;
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
     private static final class OneByteReadable extends ByteArrayReadable {
         private OneByteReadable(final byte[] bytes) {
             super(bytes);
@@ -262,6 +318,28 @@ class FrameCodecTest {
 
         private byte[] bytes() {
             return this.output.toByteArray();
+        }
+    }
+
+    private static final class ZeroThenEofWritable implements WritableByteChannel {
+        private boolean first = true;
+
+        @Override
+        public int write(final ByteBuffer source) {
+            if (this.first) {
+                this.first = false;
+                return 0;
+            }
+            return -1;
+        }
+
+        @Override
+        public boolean isOpen() {
+            return true;
+        }
+
+        @Override
+        public void close() throws IOException {
         }
     }
 }

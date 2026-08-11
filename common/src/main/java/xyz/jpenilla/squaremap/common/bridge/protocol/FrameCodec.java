@@ -1,6 +1,6 @@
 package xyz.jpenilla.squaremap.common.bridge.protocol;
 
-import com.github.luben.zstd.Zstd;
+import io.airlift.compress.zstd.ZstdDecompressor;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import java.io.IOException;
@@ -15,6 +15,7 @@ import xyz.jpenilla.squaremap.bridge.v1.Envelope;
 /** Reads and writes bounded class/length-prefixed bridge envelopes. */
 public final class FrameCodec {
     private static final int PREFIX_BYTES = 5;
+    private static final ZstdDecompressor ZSTD_DECOMPRESSOR = new ZstdDecompressor();
 
     private FrameCodec() {
     }
@@ -103,6 +104,9 @@ public final class FrameCodec {
         final int expected = buffer.remaining();
         while (buffer.hasRemaining()) {
             final int count = channel.read(buffer);
+            if (count == 0) {
+                throw ProtocolException.noProgress(expected, buffer.position());
+            }
             if (count < 0) {
                 throw ProtocolException.earlyEof(expected, buffer.position());
             }
@@ -115,6 +119,9 @@ public final class FrameCodec {
     ) throws IOException {
         while (buffer.hasRemaining()) {
             final int count = channel.write(buffer);
+            if (count == 0) {
+                throw ProtocolException.noProgress(buffer.limit(), buffer.position());
+            }
             if (count < 0) {
                 throw new IOException("channel closed while writing frame");
             }
@@ -155,15 +162,26 @@ public final class FrameCodec {
         }
 
         final byte[] compressed = compressedBody.toByteArray();
+        if (compressed.length < 4
+            || compressed[0] != 0x28
+            || (compressed[1] & 0xff) != 0xb5
+            || (compressed[2] & 0xff) != 0x2f
+            || (compressed[3] & 0xff) != 0xfd) {
+            throw ProtocolException.snapshot("invalid zstd body: bad frame magic");
+        }
         final byte[] uncompressed = new byte[(int) declaredLength];
-        final long decompressedLength;
+        final int decompressedLength;
         try {
-            decompressedLength = Zstd.decompress(uncompressed, compressed);
+            decompressedLength = ZSTD_DECOMPRESSOR.decompress(
+                compressed,
+                0,
+                compressed.length,
+                uncompressed,
+                0,
+                uncompressed.length
+            );
         } catch (final RuntimeException exception) {
             throw ProtocolException.snapshot("invalid zstd body: " + exception.getMessage());
-        }
-        if (Zstd.isError(decompressedLength)) {
-            throw ProtocolException.snapshot("invalid zstd body: " + Zstd.getErrorName(decompressedLength));
         }
         if (decompressedLength != declaredLength) {
             throw ProtocolException.snapshot("decompressed length does not match declaration");
@@ -263,6 +281,10 @@ public final class FrameCodec {
 
         private static ProtocolException earlyEof(final long expected, final long actual) {
             return new ProtocolException("early EOF", "early EOF", expected, actual, null);
+        }
+
+        private static ProtocolException noProgress(final long expected, final long actual) {
+            return new ProtocolException("no progress", "channel made no progress", expected, actual, null);
         }
 
         private static ProtocolException protobuf(final Throwable cause) {

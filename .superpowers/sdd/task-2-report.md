@@ -66,9 +66,68 @@ Snapshot validation is bounded and symmetric: compressed body must be non-empty 
 - Limits are exactly control 1,048,576 bytes, snapshot 67,108,864 bytes, and uncompressed snapshot 134,217,728 bytes in both implementations.
 - Rust and Java use the Task 1 `ChunkSnapshot.compressed_body` contract and do not add sockets, sessions, process launch, persistence, HTTP, or Task 3 behavior.
 - `.superpowers/sdd/task-2-report.md`
-- Focused tests cover unknown class, zero length, both oversize frame classes, unsigned Java header handling, class mismatch in both directions, early EOF, trailing bytes, invalid envelope protobuf, absolute decompression limit, ratio 4096, empty/invalid zstd, CRC mismatch, unsigned snapshot length, valid one-byte split reads, and invalid write-side snapshots.
-- Dependency changes are limited to Tokio/bytes/zstd/CRC32C for the Rust protocol crate and the zstd-jni catalog entry/dependency required by Java chunk-body validation. The existing NeoForge catalog entry remains unchanged.
+- Focused tests cover unknown class, zero length, both oversize frame classes, unsigned Java header handling, class mismatch in both directions, early EOF, trailing bytes, invalid envelope protobuf, absolute decompression limit, ratio 4096, empty/invalid zstd, CRC mismatch, unsigned snapshot length, valid one-byte split reads, invalid write-side snapshots, and deterministic zero-progress channel failures.
+- Dependency changes are limited to Tokio/bytes/zstd/CRC32C for the Rust protocol crate and the pure-Java Aircompressor catalog entry/dependency for Java chunk-body validation. The existing NeoForge catalog entry remains unchanged.
 
 ## Concerns
 
 None for the requested Task 2 scope.
+
+## Review-fix evidence
+
+### Zero-progress RED
+
+After adding finite channels that return `0` once and then EOF/closed, the exact focused Java command was run:
+
+```text
+./gradlew --no-daemon --no-configuration-cache :squaremap-common:test --tests '*FrameCodecTest'
+```
+
+Observed result: `BUILD FAILED`; `17 tests completed, 2 failed`. `rejectsReadableChannelWithoutProgress` observed the old `early EOF` category instead of `no progress`, and `rejectsWritableChannelWithoutProgress` observed the old `IOException` instead of `ProtocolException`.
+
+### Zero-progress and Aircompressor GREEN
+
+The same exact focused Java command was rerun after the fixes:
+
+```text
+./gradlew --no-daemon --no-configuration-cache :squaremap-common:test --tests '*FrameCodecTest'
+```
+
+Observed result: `BUILD SUCCESSFUL`; the focused XML report records `tests="17"`, `skipped="0"`, `failures="0"`, and `errors="0"`.
+
+The required Rust command was rerun unchanged:
+
+```text
+cargo test --manifest-path rust/Cargo.toml -p squaremap-protocol --test frame_limits
+```
+
+Observed result: `15 passed` in the `frame_limits` suite.
+
+### Pure-Java dependency verification
+
+The selected dependency is `io.airlift:aircompressor:0.27`, whose verified source APIs are `io.airlift.compress.zstd.ZstdCompressor` and `ZstdDecompressor`; both implement the byte-array compressor/decompressor interfaces in Java source. The exact focused Gradle resolution command was:
+
+```text
+./gradlew --no-daemon --no-configuration-cache :squaremap-common:dependencyInsight --dependency aircompressor --configuration runtimeClasspath
+```
+
+Observed resolution output:
+
+```text
+io.airlift:aircompressor:0.27
+  Variant runtime:
+    org.gradle.category            library
+    org.gradle.libraryelements     jar
+    org.gradle.usage               java-runtime
+io.airlift:aircompressor:0.27
+\--- runtimeClasspath
+BUILD SUCCESSFUL
+```
+
+The resolved jar was inspected at `~/.gradle/caches/modules-2/files-2.1/io.airlift/aircompressor/0.27/.../aircompressor-0.27.jar`; the artifact contains no `.so`, `.dll`, `.dylib`, JNI, or native entries, and the dependency-insight closure contains no transitive native/JNI artifact. `common/build.gradle.kts` uses `implementation(libs.aircompressor)`, so the dependency is not exposed through the public common API. Snapshot validation remains Java-side and retains preallocation limits, exact decompressed length, CRC32C, and typed body decode.
+
+### Review self-check
+
+- Read and write loops now reject `count == 0` immediately with the distinct `no progress` `ProtocolException`; finite one-byte partial I/O tests still pass.
+- The Aircompressor replacement changes only Java chunk-body compression/decompression and test fixture generation; frame limits, ratio checks, CRC/body checks, class validation, and unsigned lengths remain unchanged.
+- The final staged scope contains only the Task 2 Java dependency/codec/tests and this report update; no Rust production behavior changed in the review fix.
