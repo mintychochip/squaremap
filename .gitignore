@@ -102,6 +102,8 @@ $RECYCLE.BIN/
 *.lnk
 
 target/
+rust/backend/
+rust/bin/
 
 pom.xml.tag
 pom.xml.releaseBackup

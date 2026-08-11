@@ -1,16 +1,38 @@
 plugins {
   id("squaremap.base-conventions")
   id("net.neoforged.moddev")
+  id("com.google.protobuf") version libs.versions.protobufPlugin.get()
 }
-
 neoForge {
   enable {
     neoFormVersion = libs.versions.neoform.get()
   }
   accessTransformers.from(layout.projectDirectory.file("src/main/resources/squaremap-common-at.cfg"))
 }
+sourceSets {
+  main {
+    proto {
+      srcDir(rootProject.file("protocol"))
+    }
+  }
+}
+
+protobuf {
+  protoc {
+    artifact = libs.protoc.get().toString()
+  }
+}
+
+tasks.test {
+  useJUnitPlatform()
+}
+
 
 dependencies {
+  api(libs.protobufJava)
+  testImplementation(libs.junitJupiter)
+  testRuntimeOnly(libs.junitPlatformLauncher)
+
   api(projects.squaremapApi)
   api("com.google.inject:guice:${libs.versions.guice.get()}:classes") {
     exclude("com.google.guava") // provided by minecraft

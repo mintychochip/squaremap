@@ -1,0 +1,375 @@
+syntax = "proto3";
+
+package squaremap.bridge.v1;
+
+option java_package = "xyz.jpenilla.squaremap.bridge.v1";
+option java_multiple_files = true;
+
+message Envelope {
+  uint32 protocol_major = 1;
+  uint32 protocol_minor = 2;
+  bytes session_id = 3;
+  uint64 sequence = 4;
+  uint64 correlation_id = 5;
+  oneof payload {
+    Hello hello = 10;
+    HelloAck hello_ack = 11;
+    Ready ready = 12;
+    Heartbeat heartbeat = 13;
+    Ack ack = 14;
+    ProtocolError protocol_error = 15;
+    Shutdown shutdown = 16;
+    ConfigReplace config_replace = 20;
+    BridgePolicyReplace bridge_policy_replace = 21;
+    RegistryReplace registry_replace = 22;
+    WorldUpsert world_upsert = 30;
+    WorldRemove world_remove = 31;
+    WorldStateReplace world_state_replace = 32;
+    PlayersReplace players_replace = 40;
+    MarkerLayersReplace marker_layers_replace = 41;
+    IconsReplace icons_replace = 42;
+    ChunkDirty chunk_dirty = 50;
+    WorldResyncRequired world_resync_required = 51;
+    ChunkSnapshotRequest chunk_snapshot_request = 52;
+    ChunkSnapshot chunk_snapshot = 53;
+    ChunkMissing chunk_missing = 54;
+    RenderCommand render_command = 60;
+    RenderProgress render_progress = 61;
+    RenderResult render_result = 62;
+    BackendHealth backend_health = 70;
+  }
+}
+
+message Hello {
+  string plugin_version = 1;
+  bytes bootstrap_token = 2;
+}
+
+message HelloAck {
+  uint32 protocol_major = 1;
+  uint32 protocol_minor = 2;
+  string backend_version = 3;
+  bool accepted = 4;
+  string rejection_reason = 5;
+}
+
+message Ready {
+  uint64 state_revision = 1;
+  uint32 http_port = 2;
+  bool http_enabled = 3;
+}
+
+message Heartbeat {
+  uint64 monotonic_millis = 1;
+  uint64 last_received_sequence = 2;
+}
+
+enum AckStatus {
+  ACK_STATUS_UNSPECIFIED = 0;
+  ACK_STATUS_ACCEPTED = 1;
+  ACK_STATUS_DUPLICATE = 2;
+  ACK_STATUS_REJECTED = 3;
+}
+
+message Ack {
+  uint64 acknowledged_sequence = 1;
+  AckStatus status = 2;
+  string message = 3;
+}
+
+enum ProtocolErrorCode {
+  PROTOCOL_ERROR_CODE_UNSPECIFIED = 0;
+  PROTOCOL_ERROR_CODE_INVALID_MESSAGE = 1;
+  PROTOCOL_ERROR_CODE_UNSUPPORTED_VERSION = 2;
+  PROTOCOL_ERROR_CODE_LIMIT_EXCEEDED = 3;
+  PROTOCOL_ERROR_CODE_STALE_WORLD_EPOCH = 4;
+  PROTOCOL_ERROR_CODE_INTERNAL = 5;
+}
+
+message ProtocolError {
+  ProtocolErrorCode code = 1;
+  string message = 2;
+  bool fatal = 3;
+  uint64 offending_sequence = 4;
+}
+
+enum ShutdownReason {
+  SHUTDOWN_REASON_UNSPECIFIED = 0;
+  SHUTDOWN_REASON_REQUESTED = 1;
+  SHUTDOWN_REASON_RESTART = 2;
+  SHUTDOWN_REASON_ERROR = 3;
+}
+
+message Shutdown {
+  ShutdownReason reason = 1;
+  string message = 2;
+}
+
+message ConfigReplace {
+  uint64 revision = 1;
+  bool http_enabled = 2;
+  uint32 http_port = 3;
+  string web_root = 4;
+  uint32 max_in_flight_snapshots = 5;
+}
+
+message BridgePolicyReplace {
+  uint64 revision = 1;
+  uint32 max_control_frame_bytes = 2;
+  uint32 max_snapshot_frame_bytes = 3;
+  uint32 max_uncompressed_snapshot_bytes = 4;
+  uint32 max_pending_dirty_chunks = 5;
+  uint32 snapshot_credits = 6;
+}
+
+enum BlockTransparency {
+  BLOCK_TRANSPARENCY_UNSPECIFIED = 0;
+  BLOCK_TRANSPARENCY_OPAQUE = 1;
+  BLOCK_TRANSPARENCY_TRANSLUCENT = 2;
+  BLOCK_TRANSPARENCY_INVISIBLE = 3;
+}
+
+enum FluidClass {
+  FLUID_CLASS_UNSPECIFIED = 0;
+  FLUID_CLASS_NONE = 1;
+  FLUID_CLASS_WATER = 2;
+  FLUID_CLASS_LAVA = 3;
+  FLUID_CLASS_OTHER = 4;
+}
+
+message BlockStateDescriptor {
+  uint32 id = 1;
+  uint32 map_color = 2;
+  BlockTransparency transparency = 3;
+  bool glass = 4;
+  FluidClass fluid = 5;
+  uint32 tint_index = 6;
+}
+
+message BiomeDescriptor {
+  uint32 id = 1;
+  uint32 grass_color = 2;
+  uint32 foliage_color = 3;
+  uint32 water_color = 4;
+  uint32 tint_index = 5;
+}
+
+message RegistryReplace {
+  uint64 revision = 1;
+  repeated BlockStateDescriptor block_states = 2;
+  repeated BiomeDescriptor biomes = 3;
+}
+
+message WorldIdentity {
+  string namespace = 1;
+  string value = 2;
+  uint64 epoch = 3;
+}
+
+message World {
+  WorldIdentity identity = 1;
+  string display_name = 2;
+  string dimension = 3;
+  sint32 min_y = 4;
+  sint32 max_y = 5;
+  bool ceiling = 6;
+}
+
+message WorldUpsert {
+  World world = 1;
+}
+
+enum WorldRemoveReason {
+  WORLD_REMOVE_REASON_UNSPECIFIED = 0;
+  WORLD_REMOVE_REASON_UNLOADED = 1;
+  WORLD_REMOVE_REASON_DELETED = 2;
+}
+
+message WorldRemove {
+  WorldIdentity world = 1;
+  WorldRemoveReason reason = 2;
+}
+
+message WorldStateReplace {
+  uint64 revision = 1;
+  repeated World worlds = 2;
+}
+
+message Player {
+  bytes uuid = 1;
+  string name = 2;
+  sint32 x = 3;
+  sint32 y = 4;
+  sint32 z = 5;
+  float yaw = 6;
+  bool hidden = 7;
+}
+
+message PlayersReplace {
+  uint64 revision = 1;
+  repeated Player players = 2;
+}
+
+message Marker {
+  string id = 1;
+  WorldIdentity world = 2;
+  string label = 3;
+  sint32 x = 4;
+  sint32 y = 5;
+  sint32 z = 6;
+  string icon = 7;
+  bool visible = 8;
+}
+
+message MarkerLayer {
+  string id = 1;
+  string label = 2;
+  repeated Marker markers = 3;
+  bool visible = 4;
+}
+
+message MarkerLayersReplace {
+  uint64 revision = 1;
+  repeated MarkerLayer layers = 2;
+}
+
+message Icon {
+  string id = 1;
+  bytes image = 2;
+  string mime_type = 3;
+}
+
+message IconsReplace {
+  uint64 revision = 1;
+  repeated Icon icons = 2;
+}
+
+message ChunkCoordinate {
+  sint32 x = 1;
+  sint32 z = 2;
+}
+
+message ChunkDirty {
+  WorldIdentity world = 1;
+  ChunkCoordinate coordinate = 2;
+  uint64 revision = 3;
+}
+
+enum ResyncReason {
+  RESYNC_REASON_UNSPECIFIED = 0;
+  RESYNC_REASON_QUEUE_FULL = 1;
+  RESYNC_REASON_RECONNECT = 2;
+  RESYNC_REASON_GAP = 3;
+}
+
+message WorldResyncRequired {
+  WorldIdentity world = 1;
+  ResyncReason reason = 2;
+}
+
+message ChunkSnapshotRequest {
+  WorldIdentity world = 1;
+  ChunkCoordinate coordinate = 2;
+  uint64 revision = 3;
+  uint64 request_id = 4;
+}
+
+message ChunkSection {
+  sint32 section_y = 1;
+  repeated uint32 block_palette = 2;
+  bytes block_indices = 3;
+  repeated uint32 biome_palette = 4;
+  bytes biome_indices = 5;
+}
+
+message Heightmap {
+  repeated sint32 heights = 1;
+}
+
+message ChunkSnapshot {
+  WorldIdentity world = 1;
+  ChunkCoordinate coordinate = 2;
+  sint32 min_y = 3;
+  sint32 max_y = 4;
+  bool ceiling = 5;
+  uint64 revision = 6;
+  repeated ChunkSection sections = 7;
+  Heightmap surface_heightmap = 8;
+  uint32 uncompressed_bytes = 9;
+  uint32 crc32c = 10;
+  bytes compressed_payload = 11;
+}
+
+enum ChunkMissingReason {
+  CHUNK_MISSING_REASON_UNSPECIFIED = 0;
+  CHUNK_MISSING_REASON_UNLOADED = 1;
+  CHUNK_MISSING_REASON_UNAVAILABLE = 2;
+  CHUNK_MISSING_REASON_INVALID = 3;
+}
+
+message ChunkMissing {
+  WorldIdentity world = 1;
+  ChunkCoordinate coordinate = 2;
+  uint64 revision = 3;
+  ChunkMissingReason reason = 4;
+}
+
+enum RenderCommandKind {
+  RENDER_COMMAND_KIND_UNSPECIFIED = 0;
+  RENDER_COMMAND_KIND_BACKGROUND = 1;
+  RENDER_COMMAND_KIND_RADIUS = 2;
+  RENDER_COMMAND_KIND_FULL = 3;
+  RENDER_COMMAND_KIND_CANCEL = 4;
+  RENDER_COMMAND_KIND_PAUSE = 5;
+  RENDER_COMMAND_KIND_RESUME = 6;
+}
+
+message RenderCommand {
+  uint64 job_id = 1;
+  RenderCommandKind kind = 2;
+  WorldIdentity world = 3;
+  ChunkCoordinate center = 4;
+  uint32 radius = 5;
+}
+
+enum RenderState {
+  RENDER_STATE_UNSPECIFIED = 0;
+  RENDER_STATE_QUEUED = 1;
+  RENDER_STATE_RUNNING = 2;
+  RENDER_STATE_PAUSED = 3;
+  RENDER_STATE_CANCELLED = 4;
+  RENDER_STATE_COMPLETE = 5;
+  RENDER_STATE_FAILED = 6;
+}
+
+message RenderProgress {
+  uint64 job_id = 1;
+  RenderState state = 2;
+  uint64 completed = 3;
+  uint64 total = 4;
+  string message = 5;
+}
+
+message RenderResult {
+  uint64 job_id = 1;
+  bool success = 2;
+  RenderState state = 3;
+  string message = 4;
+  uint64 rendered_chunks = 5;
+}
+
+enum HealthStatus {
+  HEALTH_STATUS_UNSPECIFIED = 0;
+  HEALTH_STATUS_STARTING = 1;
+  HEALTH_STATUS_READY = 2;
+  HEALTH_STATUS_DEGRADED = 3;
+  HEALTH_STATUS_STOPPING = 4;
+}
+
+message BackendHealth {
+  HealthStatus status = 1;
+  uint64 queue_depth = 2;
+  uint64 dirty_chunk_count = 3;
+  uint64 render_job_count = 4;
+  string message = 5;
+}
