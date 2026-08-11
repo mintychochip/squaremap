@@ -94,3 +94,60 @@ Result: `9 passed (1 suite, 15 warnings, 0.01s)`. Added cancellation/panic retry
 - Acks require an envelope from the current 16-byte session and only accepted/duplicate statuses. Unknown, old-session, rejected, unspecified, and duplicate/removed sequences are no-ops. Reconnect waits for the old generation's callback batch to finish before activating the new session and resetting sequence 1.
 - The writer is a private single worker. Callback failures requeue canonical current values, expose the cause, close the publisher, and close the writer. Close invokes the unblocking writer contract and joins without a timeout; sequence capacity is preflighted before batch removal. Replacement envelopes force protocol 1/0 while retaining correlation and payload.
 - Rust evaluates a cloned cursor candidate, commits only after a panic-safe durable handler returns success, latches gaps immediately, and leaves cancellation/panic retries eligible for application. Session IDs are exact 16-byte RFC 4122 v4 values in both the session generator and bootstrap Hello.
+
+## Final follow-up RED evidence against c109663
+
+The final regression tests were copied into a temporary detached checkout at parent commit `c109663`; the temporary checkout was removed after capture.
+
+Java focused command with the final `CoalescingOutboxTest`:
+
+```text
+./gradlew --no-daemon --no-configuration-cache :squaremap-common:test --tests '*CoalescingOutboxTest'
+```
+
+Result: `BUILD FAILED` during `:squaremap-common:compileTestJava` with exactly 2 errors. The parent constructor accepted only `(byte[], Writer)`, while the final `unacknowledgedOverflowMarkerSuppressesPostOverflowDirtiesOnReconnect` and `replacementKeysHaveDeterministicBoundAndCloseIsExactlyOnce` tests supplied `(byte[], Writer, int, int)`. This is the expected RED for the newly required bounded publisher API.
+
+To exercise the two runtime regressions against the unchanged parent implementation, a temporary `FinalReviewRedTest` used the same final test scenarios with the parent's public constructor and a default-capacity overflow. The focused command was:
+
+```text
+./gradlew --no-daemon --no-configuration-cache :squaremap-common:test --tests '*FinalReviewRedTest'
+```
+
+Result: `2 tests completed, 2 failed, 0 errors`. `reconnectFromWriterIsRejectedWithoutDeadlock()` failed because its 500 ms callback latch assertion observed `expected true but was false`; `unacknowledgedOverflowMarkerSuppressesPostOverflowDirties()` failed with `expected <0> but was <101>` canonical dirty values after the marker.
+
+Rust focused command against the same parent checkout:
+
+```text
+cargo test --manifest-path rust/Cargo.toml -p squaremap-server --test session_ordering
+```
+
+Result: `10 tests`: 9 passed and 1 failed, `synchronously_panicking_handler_does_not_consume_sequence`, which propagated `synchronous handler panic` from the handler invocation.
+
+These failures were captured before restoring the implementation worktree to the final branch.
+
+## Final follow-up GREEN evidence
+
+Java command:
+
+```text
+./gradlew --no-daemon --no-configuration-cache :squaremap-common:test --tests '*CoalescingOutboxTest'
+```
+
+Result: `BUILD SUCCESSFUL`; focused XML recorded 18 tests, 0 skipped, 0 failures, and 0 errors. The final regressions cover writer-thread reconnect rejection without deadlock, suppression of post-overflow dirties across reconnect, deterministic replacement-key bounds, and exactly-once writer close.
+
+Rust command:
+
+```text
+cargo test --manifest-path rust/Cargo.toml -p squaremap-server --test session_ordering
+```
+
+Result: `10 passed (1 suite, 15 warnings, 0.01s)`. The added synchronous handler-panic case confirms that invoking the handler itself is panic-safe and leaves the sequence retryable.
+
+## Final follow-up self-review
+
+- `BridgePublisher.reconnect` rejects worker-thread re-entry before waiting on its own in-flight callback; external reconnects still wait for the generation barrier.
+- The outbox and publisher both enforce the documented replacement-state bound before adding a new key. Repeated keys coalesce, while overflow is deterministic and does not grow either canonical map.
+- The publisher checks the world/epoch resync marker before inserting later dirty identities, so reconnect cannot resurrect dirties covered by an unacknowledged marker. `Writer.close` is guarded by one ownership flag across callback failure and repeated external closes.
+- Rust wraps handler invocation inside the panic-safe future, catches both synchronous invocation and asynchronous polling panics, and commits the cursor only after success.
+
+Final validation also passed `git diff --check`; only the intended Task 4 implementation, focused tests, and report are modified.

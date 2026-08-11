@@ -5,9 +5,11 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import xyz.jpenilla.squaremap.bridge.v1.Ack;
@@ -307,6 +309,102 @@ class CoalescingOutboxTest {
             publisher.close();
         }
     }
+    @Test
+    void reconnectFromWriterIsRejectedWithoutDeadlock() {
+        final AtomicReference<BridgePublisher> reference = new AtomicReference<>();
+        final AtomicReference<Throwable> failure = new AtomicReference<>();
+        final CountDownLatch written = new CountDownLatch(1);
+        final BridgePublisher publisher = new BridgePublisher(SESSION, sent -> {
+            try {
+                reference.get().reconnect(bytes(6));
+            } catch (final Throwable thrown) {
+                failure.set(thrown);
+            } finally {
+                written.countDown();
+            }
+        });
+        reference.set(publisher);
+        try {
+            publisher.publish(new BridgeEvent.ResyncWorld(WORLD, 1));
+            assertTrue(written.await(2, TimeUnit.SECONDS));
+            assertTrue(failure.get() instanceof IllegalStateException);
+            assertTrue(publisher.awaitSent(1, Duration.ofSeconds(2)));
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(interrupted);
+        } finally {
+            publisher.close();
+        }
+    }
+
+    @Test
+    void unacknowledgedOverflowMarkerSuppressesPostOverflowDirtiesOnReconnect() throws Exception {
+        final CountDownLatch entered = new CountDownLatch(1);
+        final CountDownLatch release = new CountDownLatch(1);
+        final List<BridgePublisher.Sent> sent = new CopyOnWriteArrayList<>();
+        final BridgePublisher publisher = new BridgePublisher(SESSION, new BridgePublisher.Writer() {
+            @Override
+            public void write(final BridgePublisher.Sent value) throws Exception {
+                sent.add(value);
+                if (value.sequence() == 1) {
+                    entered.countDown();
+                    release.await();
+                }
+            }
+            @Override
+            public void close() {
+                release.countDown();
+            }
+        }, 2, 2);
+        try {
+            publisher.publish(new BridgeEvent.DirtyChunk(WORLD, 9, 0, 0, 1));
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            publisher.publish(new BridgeEvent.DirtyChunk(WORLD, 9, 1, 0, 1));
+            assertEquals(BridgePublisher.PublishResult.RESYNC_MARKED,
+                publisher.publish(new BridgeEvent.DirtyChunk(WORLD, 9, 2, 0, 1)));
+            for (int index = 3; index < 20; index++) {
+                assertEquals(BridgePublisher.PublishResult.COALESCED,
+                    publisher.publish(new BridgeEvent.DirtyChunk(WORLD, 9, index, 0, 1)));
+            }
+            assertEquals(0, currentDirtyCount(publisher));
+
+            final Thread reconnect = new Thread(() -> publisher.reconnect(bytes(7)), "overflow-reconnect-test");
+            reconnect.start();
+            release.countDown();
+            reconnect.join(2000L);
+            assertFalse(reconnect.isAlive());
+            assertTrue(publisher.awaitSent(3, Duration.ofSeconds(2)));
+            assertTrue(sent.get(sent.size() - 1).event().payload() instanceof BridgeEvent.ResyncWorld);
+        } finally {
+            publisher.close();
+        }
+    }
+
+    @Test
+    void replacementKeysHaveDeterministicBoundAndCloseIsExactlyOnce() {
+        final AtomicInteger closes = new AtomicInteger();
+        final BridgePublisher publisher = new BridgePublisher(SESSION, new BridgePublisher.Writer() {
+            @Override
+            public void write(final BridgePublisher.Sent ignored) {}
+            @Override
+            public void close() {
+                closes.incrementAndGet();
+            }
+        }, 4, 2);
+        try {
+            assertEquals(BridgePublisher.PublishResult.ACCEPTED,
+                publisher.publish(new BridgeEvent.ReplaceState("one", Envelope.getDefaultInstance())));
+            assertEquals(BridgePublisher.PublishResult.ACCEPTED,
+                publisher.publish(new BridgeEvent.ReplaceState("two", Envelope.getDefaultInstance())));
+            assertThrows(IllegalStateException.class,
+                () -> publisher.publish(new BridgeEvent.ReplaceState("three", Envelope.getDefaultInstance())));
+            assertFalse(publisher.isClosed());
+        } finally {
+            publisher.close();
+            publisher.close();
+        }
+        assertEquals(1, closes.get());
+    }
 
     @Test
     void sequenceExhaustionLeavesEventsPending() throws Exception {
@@ -340,6 +438,19 @@ class CoalescingOutboxTest {
             Thread.yield();
         }
         return publisher.isClosed();
+    }
+
+    private static int currentDirtyCount(final BridgePublisher publisher) throws Exception {
+        final Field current = BridgePublisher.class.getDeclaredField("current");
+        current.setAccessible(true);
+        final Map<?, BridgeEvent> values = (Map<?, BridgeEvent>) current.get(publisher);
+        int count = 0;
+        for (final BridgeEvent event : values.values()) {
+            if (event instanceof BridgeEvent.DirtyChunk) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private static byte[] bytes(final int value) {

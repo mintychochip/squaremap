@@ -133,6 +133,17 @@ async fn panicking_handler_does_not_consume_sequence() {
     let retry = server.process(message(&id, 1), |_| async { Ok::<_, SessionError>(()) }).await.unwrap();
     assert_eq!(retry.ack().unwrap().acknowledged_sequence, 1);
 }
+#[tokio::test]
+async fn synchronously_panicking_handler_does_not_consume_sequence() {
+    let id = [14_u8; 16];
+    let mut server = Session::new(id);
+    let panicked = server.process(message(&id, 1), |_| -> std::future::Ready<Result<(), SessionError>> {
+        panic!("synchronous handler panic");
+    }).await;
+    assert!(matches!(panicked, Err(SessionError::HandlerPanicked(_))));
+    let retry = server.process(message(&id, 1), |_| async { Ok::<_, SessionError>(()) }).await.unwrap();
+    assert_eq!(retry.ack().unwrap().acknowledged_sequence, 1);
+}
 
 #[test]
 fn authenticated_ids_are_rfc4122_v4() {

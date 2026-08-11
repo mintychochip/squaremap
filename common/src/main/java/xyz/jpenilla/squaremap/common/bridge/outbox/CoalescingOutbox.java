@@ -11,11 +11,28 @@ import java.util.TreeMap;
 public final class CoalescingOutbox {
     public static final int MAX_DIRTY_KEYS = 65_536;
 
+    private final int maxDirtyKeys;
+    private final int maxReplacementKeys;
     private final Object lock = new Object();
     private final Map<String, BridgeEvent.ReplaceState> states = new TreeMap<>();
     private final Map<DirtyKey, BridgeEvent.DirtyChunk> dirty = new TreeMap<>();
     private final Map<WorldEpoch, BridgeEvent.ResyncWorld> resyncs = new TreeMap<>();
 
+    public CoalescingOutbox() {
+        this(MAX_DIRTY_KEYS, BridgePublisher.DEFAULT_MAX_REPLACEMENT_KEYS);
+    }
+
+    CoalescingOutbox(final int maxDirtyKeys, final int maxReplacementKeys) {
+        if (maxDirtyKeys < 1 || maxReplacementKeys < 1) {
+            throw new IllegalArgumentException("outbox bounds must be positive");
+        }
+        this.maxDirtyKeys = maxDirtyKeys;
+        this.maxReplacementKeys = maxReplacementKeys;
+    }
+
+    int maxDirtyKeys() {
+        return this.maxDirtyKeys;
+    }
     public BridgePublisher.PublishResult offer(final BridgeEvent event) {
         Objects.requireNonNull(event, "event");
         synchronized (this.lock) {
@@ -86,7 +103,11 @@ public final class CoalescingOutbox {
 
     private BridgePublisher.PublishResult offerLocked(final BridgeEvent event) {
         if (event instanceof BridgeEvent.ReplaceState state) {
-            final BridgeEvent.ReplaceState previous = this.states.put(state.key(), state);
+            final BridgeEvent.ReplaceState previous = this.states.get(state.key());
+            if (previous == null && this.states.size() >= this.maxReplacementKeys) {
+                throw new IllegalStateException("replacement-state key bound exceeded");
+            }
+            this.states.put(state.key(), state);
             return previous == null ? BridgePublisher.PublishResult.ACCEPTED : BridgePublisher.PublishResult.COALESCED;
         }
         if (event instanceof BridgeEvent.ResyncWorld resync) {
@@ -109,7 +130,7 @@ public final class CoalescingOutbox {
             }
             return BridgePublisher.PublishResult.COALESCED;
         }
-        if (this.dirty.size() >= MAX_DIRTY_KEYS) {
+        if (this.dirty.size() >= this.maxDirtyKeys) {
             return this.markResyncLocked(worldEpoch.world(), worldEpoch.epoch());
         }
         this.dirty.put(key, chunk);

@@ -20,6 +20,9 @@ import xyz.jpenilla.squaremap.bridge.v1.WorldResyncRequired;
 
 /** Owns the only bridge writer worker and keeps durable values until acknowledgement. */
 public final class BridgePublisher implements AutoCloseable {
+    public static final int DEFAULT_MAX_REPLACEMENT_KEYS = 4_096;
+    /** Replacement state is bounded to keep canonical snapshots in memory. */
+    public static final int MAX_REPLACEMENT_KEYS = DEFAULT_MAX_REPLACEMENT_KEYS;
     public enum PublishResult {
         ACCEPTED,
         COALESCED,
@@ -48,9 +51,12 @@ public final class BridgePublisher implements AutoCloseable {
     private final Thread worker;
     private final Map<Object, BridgeEvent> current = new HashMap<>();
     private final Map<Long, InFlight> inFlight = new HashMap<>();
-    private boolean signaled;
+    private final int maxDirtyKeys;
+    private final int maxReplacementKeys;
     private boolean dispatching;
+    private boolean signaled;
     private boolean closed;
+    private boolean writerClosed;
     private Throwable failure;
     private long sentCount;
     private long nextSequence;
@@ -58,13 +64,22 @@ public final class BridgePublisher implements AutoCloseable {
     private byte[] sessionId;
 
     public BridgePublisher(final byte[] sessionId, final Writer writer) {
-        this.outbox = new CoalescingOutbox();
+        this(sessionId, writer, CoalescingOutbox.MAX_DIRTY_KEYS, DEFAULT_MAX_REPLACEMENT_KEYS);
+    }
+    BridgePublisher(final byte[] sessionId, final Writer writer, final int maxDirtyKeys, final int maxReplacementKeys) {
+        if (maxReplacementKeys < 1) {
+            throw new IllegalArgumentException("replacement-state bound must be positive");
+        }
+        this.maxDirtyKeys = maxDirtyKeys;
+        this.maxReplacementKeys = maxReplacementKeys;
+        this.outbox = new CoalescingOutbox(maxDirtyKeys, maxReplacementKeys);
         this.sessionId = validSession(sessionId);
         this.writer = Objects.requireNonNull(writer, "writer");
         this.worker = new Thread(this::runWriter, "squaremap-bridge-writer");
         this.worker.setDaemon(true);
         this.worker.start();
     }
+
 
     public PublishResult publish(final BridgeEvent event) {
         Objects.requireNonNull(event, "event");
@@ -147,6 +162,9 @@ public final class BridgePublisher implements AutoCloseable {
 
     /** Activates a caller-authenticated session after the old writer generation is idle. */
     public void reconnect(final byte[] newSessionId) {
+        if (Thread.currentThread() == this.worker) {
+            throw new IllegalStateException("reconnect cannot be called by bridge writer");
+        }
         final byte[] validated = validSession(newSessionId);
         synchronized (this.lock) {
             if (Arrays.equals(this.sessionId, validated)) {
@@ -186,15 +204,7 @@ public final class BridgePublisher implements AutoCloseable {
             this.closed = true;
             this.signal.release();
         }
-        try {
-            this.writer.close();
-        } catch (final Throwable closeFailure) {
-            synchronized (this.lock) {
-                if (this.failure == null) {
-                    this.failure = closeFailure;
-                }
-            }
-        }
+        this.closeWriterOnce();
         if (Thread.currentThread() == this.worker) {
             return;
         }
@@ -212,9 +222,30 @@ public final class BridgePublisher implements AutoCloseable {
         }
     }
 
+    private void closeWriterOnce() {
+        synchronized (this.lock) {
+            if (this.writerClosed) {
+                return;
+            }
+            this.writerClosed = true;
+        }
+        try {
+            this.writer.close();
+        } catch (final Throwable closeFailure) {
+            synchronized (this.lock) {
+                if (this.failure == null) {
+                    this.failure = closeFailure;
+                }
+            }
+        }
+    }
+
     private PublishResult offerCurrent(final BridgeEvent event) {
         if (event instanceof BridgeEvent.ReplaceState state) {
             final Object identity = identity(state);
+            if (!this.current.containsKey(identity) && this.replacementCount() >= this.maxReplacementKeys) {
+                throw new IllegalStateException("replacement-state key bound exceeded");
+            }
             this.current.put(identity, state);
             return this.outbox.offer(state);
         }
@@ -225,15 +256,16 @@ public final class BridgePublisher implements AutoCloseable {
         }
 
         final BridgeEvent.DirtyChunk dirty = (BridgeEvent.DirtyChunk) event;
-        final Object identity = identity(dirty);
-        final BridgeEvent previous = this.current.get(identity);
-        if (previous instanceof BridgeEvent.ResyncWorld) {
+        final WorldIdentityKey worldIdentity = new WorldIdentityKey(dirty.world(), dirty.epoch());
+        if (this.current.get(worldIdentity) instanceof BridgeEvent.ResyncWorld) {
             return PublishResult.COALESCED;
         }
+        final Object identity = identity(dirty);
+        final BridgeEvent previous = this.current.get(identity);
         if (previous instanceof BridgeEvent.DirtyChunk old && dirty.revision() <= old.revision()) {
             return PublishResult.COALESCED;
         }
-        if (previous == null && dirtyCount() >= CoalescingOutbox.MAX_DIRTY_KEYS) {
+        if (previous == null && this.dirtyCount() >= this.maxDirtyKeys) {
             this.removeDirtyFor(dirty.world(), dirty.epoch());
             final BridgeEvent.ResyncWorld marker = new BridgeEvent.ResyncWorld(dirty.world(), dirty.epoch());
             this.current.put(identity(marker), marker);
@@ -242,6 +274,16 @@ public final class BridgePublisher implements AutoCloseable {
         }
         this.current.put(identity, dirty);
         return this.outbox.offer(dirty);
+    }
+
+    private int replacementCount() {
+        int count = 0;
+        for (final BridgeEvent event : this.current.values()) {
+            if (event instanceof BridgeEvent.ReplaceState) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private int dirtyCount() {
@@ -331,13 +373,7 @@ public final class BridgePublisher implements AutoCloseable {
                     this.failLocked(writeFailure);
                     this.lock.notifyAll();
                 }
-                try {
-                    this.writer.close();
-                } catch (final Throwable closeFailure) {
-                    synchronized (this.lock) {
-                        writeFailure.addSuppressed(closeFailure);
-                    }
-                }
+                this.closeWriterOnce();
                 return;
             }
             synchronized (this.lock) {

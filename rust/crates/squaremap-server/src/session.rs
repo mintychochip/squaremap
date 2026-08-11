@@ -153,7 +153,7 @@ impl Session {
                 })
             }
             Decision::New => {
-                match PanicSafe::new(handler(&envelope)).await {
+                match PanicSafe::new(async { handler(&envelope).await }).await {
                     Ok(Ok(())) => {
                         self.cursor.commit_new(envelope.sequence);
                         Ok(SessionOutcome {
