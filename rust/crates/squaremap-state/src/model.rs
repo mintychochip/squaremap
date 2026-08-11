@@ -5,7 +5,8 @@ use std::fmt;
 pub const MAX_TEXT_BYTES: usize = 4 * 1024;
 pub const MAX_CONFIG_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
-pub const MAX_SESSION_ID_BYTES: usize = 256;
+pub const MAX_SESSION_ID_BYTES: usize = 16;
+pub const MAX_JOB_ID_BYTES: usize = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WorldId {
@@ -100,7 +101,7 @@ impl RenderJob {
     }
     pub(crate) fn validate(&self) -> Result<(), ModelError> {
         self.world.validate()?;
-        if self.id.len() > MAX_PAYLOAD_BYTES { return Err(ModelError::Bounds("render job ID")); }
+        if self.id.is_empty() || self.id.len() > MAX_JOB_ID_BYTES { return Err(ModelError::Bounds("render job ID")); }
         if self.payload.len() > MAX_PAYLOAD_BYTES { return Err(ModelError::Bounds("render job payload")); }
         if self.completed_chunks > i64::MAX as u64 { return Err(ModelError::Overflow("completed chunks")); }
         Ok(())

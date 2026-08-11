@@ -1,7 +1,9 @@
 use crate::model::{ChunkCoordinate, MAX_PAYLOAD_BYTES, MAX_TEXT_BYTES};
 use sha2::{Digest, Sha256};
 use serde_json::Value;
-use std::fs;
+use std::collections::HashSet;
+use std::fs::{self, OpenOptions};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const MAX_FILE_BYTES: usize = 32 * 1024 * 1024;
@@ -29,6 +31,9 @@ impl ParsedLegacy {
 
 pub(crate) fn parse_legacy_files(directory: &Path) -> Result<ParsedLegacy, LegacyError> {
     if directory.as_os_str().len() > MAX_TEXT_BYTES { return Err(LegacyError { path: directory.to_path_buf(), message: "directory path exceeds bounds".into() }); }
+    if let Ok(metadata) = fs::symlink_metadata(directory) {
+        if metadata.file_type().is_symlink() { return Err(invalid(directory, "world directory must not be a symlink")); }
+    }
     let dirty_path = directory.join("dirty_chunks.json");
     let resume_path = directory.join("resume_render.json");
     let dirty = read_candidate(&dirty_path)?;
@@ -49,17 +54,30 @@ pub(crate) struct LegacyError {
     pub path: PathBuf,
     pub message: String,
 }
-
 fn read_candidate(path: &Path) -> Result<Option<(Vec<u8>, Vec<u8>)>, LegacyError> {
-    let metadata = match fs::metadata(path) {
+    let path_metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(LegacyError { path: path.to_path_buf(), message: error.to_string() }),
     };
-    if !metadata.is_file() { return Err(LegacyError { path: path.to_path_buf(), message: "expected a regular file".into() }); }
-    if metadata.len() > MAX_FILE_BYTES as u64 { return Err(LegacyError { path: path.to_path_buf(), message: format!("file exceeds {MAX_FILE_BYTES} bytes") }); }
-    let bytes = fs::read(path).map_err(|error| LegacyError { path: path.to_path_buf(), message: error.to_string() })?;
-    let mut hasher = Sha256::new(); hasher.update(&bytes);
+    if path_metadata.file_type().is_symlink() { return Err(invalid(path, "candidate must not be a symlink")); }
+    if !path_metadata.is_file() { return Err(invalid(path, "expected a regular file")); }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(path).map_err(|error| LegacyError { path: path.to_path_buf(), message: error.to_string() })?;
+    if !file.metadata().map_err(|error| LegacyError { path: path.to_path_buf(), message: error.to_string() })?.is_file() {
+        return Err(invalid(path, "expected a regular file"));
+    }
+    let mut bytes = Vec::with_capacity((path_metadata.len().min(MAX_FILE_BYTES as u64) as usize).saturating_add(1));
+    file.take(MAX_FILE_BYTES as u64 + 1).read_to_end(&mut bytes).map_err(|error| LegacyError { path: path.to_path_buf(), message: error.to_string() })?;
+    if bytes.len() > MAX_FILE_BYTES { return Err(invalid(path, format!("file exceeds {MAX_FILE_BYTES} bytes"))); }
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
     Ok(Some((bytes, hasher.finalize().to_vec())))
 }
 
@@ -67,16 +85,15 @@ fn parse_dirty(path: &Path, bytes: &[u8]) -> Result<Vec<ChunkCoordinate>, Legacy
     let value: Value = serde_json::from_slice(bytes).map_err(|error| LegacyError { path: path.to_path_buf(), message: error.to_string() })?;
     let array = value.as_array().ok_or_else(|| invalid(path, "expected an array"))?;
     if array.len() > MAX_ENTRIES { return Err(invalid(path, "entry count exceeds bound")); }
-    let mut coordinates = Vec::with_capacity(array.len());
+    let mut seen = HashSet::with_capacity(array.len());
     for entry in array {
         let object = entry.as_object().ok_or_else(|| invalid(path, "entry must be an object"))?;
         if object.len() != 2 || !object.contains_key("x") || !object.contains_key("z") { return Err(invalid(path, "entry must contain only x and z")); }
-        let x = parse_coordinate(path, object.get("x"), "x")?;
-        let z = parse_coordinate(path, object.get("z"), "z")?;
-        let coordinate = ChunkCoordinate { x, z };
-        if !coordinates.contains(&coordinate) { coordinates.push(coordinate); }
+        let coordinate = ChunkCoordinate { x: parse_coordinate(path, object.get("x"), "x")?, z: parse_coordinate(path, object.get("z"), "z")? };
+        seen.insert(coordinate);
     }
-    coordinates.sort_by_key(|coordinate| (coordinate.x, coordinate.z));
+    let mut coordinates: Vec<_> = seen.into_iter().collect();
+    coordinates.sort_unstable_by_key(|coordinate| (coordinate.x, coordinate.z));
     Ok(coordinates)
 }
 
@@ -85,6 +102,7 @@ fn parse_resume(path: &Path, bytes: &[u8]) -> Result<Vec<u8>, LegacyError> {
     let array = value.as_array().ok_or_else(|| invalid(path, "expected Gson complex-map-key entry array"))?;
     if array.len() > MAX_ENTRIES { return Err(invalid(path, "entry count exceeds bound")); }
     let mut normalized = Vec::with_capacity(array.len());
+    let mut seen = HashSet::with_capacity(array.len());
     for entry in array {
         let pair = entry.as_array().ok_or_else(|| invalid(path, "entry must be a two-element array"))?;
         if pair.len() != 2 { return Err(invalid(path, "entry must be a two-element array")); }
@@ -92,6 +110,7 @@ fn parse_resume(path: &Path, bytes: &[u8]) -> Result<Vec<u8>, LegacyError> {
         if object.len() != 2 || !object.contains_key("x") || !object.contains_key("z") { return Err(invalid(path, "map key must contain only x and z")); }
         let x = parse_coordinate(path, object.get("x"), "x")?;
         let z = parse_coordinate(path, object.get("z"), "z")?;
+        if !seen.insert((x, z)) { return Err(invalid(path, "duplicate resume coordinate")); }
         let completed = pair[1].as_bool().ok_or_else(|| invalid(path, "map value must be boolean"))?;
         normalized.push(serde_json::json!([{"x": x, "z": z}, completed]));
     }

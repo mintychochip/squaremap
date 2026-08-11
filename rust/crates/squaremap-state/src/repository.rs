@@ -76,15 +76,24 @@ impl Repository {
 
     pub async fn apply_world(&self, world: World) -> Result<(), RepositoryError> {
         world.validate()?;
+        let epoch = checked_i64(world.id.epoch, "world epoch")?;
         self.blocking(move |connection| {
             let transaction = connection.transaction()?;
             let existing: Option<i64> = transaction.query_row("SELECT epoch FROM worlds WHERE namespace=?1 AND value=?2", params![world.id.namespace, world.id.value], |row| row.get(0)).optional()?;
-            if existing.is_some_and(|epoch| epoch > world.id.epoch as i64) { return Err(RepositoryError::StaleWorld(world.id)); }
-            if existing.is_some_and(|epoch| epoch < world.id.epoch as i64) {
-                transaction.execute("DELETE FROM dirty_chunks WHERE namespace=?1 AND value=?2", params![world.id.namespace, world.id.value])?;
-                transaction.execute("DELETE FROM render_jobs WHERE namespace=?1 AND value=?2", params![world.id.namespace, world.id.value])?;
+            if let Some(raw) = existing {
+                if raw < 0 {
+                    let removed = decode_tombstone(raw)?;
+                    if world.id.epoch <= removed { return Err(RepositoryError::StaleWorld(world.id)); }
+                    transaction.execute("DELETE FROM dirty_chunks WHERE namespace=?1 AND value=?2", params![world.id.namespace, world.id.value])?;
+                    transaction.execute("DELETE FROM render_jobs WHERE namespace=?1 AND value=?2", params![world.id.namespace, world.id.value])?;
+                } else if raw > epoch {
+                    return Err(RepositoryError::StaleWorld(world.id));
+                } else if raw < epoch {
+                    transaction.execute("DELETE FROM dirty_chunks WHERE namespace=?1 AND value=?2", params![world.id.namespace, world.id.value])?;
+                    transaction.execute("DELETE FROM render_jobs WHERE namespace=?1 AND value=?2", params![world.id.namespace, world.id.value])?;
+                }
             }
-            transaction.execute("INSERT INTO worlds(namespace,value,epoch,config) VALUES(?1,?2,?3,?4) ON CONFLICT(namespace,value) DO UPDATE SET epoch=excluded.epoch, config=excluded.config", params![world.id.namespace, world.id.value, world.id.epoch as i64, world.config])?;
+            transaction.execute("INSERT INTO worlds(namespace,value,epoch,config) VALUES(?1,?2,?3,?4) ON CONFLICT(namespace,value) DO UPDATE SET epoch=excluded.epoch, config=excluded.config", params![world.id.namespace, world.id.value, epoch, world.config])?;
             transaction.commit()?;
             Ok(())
         }).await
@@ -92,14 +101,16 @@ impl Repository {
 
     pub async fn remove_world(&self, world: &WorldId) -> Result<bool, RepositoryError> {
         world.validate()?;
+        let epoch = checked_i64(world.epoch, "world epoch")?;
+        let tombstone = -1 - epoch;
         let world = world.clone();
         self.blocking(move |connection| {
             let transaction = connection.transaction()?;
             let current: Option<i64> = transaction.query_row("SELECT epoch FROM worlds WHERE namespace=?1 AND value=?2", params![world.namespace, world.value], |row| row.get(0)).optional()?;
-            if current != Some(world.epoch as i64) { transaction.commit()?; return Ok(false); }
-            transaction.execute("DELETE FROM dirty_chunks WHERE namespace=?1 AND value=?2 AND epoch=?3", params![world.namespace, world.value, world.epoch as i64])?;
-            transaction.execute("DELETE FROM render_jobs WHERE namespace=?1 AND value=?2 AND epoch=?3", params![world.namespace, world.value, world.epoch as i64])?;
-            transaction.execute("DELETE FROM worlds WHERE namespace=?1 AND value=?2 AND epoch=?3", params![world.namespace, world.value, world.epoch as i64])?;
+            if current != Some(epoch) { transaction.commit()?; return Ok(false); }
+            transaction.execute("DELETE FROM dirty_chunks WHERE namespace=?1 AND value=?2", params![world.namespace, world.value])?;
+            transaction.execute("DELETE FROM render_jobs WHERE namespace=?1 AND value=?2", params![world.namespace, world.value])?;
+            transaction.execute("UPDATE worlds SET epoch=?1 WHERE namespace=?2 AND value=?3", params![tombstone, world.namespace, world.value])?;
             transaction.commit()?;
             Ok(true)
         }).await
@@ -107,9 +118,9 @@ impl Repository {
 
     pub async fn mark_dirty(&self, world: &WorldId, coordinate: ChunkCoordinate, revision: u64, session_id: &[u8], sequence: u64) -> Result<bool, RepositoryError> {
         world.validate()?;
+        if session_id.len() != MAX_SESSION_ID_BYTES { return Err(ModelError::Bounds("session ID must be exactly 16 bytes").into()); }
         let revision = checked_i64(revision, "dirty revision")?;
         let sequence = checked_i64(sequence, "session sequence")?;
-        if session_id.is_empty() || session_id.len() > MAX_SESSION_ID_BYTES { return Err(ModelError::Bounds("session ID").into()); }
         let world = world.clone();
         let session_id = session_id.to_vec();
         self.blocking(move |connection| {
@@ -136,13 +147,19 @@ impl Repository {
     }
 
     pub async fn create_render_job(&self, mut job: RenderJob) -> Result<(), RepositoryError> {
-        job.validate()?;
         if job.id.is_empty() { job.id = deterministic_job_id(&job.world, job.kind); }
+        job.validate()?;
         let job = job.clone();
         self.blocking(move |connection| {
             let transaction = connection.transaction()?;
             ensure_current_world(&transaction, &job.world)?;
-            transaction.execute("INSERT INTO render_jobs(id,namespace,value,epoch,kind,state,payload,completed_chunks) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO NOTHING", params![job.id, job.world.namespace, job.world.value, job.world.epoch as i64, job.kind as i64, job.state as i64, job.payload, job.completed_chunks as i64])?;
+            let existing: Option<(String, String, i64, i64, i64, Vec<u8>, i64)> = transaction.query_row("SELECT namespace,value,epoch,kind,state,payload,completed_chunks FROM render_jobs WHERE id=?1", params![job.id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))).optional()?;
+            if let Some(existing) = existing {
+                let same = existing.0 == job.world.namespace && existing.1 == job.world.value && existing.2 == job.world.epoch as i64 && existing.3 == job.kind as i64 && existing.4 == job.state as i64 && existing.5 == job.payload && existing.6 == job.completed_chunks as i64;
+                if !same { return Err(RepositoryError::Schema("conflicting render job ID".into())); }
+            } else {
+                transaction.execute("INSERT INTO render_jobs(id,namespace,value,epoch,kind,state,payload,completed_chunks) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![job.id, job.world.namespace, job.world.value, job.world.epoch as i64, job.kind as i64, job.state as i64, job.payload, job.completed_chunks as i64])?;
+            }
             transaction.commit()?;
             Ok(())
         }).await
@@ -169,9 +186,11 @@ impl Repository {
         world.validate()?;
         let world = world.clone();
         let directory = directory.as_ref().to_path_buf();
-        let parsed = parse_legacy_files(&directory).map_err(|error| RepositoryError::InvalidLegacy { path: error.path, message: error.message })?;
-        if parsed.files().next().is_none() { return Ok(()); }
-        self.blocking(move |connection| import_parsed(connection, &world, &parsed)).await
+        self.blocking(move |connection| {
+            let parsed = parse_legacy_files(&directory).map_err(|error| RepositoryError::InvalidLegacy { path: error.path, message: error.message })?;
+            if parsed.files().next().is_none() { return Ok(()); }
+            import_parsed(connection, &world, &parsed)
+        }).await
     }
     pub async fn pragma_values(&self) -> Result<(String, i64, i64, i64, i64), RepositoryError> {
         self.blocking(|connection| {
@@ -194,10 +213,15 @@ fn open_connection(path: &Path) -> Result<Connection, RepositoryError> {
     if object_count == 0 {
         if existed_nonempty { return Err(RepositoryError::Schema("nonempty database has no supported schema".into())); }
         if application_id != 0 && application_id != APPLICATION_ID { return Err(RepositoryError::Schema("wrong application ID".into())); }
-        connection.execute_batch("PRAGMA application_id=0x53514D50;")?;
-        connection.execute_batch(SCHEMA)?;
-    } else if application_id != APPLICATION_ID {
-        return Err(RepositoryError::Schema("wrong application ID".into()));
+        connection.execute_batch("PRAGMA application_id=0x53514D50; BEGIN IMMEDIATE;")?;
+        if let Err(error) = connection.execute_batch(SCHEMA) {
+            let _ = connection.execute_batch("ROLLBACK");
+            return Err(error.into());
+        }
+        connection.execute_batch("COMMIT;")?;
+    } else {
+        if application_id != APPLICATION_ID { return Err(RepositoryError::Schema("wrong application ID".into())); }
+        validate_schema(&connection)?;
     }
     configure_and_validate(&connection)?;
     validate_schema(&connection)?;
@@ -222,17 +246,38 @@ fn validate_schema(connection: &Connection) -> Result<(), RepositoryError> {
     if count != 1 { return Err(RepositoryError::Schema("schema_version must contain exactly one row".into())); }
     let version: i64 = connection.query_row("SELECT version FROM schema_version", [], |row| row.get(0))?;
     if version != SCHEMA_VERSION { return Err(RepositoryError::Schema(format!("unsupported schema version {version}"))); }
-    let expected = ["schema_version", "worlds", "dirty_chunks", "render_jobs", "session_checkpoints", "legacy_imports"];
-    let mut statement = connection.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
-    let names: Vec<String> = statement.query_map([], |row| row.get(0))?.collect::<Result<_, _>>()?;
-    if names.len() != expected.len() || expected.iter().any(|name| !names.iter().any(|value| value == name)) { return Err(RepositoryError::Schema("schema tables do not match checked-in migration".into())); }
+    let expected_tables = ["schema_version", "worlds", "dirty_chunks", "render_jobs", "session_checkpoints", "legacy_imports"];
+    let mut statement = connection.prepare("SELECT type,name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name")?;
+    let entries: Vec<(String, String)> = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<Result<_, _>>()?;
+    if entries.iter().any(|(kind, name)| kind != "table" || !expected_tables.contains(&name.as_str())) || entries.iter().filter(|(kind, _)| kind == "table").count() != expected_tables.len() {
+        return Err(RepositoryError::Schema("schema objects do not match checked-in migration".into()));
+    }
+    let expected_columns: [(&str, &[(&str, &str, i64, i64)]); 6] = [
+        ("schema_version", &[("version", "INTEGER", 0, 1)]),
+        ("worlds", &[("namespace", "TEXT", 1, 1), ("value", "TEXT", 1, 2), ("epoch", "INTEGER", 1, 0), ("config", "BLOB", 1, 0)]),
+        ("dirty_chunks", &[("namespace", "TEXT", 1, 1), ("value", "TEXT", 1, 2), ("epoch", "INTEGER", 1, 3), ("x", "INTEGER", 1, 4), ("z", "INTEGER", 1, 5), ("revision", "INTEGER", 1, 0)]),
+        ("render_jobs", &[("id", "BLOB", 0, 1), ("namespace", "TEXT", 1, 0), ("value", "TEXT", 1, 0), ("epoch", "INTEGER", 1, 0), ("kind", "INTEGER", 1, 0), ("state", "INTEGER", 1, 0), ("payload", "BLOB", 1, 0), ("completed_chunks", "INTEGER", 1, 0)]),
+        ("session_checkpoints", &[("session_id", "BLOB", 0, 1), ("durable_sequence", "INTEGER", 1, 0)]),
+        ("legacy_imports", &[("relative_path", "TEXT", 0, 1), ("content_sha256", "BLOB", 1, 0), ("imported_at_epoch_seconds", "INTEGER", 1, 0)]),
+    ];
+    for (table, expected) in expected_columns {
+        let mut columns = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+        let actual: Vec<(String, String, i64, i64)> = columns.query_map([], |row| Ok((row.get(1)?, row.get(2)?, row.get(3)?, row.get(5)?)))?.collect::<Result<_, _>>()?;
+        let expected: Vec<_> = expected.iter().map(|(name, kind, notnull, pk)| ((*name).to_string(), (*kind).to_string(), *notnull, *pk)).collect();
+        if actual != expected { return Err(RepositoryError::Schema(format!("table {table} structure does not match migration"))); }
+    }
     Ok(())
+}
+
+fn decode_tombstone(value: i64) -> Result<u64, RepositoryError> {
+    if value >= 0 { return Err(RepositoryError::Schema("expected removed epoch tombstone".into())); }
+    u64::try_from(-1 - value).map_err(|_| RepositoryError::Schema("invalid removed epoch tombstone".into()))
 }
 
 fn ensure_current_world(transaction: &Transaction<'_>, world: &WorldId) -> Result<(), RepositoryError> {
     let current: Option<i64> = transaction.query_row("SELECT epoch FROM worlds WHERE namespace=?1 AND value=?2", params![world.namespace, world.value], |row| row.get(0)).optional()?;
     match current {
-        Some(epoch) if epoch == world.epoch as i64 => Ok(()),
+        Some(epoch) if epoch >= 0 && epoch == world.epoch as i64 => Ok(()),
         Some(_) => Err(RepositoryError::StaleWorld(world.clone())),
         None => Err(RepositoryError::MissingWorld(world.clone())),
     }
@@ -240,20 +285,37 @@ fn ensure_current_world(transaction: &Transaction<'_>, world: &WorldId) -> Resul
 
 fn recover_connection(connection: &mut Connection) -> Result<Recovery, RepositoryError> {
     let worlds = {
-        let mut statement = connection.prepare("SELECT namespace,value,epoch,config FROM worlds ORDER BY namespace,value")?;
-        statement.query_map([], |row| Ok(World { id: WorldId::new(row.get::<_, String>(0)?, row.get::<_, String>(1)?, checked_u64(row.get(2)?, "world epoch").map_err(|_| rusqlite::Error::InvalidQuery)?), config: row.get(3)? }))?.collect::<Result<Vec<_>, _>>()?
+        let mut statement = connection.prepare("SELECT namespace,value,epoch,config FROM worlds WHERE epoch >= 0 ORDER BY namespace,value")?;
+        statement.query_map([], |row| {
+            let world = World { id: WorldId::new(row.get::<_, String>(0)?, row.get::<_, String>(1)?, checked_u64(row.get(2)?, "world epoch").map_err(|_| rusqlite::Error::InvalidQuery)?), config: row.get(3)? };
+            world.validate().map_err(|_| rusqlite::Error::InvalidQuery)?;
+            Ok(world)
+        })?.collect::<Result<Vec<_>, _>>()?
     };
     let dirty = {
-        let mut statement = connection.prepare("SELECT dirty_chunks.namespace,dirty_chunks.value,dirty_chunks.epoch,dirty_chunks.x,dirty_chunks.z,dirty_chunks.revision FROM dirty_chunks INNER JOIN worlds USING(namespace,value) WHERE dirty_chunks.epoch=worlds.epoch ORDER BY dirty_chunks.namespace,dirty_chunks.value,dirty_chunks.epoch,dirty_chunks.x,dirty_chunks.z")?;
-        statement.query_map([], |row| Ok(DirtyChunk { world: WorldId::new(row.get::<_, String>(0)?, row.get::<_, String>(1)?, checked_u64(row.get(2)?, "dirty epoch").map_err(|_| rusqlite::Error::InvalidQuery)?), coordinate: ChunkCoordinate { x: row.get(3)?, z: row.get(4)? }, revision: checked_u64(row.get(5)?, "dirty revision").map_err(|_| rusqlite::Error::InvalidQuery)? }))?.collect::<Result<Vec<_>, _>>()?
+        let mut statement = connection.prepare("SELECT dirty_chunks.namespace,dirty_chunks.value,dirty_chunks.epoch,dirty_chunks.x,dirty_chunks.z,dirty_chunks.revision FROM dirty_chunks INNER JOIN worlds USING(namespace,value) WHERE worlds.epoch >= 0 AND dirty_chunks.epoch=worlds.epoch ORDER BY dirty_chunks.namespace,dirty_chunks.value,dirty_chunks.epoch,dirty_chunks.x,dirty_chunks.z")?;
+        statement.query_map([], |row| {
+            let world = WorldId::new(row.get::<_, String>(0)?, row.get::<_, String>(1)?, checked_u64(row.get(2)?, "dirty epoch").map_err(|_| rusqlite::Error::InvalidQuery)?);
+            world.validate().map_err(|_| rusqlite::Error::InvalidQuery)?;
+            Ok(DirtyChunk { world, coordinate: ChunkCoordinate { x: row.get(3)?, z: row.get(4)? }, revision: checked_u64(row.get(5)?, "dirty revision").map_err(|_| rusqlite::Error::InvalidQuery)? })
+        })?.collect::<Result<Vec<_>, _>>()?
     };
     let jobs = {
-        let mut statement = connection.prepare("SELECT render_jobs.id,render_jobs.namespace,render_jobs.value,render_jobs.epoch,render_jobs.kind,render_jobs.state,render_jobs.payload,render_jobs.completed_chunks FROM render_jobs INNER JOIN worlds USING(namespace,value) WHERE render_jobs.epoch=worlds.epoch AND render_jobs.state IN (1,2) ORDER BY render_jobs.id")?;
-        statement.query_map([], |row| Ok(RenderJob { id: row.get(0)?, world: WorldId::new(row.get::<_, String>(1)?, row.get::<_, String>(2)?, checked_u64(row.get(3)?, "job epoch").map_err(|_| rusqlite::Error::InvalidQuery)?), kind: decode_kind(row.get(4)?).map_err(|_| rusqlite::Error::InvalidQuery)?, state: if row.get::<_, i64>(5)? == JobState::Running as i64 { JobState::Resumable } else { decode_state(row.get(5)?).map_err(|_| rusqlite::Error::InvalidQuery)? }, payload: row.get(6)?, completed_chunks: checked_u64(row.get(7)?, "completed chunks").map_err(|_| rusqlite::Error::InvalidQuery)? }))?.collect::<Result<Vec<_>, _>>()?
+        let mut statement = connection.prepare("SELECT render_jobs.id,render_jobs.namespace,render_jobs.value,render_jobs.epoch,render_jobs.kind,render_jobs.state,render_jobs.payload,render_jobs.completed_chunks FROM render_jobs INNER JOIN worlds USING(namespace,value) WHERE worlds.epoch >= 0 AND render_jobs.epoch=worlds.epoch AND render_jobs.state IN (1,2) ORDER BY render_jobs.id")?;
+        statement.query_map([], |row| {
+            let state = row.get::<_, i64>(5)?;
+            let job = RenderJob { id: row.get(0)?, world: WorldId::new(row.get::<_, String>(1)?, row.get::<_, String>(2)?, checked_u64(row.get(3)?, "job epoch").map_err(|_| rusqlite::Error::InvalidQuery)?), kind: decode_kind(row.get(4)?).map_err(|_| rusqlite::Error::InvalidQuery)?, state: if state == JobState::Running as i64 { JobState::Resumable } else { decode_state(state).map_err(|_| rusqlite::Error::InvalidQuery)? }, payload: row.get(6)?, completed_chunks: checked_u64(row.get(7)?, "completed chunks").map_err(|_| rusqlite::Error::InvalidQuery)? };
+            job.validate().map_err(|_| rusqlite::Error::InvalidQuery)?;
+            Ok(job)
+        })?.collect::<Result<Vec<_>, _>>()?
     };
     let checkpoints = {
         let mut statement = connection.prepare("SELECT session_id,durable_sequence FROM session_checkpoints ORDER BY session_id")?;
-        statement.query_map([], |row| Ok(SessionCheckpoint { session_id: row.get(0)?, durable_sequence: checked_u64(row.get(1)?, "checkpoint").map_err(|_| rusqlite::Error::InvalidQuery)? }))?.collect::<Result<Vec<_>, _>>()?
+        statement.query_map([], |row| {
+            let session_id: Vec<u8> = row.get(0)?;
+            if session_id.len() != MAX_SESSION_ID_BYTES { return Err(rusqlite::Error::InvalidQuery); }
+            Ok(SessionCheckpoint { session_id, durable_sequence: checked_u64(row.get(1)?, "checkpoint").map_err(|_| rusqlite::Error::InvalidQuery)? })
+        })?.collect::<Result<Vec<_>, _>>()?
     };
     Ok(Recovery { worlds, dirty, jobs, checkpoints })
 }
@@ -271,22 +333,33 @@ pub(crate) fn deterministic_job_id(world: &WorldId, kind: JobKind) -> Vec<u8> {
     hash.finalize().to_vec()
 }
 
+fn legacy_key(world: &WorldId, filename: &str) -> String {
+    let mut identity = Vec::with_capacity(8 + world.namespace.len() + world.value.len());
+    identity.extend_from_slice(&(world.namespace.len() as u32).to_be_bytes());
+    identity.extend_from_slice(world.namespace.as_bytes());
+    identity.extend_from_slice(&(world.value.len() as u32).to_be_bytes());
+    identity.extend_from_slice(world.value.as_bytes());
+    identity.extend_from_slice(&world.epoch.to_be_bytes());
+    format!("v1/{}/{}", hex::encode(identity), filename)
+}
+
 fn import_parsed(connection: &mut Connection, world: &WorldId, parsed: &ParsedLegacy) -> Result<(), RepositoryError> {
     let transaction = connection.transaction()?;
     ensure_current_world(&transaction, world)?;
+    let epoch = checked_i64(world.epoch, "world epoch")?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs().min(i64::MAX as u64) as i64;
     for file in parsed.files() {
-        let relative_path = format!("{}/{}/{}", world.namespace, world.value, file.relative_path);
+        let relative_path = legacy_key(world, &file.relative_path);
         let prior: Option<Vec<u8>> = transaction.query_row("SELECT content_sha256 FROM legacy_imports WHERE relative_path=?1", params![relative_path], |row| row.get(0)).optional()?;
         if prior.as_deref() == Some(file.sha256.as_slice()) { continue; }
         if file.relative_path.ends_with("dirty_chunks.json") {
             for coordinate in &parsed.dirty {
-                transaction.execute("INSERT INTO dirty_chunks(namespace,value,epoch,x,z,revision) VALUES(?1,?2,?3,?4,?5,0) ON CONFLICT(namespace,value,epoch,x,z) DO NOTHING", params![world.namespace, world.value, world.epoch as i64, coordinate.x, coordinate.z])?;
+                transaction.execute("INSERT INTO dirty_chunks(namespace,value,epoch,x,z,revision) VALUES(?1,?2,?3,?4,?5,0) ON CONFLICT(namespace,value,epoch,x,z) DO NOTHING", params![world.namespace, world.value, epoch, coordinate.x, coordinate.z])?;
             }
         } else {
             let payload = parsed.resume_payload.clone().unwrap_or_default();
             let id = deterministic_job_id(world, JobKind::Resume);
-            transaction.execute("INSERT INTO render_jobs(id,namespace,value,epoch,kind,state,payload,completed_chunks) VALUES(?1,?2,?3,?4,?5,?6,?7,0) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,state=excluded.state WHERE render_jobs.namespace=excluded.namespace AND render_jobs.value=excluded.value AND render_jobs.epoch=excluded.epoch", params![id, world.namespace, world.value, world.epoch as i64, JobKind::Resume as i64, JobState::Resumable as i64, payload])?;
+            transaction.execute("INSERT INTO render_jobs(id,namespace,value,epoch,kind,state,payload,completed_chunks) VALUES(?1,?2,?3,?4,?5,?6,?7,0) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,state=excluded.state,completed_chunks=0 WHERE render_jobs.state=?8 AND render_jobs.completed_chunks=0", params![id, world.namespace, world.value, epoch, JobKind::Resume as i64, JobState::Resumable as i64, payload, JobState::Resumable as i64])?;
         }
         transaction.execute("INSERT INTO legacy_imports(relative_path,content_sha256,imported_at_epoch_seconds) VALUES(?1,?2,?3) ON CONFLICT(relative_path) DO UPDATE SET content_sha256=excluded.content_sha256, imported_at_epoch_seconds=excluded.imported_at_epoch_seconds", params![relative_path, file.sha256, now])?;
     }
