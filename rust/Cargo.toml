@@ -8,7 +8,11 @@ rust-version = "1.88"
 license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
+bytes = "1.12.1"
+crc32c = "0.6.8"
 hex = "0.4.3"
 prost = "0.14.1"
 prost-build = "0.14.1"
 protoc-bin-vendored = "3.2.0"
+tokio = { version = "1.47.1", features = ["io-util", "macros", "rt"] }
+zstd = "0.13.3"

@@ -33,6 +33,7 @@ protobufPlugin = "0.9.5"
 protobuf = "4.31.1"
 junit = "5.13.4"
 junitPlatform = "1.13.4"
+zstd = "1.5.7-4"
 
 # buildSrc
 indra = "4.0.0"
@@ -97,9 +98,10 @@ fabricLoader = { group = "net.fabricmc", name = "fabric-loader", version.ref = "
 fabricPermissionsApi = "me.lucko:fabric-permissions-api:0.7.0"
 
 minecraft = { group = "com.mojang", name = "minecraft", version.ref = "minecraft" }
-
 zNeoforge = { group = "net.neoforged", name = "neoforge", version.ref = "neoforge" }
+
 protobufJava = { group = "com.google.protobuf", name = "protobuf-java", version.ref = "protobuf" }
+zstd = { group = "com.github.luben", name = "zstd-jni", version.ref = "zstd" }
 protoc = { group = "com.google.protobuf", name = "protoc", version.ref = "protobuf" }
 junitPlatformLauncher = { group = "org.junit.platform", name = "junit-platform-launcher", version.ref = "junitPlatform" }
 junitJupiter = { group = "org.junit.jupiter", name = "junit-jupiter", version.ref = "junit" }

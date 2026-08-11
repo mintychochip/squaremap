@@ -30,6 +30,7 @@ tasks.test {
 
 dependencies {
   api(libs.protobufJava)
+  api(libs.zstd)
   testImplementation(libs.junitJupiter)
   testRuntimeOnly(libs.junitPlatformLauncher)
 
