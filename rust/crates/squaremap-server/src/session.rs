@@ -1,10 +1,12 @@
 use rand::RngCore;
+use squaremap_state::{ChunkCoordinate, Repository, WorldId};
+use std::sync::Arc;
 use squaremap_protocol::wire::{Ack, AckStatus, Envelope, ProtocolError, ProtocolErrorCode};
 use std::fmt;
-use std::future::Future;
-use std::pin::Pin;
 use std::panic::{self, AssertUnwindSafe};
 use std::task::{Context, Poll};
+use std::future::Future;
+use std::pin::Pin;
 
 const SESSION_ID_BYTES: usize = 16;
 
@@ -170,6 +172,36 @@ impl Session {
                 }
             }
         }
+    }
+    pub async fn process_with_repository(
+        &mut self,
+        envelope: Envelope,
+        repository: Arc<Repository>,
+    ) -> Result<SessionOutcome, SessionError> {
+        let payload = envelope.payload.clone();
+        let session_id = envelope.session_id.clone();
+        let sequence = envelope.sequence;
+        self.process(envelope, move |_| {
+            let repository = repository.clone();
+            async move {
+                let Some(squaremap_protocol::wire::envelope::Payload::ChunkDirty(dirty)) = payload else {
+                    return Err(SessionError::HandlerFailed("new payload is not a durable dirty event".into()));
+                };
+                let world = dirty.world.ok_or_else(|| SessionError::HandlerFailed("chunk dirty event has no world".into()))?;
+                let coordinate = dirty.coordinate.ok_or_else(|| SessionError::HandlerFailed("chunk dirty event has no coordinate".into()))?;
+                repository
+                    .mark_dirty(
+                        &WorldId::new(world.namespace, world.value, world.epoch),
+                        ChunkCoordinate { x: coordinate.x, z: coordinate.z },
+                        dirty.revision,
+                        &session_id,
+                        sequence,
+                    )
+                    .await
+                    .map_err(|error| SessionError::HandlerFailed(error.to_string()))?;
+                Ok(())
+            }
+        }).await
     }
 }
 

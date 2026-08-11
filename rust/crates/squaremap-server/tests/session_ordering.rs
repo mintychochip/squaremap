@@ -2,9 +2,11 @@
 mod session;
 
 use session::{Decision, Session, SessionError};
-use squaremap_protocol::wire::{envelope, Envelope, HelloAck};
+use squaremap_protocol::wire::{envelope, ChunkCoordinate, ChunkDirty, Envelope, HelloAck, WorldIdentity};
+use squaremap_state::{Repository, World};
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 fn message(session_id: &[u8], sequence: u64) -> Envelope {
     Envelope {
@@ -19,6 +21,20 @@ fn message(session_id: &[u8], sequence: u64) -> Envelope {
             backend_version: String::new(),
             accepted: true,
             rejection_reason: String::new(),
+        })),
+    }
+}
+fn dirty_message(session_id: &[u8], sequence: u64, epoch: u64) -> Envelope {
+    Envelope {
+        protocol_major: 1,
+        protocol_minor: 0,
+        session_id: session_id.to_vec(),
+        sequence,
+        correlation_id: 0,
+        payload: Some(envelope::Payload::ChunkDirty(ChunkDirty {
+            world: Some(WorldIdentity { namespace: "minecraft".into(), value: "overworld".into(), epoch }),
+            coordinate: Some(ChunkCoordinate { x: 4, z: 8 }),
+            revision: 7,
         })),
     }
 }
@@ -50,6 +66,34 @@ async fn duplicate_is_acknowledged_without_invoking_handler() {
     }).await.unwrap();
     assert_eq!(duplicate.ack().unwrap().status, 2);
     assert_eq!(calls.get(), 1);
+}
+
+#[tokio::test]
+async fn repository_dirty_ack_follows_commit_and_duplicate_skips_reapplication() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = Arc::new(Repository::open(directory.path().join("state.sqlite")).await.unwrap());
+    repository.apply_world(World::new("minecraft", "overworld", 1, Vec::new())).await.unwrap();
+    let id = [21_u8; 16];
+    let mut session = Session::new(id);
+    let accepted = session.process_with_repository(dirty_message(&id, 1, 1), Arc::clone(&repository)).await.unwrap();
+    assert_eq!(accepted.ack().unwrap().acknowledged_sequence, 1);
+    assert_eq!(repository.recover().await.unwrap().dirty.len(), 1);
+    let duplicate = session.process_with_repository(dirty_message(&id, 1, 1), repository).await.unwrap();
+    assert_eq!(duplicate.ack().unwrap().status, 2);
+}
+
+#[tokio::test]
+async fn repository_failure_and_unrelated_new_payload_produce_no_ack_or_checkpoint() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = Arc::new(Repository::open(directory.path().join("state.sqlite")).await.unwrap());
+    repository.apply_world(World::new("minecraft", "overworld", 2, Vec::new())).await.unwrap();
+    let id = [22_u8; 16];
+    let mut session = Session::new(id);
+    let stale = session.process_with_repository(dirty_message(&id, 1, 1), Arc::clone(&repository)).await;
+    assert!(stale.is_err());
+    assert!(repository.recover().await.unwrap().checkpoints.is_empty());
+    let unrelated = session.process_with_repository(message(&id, 1), repository).await;
+    assert!(unrelated.is_err());
 }
 
 #[tokio::test]
