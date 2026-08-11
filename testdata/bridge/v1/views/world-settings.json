@@ -1,0 +1,1 @@
+{"spawn":{"x":0,"z":0},"player_tracker":{"enabled":true,"update_interval":1,"label":"Players","show_controls":true,"default_hidden":false,"priority":0,"z_index":100,"nameplates":{"enabled":true,"show_heads":true,"heads_url":"/heads/{uuid}","show_armor":true,"show_health":true}},"zoom":{"max":5,"def":3,"extra":1},"marker_update_interval":5,"tiles_update_interval":10}

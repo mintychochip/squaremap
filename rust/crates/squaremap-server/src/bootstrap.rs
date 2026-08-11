@@ -1,8 +1,9 @@
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use rand::RngCore;
-use squaremap_protocol::wire::{envelope, Envelope, Hello, Shutdown};
-use squaremap_protocol::{read_envelope, FrameClass, FrameError, FrameLimits};
+use squaremap_protocol::wire::{envelope, Ack, AckStatus, Envelope, Hello, ProtocolError, ProtocolErrorCode, Shutdown};
+use squaremap_protocol::{read_envelope, write_envelope, FrameClass, FrameError, FrameLimits};
+use crate::session::{Session, SessionError};
 use prost::Message;
 use std::fmt;
 use std::io::{self, BufRead, Read};
@@ -182,17 +183,93 @@ pub async fn run_bridge(
     {
         return Err(BootstrapError::Rejected(ack_payload.rejection_reason));
     }
-    tracing::info!(
-        session_id = %hex::encode(session_id),
-        protocol_major = PROTOCOL_MAJOR,
-        plugin_version,
-        "bridge handshake accepted"
-    );
-
+    let configured_root = std::env::var("SQUAREMAP_OUTPUT_ROOT")
+        .map_err(|_| BootstrapError::Rejected("SQUAREMAP_OUTPUT_ROOT is required for bridge mode".to_string()))?;
+    let root = squaremap_server::output::OutputRoot::new(configured_root)?;
+    let mut session = Session::from_session_id(&session_id).map_err(|error| BootstrapError::Rejected(error.to_string()))?;
     loop {
         match read_envelope(&mut stream, FrameLimits::default()).await {
-            Ok(envelope) if matches!(envelope.payload, Some(envelope::Payload::Shutdown(Shutdown { .. }))) => break,
-            Ok(_) => {}
+            Ok(envelope) => {
+                if envelope.protocol_major != PROTOCOL_MAJOR || envelope.session_id.as_slice() != session.session_id() {
+                    let error = Envelope {
+                        protocol_major: PROTOCOL_MAJOR,
+                        protocol_minor: PROTOCOL_MINOR,
+                        session_id: session_id.to_vec(),
+                        sequence: envelope.sequence.saturating_add(1),
+                        correlation_id: envelope.correlation_id,
+                        payload: Some(envelope::Payload::ProtocolError(ProtocolError {
+                            code: if envelope.protocol_major != PROTOCOL_MAJOR {
+                                ProtocolErrorCode::UnsupportedVersion as i32
+                            } else {
+                                ProtocolErrorCode::InvalidMessage as i32
+                            },
+                            message: "bridge envelope failed authenticated protocol/session validation".to_string(),
+                            fatal: true,
+                            offending_sequence: envelope.sequence,
+                        })),
+                    };
+                    write_envelope(&mut stream, &error, FrameLimits::default()).await?;
+                    return Err(BootstrapError::Rejected("bridge envelope failed protocol/session validation".to_string()));
+                }
+                if matches!(envelope.payload, Some(envelope::Payload::Shutdown(Shutdown { .. }))) {
+                    break;
+                }
+                let sequence = envelope.sequence;
+                let handler_root = root.clone();
+                let handler_envelope = envelope.clone();
+                let outcome = match session.process(envelope.clone(), move |_| {
+                    let handler_root = handler_root.clone();
+                    let handler_envelope = handler_envelope.clone();
+                    async move {
+                        squaremap_server::views::apply_replacement(&handler_root, &handler_envelope)
+                            .map(|_| ())
+                            .map_err(|error| SessionError::HandlerFailed(error.to_string()))
+                    }
+                }).await {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        let protocol_error = ProtocolError {
+                            code: ProtocolErrorCode::Internal as i32,
+                            message: error.to_string(),
+                            fatal: true,
+                            offending_sequence: sequence,
+                        };
+                        let response = Envelope {
+                            protocol_major: PROTOCOL_MAJOR,
+                            protocol_minor: PROTOCOL_MINOR,
+                            session_id: session_id.to_vec(),
+                            sequence: sequence.saturating_add(1),
+                            correlation_id: envelope.correlation_id,
+                            payload: Some(envelope::Payload::ProtocolError(protocol_error)),
+                        };
+                        write_envelope(&mut stream, &response, FrameLimits::default()).await?;
+                        return Err(BootstrapError::Rejected(error.to_string()));
+                    }
+                };
+                if let Some(protocol_error) = outcome.protocol_error() {
+                    let error = Envelope {
+                        protocol_major: PROTOCOL_MAJOR,
+                        protocol_minor: PROTOCOL_MINOR,
+                        session_id: session_id.to_vec(),
+                        sequence: sequence.saturating_add(1),
+                        correlation_id: envelope.correlation_id,
+                        payload: Some(envelope::Payload::ProtocolError(protocol_error.clone())),
+                    };
+                    write_envelope(&mut stream, &error, FrameLimits::default()).await?;
+                    return Err(BootstrapError::Rejected(protocol_error.message.clone()));
+                }
+                if let Some(ack_payload) = outcome.ack() {
+                    let ack = Envelope {
+                        protocol_major: PROTOCOL_MAJOR,
+                        protocol_minor: PROTOCOL_MINOR,
+                        session_id: session_id.to_vec(),
+                        sequence: sequence.saturating_add(1),
+                        correlation_id: envelope.correlation_id,
+                        payload: Some(envelope::Payload::Ack(ack_payload.clone())),
+                    };
+                    write_envelope(&mut stream, &ack, FrameLimits::default()).await?;
+                }
+            }
             Err(FrameError::EarlyEof { actual: 0, .. }) => break,
             Err(error) => return Err(error.into()),
         }

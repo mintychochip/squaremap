@@ -27,8 +27,7 @@ import xyz.jpenilla.squaremap.common.SquaremapPlatform;
 import xyz.jpenilla.squaremap.common.WorldManagerImpl;
 import xyz.jpenilla.squaremap.common.data.MapWorldInternal;
 import xyz.jpenilla.squaremap.common.inject.SquaremapModulesBuilder;
-import xyz.jpenilla.squaremap.common.task.UpdatePlayers;
-import xyz.jpenilla.squaremap.common.task.UpdateWorldData;
+import xyz.jpenilla.squaremap.common.bridge.state.BridgeStatePublisher;
 import xyz.jpenilla.squaremap.forge.data.ForgeMapWorld;
 import xyz.jpenilla.squaremap.forge.event.ForgeMapUpdates;
 import xyz.jpenilla.squaremap.forge.inject.module.ForgeModule;
@@ -42,8 +41,7 @@ public final class SquaremapForge implements SquaremapPlatform {
     private final ForgeServerAccess serverAccess;
     private final WorldManagerImpl worldManager;
     private final ModContainer container;
-    private @Nullable UpdatePlayers updatePlayers;
-    private @Nullable UpdateWorldData updateWorldData;
+    private @Nullable BridgeStatePublisher statePublisher;
 
     public SquaremapForge(final IEventBus modEventBus, final ModContainer modContainer) {
         this.injector = Guice.createInjector(
@@ -102,14 +100,11 @@ public final class SquaremapForge implements SquaremapPlatform {
 
     @Override
     public void startCallback() {
-        this.updatePlayers = this.injector.getInstance(UpdatePlayers.class);
-        this.updateWorldData = this.injector.getInstance(UpdateWorldData.class);
+        this.statePublisher = this.injector.getInstance(BridgeStatePublisher.class);
     }
 
     @Override
     public void stopCallback() {
-        this.updatePlayers = null;
-        this.updateWorldData = null;
     }
 
     @Override
@@ -129,14 +124,10 @@ public final class SquaremapForge implements SquaremapPlatform {
         public void accept(final ServerTickEvent.Post event) {
             if (this.tick % 20 == 0) {
                 if (this.tick % 100 == 0) {
-                    if (SquaremapForge.this.updateWorldData != null) {
-                        SquaremapForge.this.updateWorldData.run();
-                    }
+                    if (SquaremapForge.this.statePublisher != null) SquaremapForge.this.statePublisher.publishWorlds();
                 }
 
-                if (SquaremapForge.this.updatePlayers != null) {
-                    SquaremapForge.this.updatePlayers.run();
-                }
+                if (SquaremapForge.this.statePublisher != null) SquaremapForge.this.statePublisher.publishPlayers();
 
                 for (final MapWorldInternal mapWorld : SquaremapForge.this.worldManager.worlds()) {
                     ((ForgeMapWorld) mapWorld).tickEachSecond(this.tick);

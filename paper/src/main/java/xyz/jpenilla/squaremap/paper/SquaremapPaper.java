@@ -16,8 +16,7 @@ import org.checkerframework.framework.qual.DefaultQualifier;
 import xyz.jpenilla.squaremap.api.Squaremap;
 import xyz.jpenilla.squaremap.common.SquaremapCommon;
 import xyz.jpenilla.squaremap.common.SquaremapPlatform;
-import xyz.jpenilla.squaremap.common.task.UpdatePlayers;
-import xyz.jpenilla.squaremap.common.task.UpdateWorldData;
+import xyz.jpenilla.squaremap.common.bridge.state.BridgeStatePublisher;
 import xyz.jpenilla.squaremap.paper.folia.FoliaInitListener;
 import xyz.jpenilla.squaremap.paper.listener.MapUpdateListeners;
 import xyz.jpenilla.squaremap.paper.listener.WorldLoadListener;
@@ -34,6 +33,7 @@ public final class SquaremapPaper implements SquaremapPlatform {
     private final Server server;
     private @MonotonicNonNull Squaremap api;
     private @Nullable ScheduledTask updateWorldData;
+    private @Nullable BridgeStatePublisher statePublisher;
     private @Nullable ScheduledTask updatePlayers;
     private @Nullable MapUpdateListeners mapUpdateListeners;
     private @Nullable WorldLoadListener worldLoadListener;
@@ -82,17 +82,16 @@ public final class SquaremapPaper implements SquaremapPlatform {
         this.mapUpdateListeners = this.injector.getInstance(MapUpdateListeners.class);
         this.mapUpdateListeners.register();
 
-        final Runnable updatePlayersTask = this.injector.getInstance(UpdatePlayers.class);
+        this.statePublisher = this.injector.getInstance(BridgeStatePublisher.class);
         this.updatePlayers = this.server.getGlobalRegionScheduler().runAtFixedRate(
             this.plugin,
-            $ -> updatePlayersTask.run(),
+            $ -> this.statePublisher.publishPlayers(),
             20,
             20
         );
-        final Runnable updateWorldDataTask = this.injector.getInstance(UpdateWorldData.class);
         this.updateWorldData = this.server.getGlobalRegionScheduler().runAtFixedRate(
             this.plugin,
-            $ -> updateWorldDataTask.run(),
+            $ -> this.statePublisher.publishWorlds(),
             1,
             5 * 20
         );

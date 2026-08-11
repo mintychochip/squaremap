@@ -1,7 +1,9 @@
 use fs2::FileExt;
+use squaremap_state::CanonicalState;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,6 +19,8 @@ pub struct OutputRoot {
     root_dir: Arc<cap_std::fs::Dir>,
     owner_lock: Arc<File>,
     writes: Arc<Mutex<()>>,
+    canonical: Arc<Mutex<CanonicalState>>,
+    latest: Arc<Mutex<HashMap<PathBuf, Vec<u8>>>>,
 }
 impl Clone for OutputRoot {
     fn clone(&self) -> Self {
@@ -28,6 +32,8 @@ impl Clone for OutputRoot {
             root_dir: Arc::clone(&self.root_dir),
             owner_lock: Arc::clone(&self.owner_lock),
             writes: Arc::clone(&self.writes),
+            canonical: Arc::clone(&self.canonical),
+            latest: Arc::clone(&self.latest),
         }
     }
 }
@@ -46,7 +52,7 @@ impl OutputRoot {
         let owner_lock = Arc::new(open_owner_lock(&root_dir)?);
         owner_lock.try_lock_exclusive().map_err(|error| io::Error::new(io::ErrorKind::AlreadyExists, format!("output root already owned: {error}")))?;
         cleanup_stale_cap(&root_dir)?;
-        Ok(Self { root: display_root, root_dir, owner_lock, writes: Arc::new(Mutex::new(())) })
+        Ok(Self { root: display_root, root_dir, owner_lock, writes: Arc::new(Mutex::new(())), canonical: Arc::new(Mutex::new(CanonicalState::default())), latest: Arc::new(Mutex::new(HashMap::new())) })
     }
 
     pub fn path(&self) -> &Path { &self.root }
@@ -56,16 +62,60 @@ impl OutputRoot {
         let relative = validate_relative(relative.as_ref())?;
         #[cfg(unix)]
         {
-            return self.atomic_write_unix(&relative, bytes);
+            let result = self.atomic_write_unix(&relative, bytes);
+            if result.is_ok() { self.remember_latest(&relative, bytes); }
+            return result;
         }
         #[cfg(windows)]
         {
-            return self.atomic_write_windows(&relative, bytes);
+            let result = self.atomic_write_windows(&relative, bytes);
+            if result.is_ok() { self.remember_latest(&relative, bytes); }
+            return result;
         }
         #[cfg(all(not(unix), not(windows)))]
         {
-            return Err(io::Error::new(io::ErrorKind::Unsupported, "output confinement unsupported on this platform"));
+            Err(io::Error::new(io::ErrorKind::Unsupported, "output confinement unsupported on this platform"))
         }
+    }
+
+    pub fn latest_bytes<P: AsRef<Path>>(&self, relative: P) -> Option<Vec<u8>> {
+        let relative = validate_relative(relative.as_ref()).ok()?;
+        self.latest.lock().ok()?.get(&relative).cloned()
+    }
+
+    pub fn canonical_state(&self) -> io::Result<CanonicalState> {
+        self.canonical.lock().map(|state| state.clone()).map_err(|_| io::Error::other("canonical state lock poisoned"))
+    }
+
+    pub fn replace_canonical(&self, state: CanonicalState) -> io::Result<()> {
+        *self.canonical.lock().map_err(|_| io::Error::other("canonical state lock poisoned"))? = state;
+        Ok(())
+    }
+
+    pub fn remove<P: AsRef<Path>>(&self, relative: P) -> io::Result<()> {
+        let _guard = self.writes.lock().map_err(|_| io::Error::other("output lock poisoned"))?;
+        let relative = validate_relative(relative.as_ref())?;
+        #[cfg(unix)]
+        let result = self.remove_unix(&relative);
+        #[cfg(windows)]
+        let result = self.remove_windows(&relative);
+        #[cfg(all(not(unix), not(windows)))]
+        let result = Err(io::Error::new(io::ErrorKind::Unsupported, "output confinement unsupported on this platform"));
+        if result.is_ok() {
+            if let Ok(mut latest) = self.latest.lock() { latest.remove(&relative); }
+        }
+        result
+    }
+    pub fn existing_files<P: AsRef<Path>>(&self, relative_dir: P) -> io::Result<Vec<PathBuf>> {
+        let relative_dir = validate_relative(relative_dir.as_ref())?;
+        let base = self.root.join(&relative_dir);
+        let mut files = Vec::new();
+        collect_existing_files(&base, &relative_dir, &mut files)?;
+        Ok(files)
+    }
+
+    fn remember_latest(&self, relative: &Path, bytes: &[u8]) {
+        if let Ok(mut latest) = self.latest.lock() { latest.insert(relative.to_owned(), bytes.to_vec()); }
     }
 
     #[cfg(unix)]
@@ -97,6 +147,33 @@ impl OutputRoot {
         }
         Err(io::Error::new(io::ErrorKind::InvalidInput, "empty path"))
     }
+    #[cfg(unix)]
+    fn remove_unix(&self, relative: &Path) -> io::Result<()> {
+        let mut components = relative.components().peekable();
+        let mut parent = self.root_dir.try_clone()?;
+        while let Some(Component::Normal(name)) = components.next() {
+            let name = name.to_str().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "non-UTF8 path"))?;
+            let c = std::ffi::CString::new(name).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
+            if components.peek().is_some() {
+                let fd = unsafe { libc::openat(parent.as_raw_fd(), c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW) };
+                if fd < 0 {
+                    let error = io::Error::last_os_error();
+                    if error.kind() == io::ErrorKind::NotFound { return Ok(()); }
+                    return Err(error);
+                }
+                parent = unsafe { File::from_raw_fd(fd) };
+            } else {
+                let rc = unsafe { libc::unlinkat(parent.as_raw_fd(), c.as_ptr(), 0) };
+                if rc != 0 {
+                    let error = io::Error::last_os_error();
+                    if error.kind() != io::ErrorKind::NotFound { return Err(error); }
+                }
+                return Ok(());
+            }
+        }
+        Err(io::Error::new(io::ErrorKind::InvalidInput, "empty path"))
+    }
+
     pub(crate) fn open_file(&self, relative: &Path) -> io::Result<Option<(File, fs::Metadata)>> {
         let relative = validate_relative(relative)?;
         #[cfg(unix)]
@@ -136,6 +213,29 @@ impl OutputRoot {
                 }
                 Err(error) => return Err(error),
             };
+        }
+        Err(io::Error::new(io::ErrorKind::InvalidInput, "empty path"))
+    }
+
+    #[cfg(windows)]
+    fn remove_windows(&self, relative: &Path) -> io::Result<()> {
+        let mut components = relative.components().peekable();
+        let mut parent = self.root_dir.try_clone()?;
+        while let Some(Component::Normal(name)) = components.next() {
+            if components.peek().is_some() {
+                parent = match open_windows_directory(&parent, name.as_os_str()) {
+                    Ok(dir) => dir,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                    Err(error) => return Err(error),
+                };
+            } else {
+                match parent.remove_file(name) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+                return Ok(());
+            }
         }
         Err(io::Error::new(io::ErrorKind::InvalidInput, "empty path"))
     }
@@ -197,6 +297,32 @@ impl OutputRoot {
     }
 
 }
+fn collect_existing_files(base: &Path, relative: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
+    let base_metadata = match fs::symlink_metadata(base) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if base_metadata.file_type().is_symlink() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "output traversal encountered symlink"));
+    }
+    let entries = fs::read_dir(base)?;
+    for entry in entries {
+        let entry = entry?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        let path = relative.join(entry.file_name());
+        if metadata.is_dir() {
+            collect_existing_files(&entry.path(), &path, files)?;
+        } else if metadata.is_file() {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn open_root_handle(root: &Path) -> io::Result<File> {
     let mut parent = if root.is_absolute() {

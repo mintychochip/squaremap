@@ -1,15 +1,16 @@
 package xyz.jpenilla.squaremap.common.inject.module;
 
 import com.google.inject.AbstractModule;
+import com.google.inject.Singleton;
 import org.checkerframework.checker.nullness.qual.NonNull;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.checkerframework.framework.qual.DefaultQualifier;
 import xyz.jpenilla.squaremap.common.SquaremapPlatform;
 import xyz.jpenilla.squaremap.common.WorldManager;
 import xyz.jpenilla.squaremap.common.WorldManagerImpl;
+import xyz.jpenilla.squaremap.common.bridge.process.BridgeBootstrapConfig;
 import xyz.jpenilla.squaremap.common.util.EntityScheduler;
 import xyz.jpenilla.squaremap.common.util.SquaremapJarAccess;
-
 @DefaultQualifier(NonNull.class)
 public final class PlatformModule extends AbstractModule {
     private final @Nullable SquaremapPlatform platform;
@@ -34,6 +35,7 @@ public final class PlatformModule extends AbstractModule {
 
     @Override
     protected void configure() {
+        this.bind(BridgeBootstrapConfig.class).toProvider(() -> BridgeBootstrapConfig.configured()).in(Singleton.class);
         if (this.platformClass != null) {
             this.bind(SquaremapPlatform.class).to(this.platformClass);
         } else if (this.platform != null) {

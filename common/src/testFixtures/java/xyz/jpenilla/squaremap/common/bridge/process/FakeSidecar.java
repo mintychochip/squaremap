@@ -4,13 +4,13 @@ import com.google.protobuf.ByteString;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.InetSocketAddress;
-import java.nio.channels.Channels;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import xyz.jpenilla.squaremap.bridge.v1.Ack;
+import xyz.jpenilla.squaremap.bridge.v1.AckStatus;
 import xyz.jpenilla.squaremap.bridge.v1.Envelope;
 import xyz.jpenilla.squaremap.bridge.v1.Hello;
-
 import static xyz.jpenilla.squaremap.common.bridge.protocol.FrameCodec.read;
 import static xyz.jpenilla.squaremap.common.bridge.protocol.FrameCodec.write;
 
@@ -22,14 +22,20 @@ public final class FakeSidecar {
     public static void main(final String[] args) throws Exception {
         String behavior = "valid";
         String connect = null;
+        String expectedRoot = null;
         for (final String arg : args) {
             if (arg.startsWith("--behavior=")) {
                 behavior = arg.substring("--behavior=".length());
+            } else if (arg.startsWith("--expected-root=")) {
+                expectedRoot = arg.substring("--expected-root=".length());
             } else if (arg.equals("--connect")) {
                 connect = "pending";
             } else if (connect != null && connect.equals("pending")) {
                 connect = arg;
             }
+        }
+        if ("root-check".equals(behavior) && !java.util.Objects.equals(expectedRoot, System.getenv("SQUAREMAP_OUTPUT_ROOT"))) {
+            throw new IllegalStateException("child did not observe configured Rust output root");
         }
         if ("timeout".equals(behavior)) {
             Thread.sleep(60_000L);
@@ -75,6 +81,19 @@ public final class FakeSidecar {
                 }
                 System.err.write(noise);
                 System.err.flush();
+            }
+            if ("ack-publish".equals(behavior)) {
+                read(socket); // authenticated HelloAck
+                final Envelope published = read(socket);
+                if (published.getPayloadCase() != Envelope.PayloadCase.PLAYERS_REPLACE) {
+                    throw new IllegalStateException("expected framed PlayersReplace payload");
+                }
+                write(socket, Envelope.newBuilder()
+                    .setProtocolMajor(1).setProtocolMinor(0).setSessionId(ByteString.copyFrom(session))
+                    .setSequence(published.getSequence() + 1)
+                    .setAck(Ack.newBuilder().setAcknowledgedSequence(published.getSequence())
+                        .setStatus(AckStatus.ACK_STATUS_ACCEPTED))
+                    .build());
             }
             if ("ignore-shutdown".equals(behavior)) {
                 Runtime.getRuntime().addShutdownHook(new Thread(() -> {

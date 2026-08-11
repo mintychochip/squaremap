@@ -19,7 +19,6 @@ import xyz.jpenilla.squaremap.api.Registry;
 import xyz.jpenilla.squaremap.api.Squaremap;
 import xyz.jpenilla.squaremap.api.WorldIdentifier;
 import xyz.jpenilla.squaremap.common.data.DirectoryProvider;
-
 @DefaultQualifier(NonNull.class)
 @Singleton
 public final class SquaremapApiProvider implements Squaremap {
@@ -34,12 +33,13 @@ public final class SquaremapApiProvider implements Squaremap {
         final DirectoryProvider directoryProvider,
         final AbstractPlayerManager playerManager,
         final WorldManager worldManager,
+        final IconRegistry iconRegistry,
         final Provider<ComponentFlattener> flattener
     ) {
         this.directoryProvider = directoryProvider;
         this.playerManager = playerManager;
         this.worldManager = worldManager;
-        this.iconRegistry = new IconRegistry(directoryProvider);
+        this.iconRegistry = iconRegistry;
         this.flattener = flattener;
     }
 

@@ -23,8 +23,7 @@ import org.spongepowered.api.scheduler.Task;
 import org.spongepowered.plugin.PluginContainer;
 import xyz.jpenilla.squaremap.common.SquaremapCommon;
 import xyz.jpenilla.squaremap.common.SquaremapPlatform;
-import xyz.jpenilla.squaremap.common.task.UpdatePlayers;
-import xyz.jpenilla.squaremap.common.task.UpdateWorldData;
+import xyz.jpenilla.squaremap.common.bridge.state.BridgeStatePublisher;
 import xyz.jpenilla.squaremap.sponge.listener.MapUpdateListener;
 import xyz.jpenilla.squaremap.sponge.listener.WorldLoadListener;
 import xyz.jpenilla.squaremap.sponge.network.SpongeNetworking;
@@ -38,6 +37,7 @@ public final class SquaremapSponge implements SquaremapPlatform {
     private @Nullable MapUpdateListener mapUpdateListener;
     private @Nullable ScheduledTask updateWorlds;
     private @Nullable ScheduledTask updatePlayers;
+    private @Nullable BridgeStatePublisher statePublisher;
     private @Nullable WorldLoadListener worldLoadListener;
 
     @Inject
@@ -131,18 +131,19 @@ public final class SquaremapSponge implements SquaremapPlatform {
     }
 
     private void scheduleTasks() {
+        this.statePublisher = this.injector.getInstance(BridgeStatePublisher.class);
         this.updateWorlds = this.game.server().scheduler().submit(
             Task.builder()
                 .plugin(this.pluginContainer)
                 .interval(Duration.ofSeconds(5))
-                .execute(this.injector.getInstance(UpdateWorldData.class))
+                .execute(this.statePublisher::publishWorlds)
                 .build()
         );
         this.updatePlayers = this.game.server().scheduler().submit(
             Task.builder()
                 .plugin(this.pluginContainer)
                 .interval(Duration.ofSeconds(1))
-                .execute(this.injector.getInstance(UpdatePlayers.class))
+                .execute(this.statePublisher::publishPlayers)
                 .build()
         );
     }

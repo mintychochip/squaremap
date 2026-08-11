@@ -7,6 +7,9 @@ import java.util.List;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
+import xyz.jpenilla.squaremap.bridge.v1.Envelope;
+import xyz.jpenilla.squaremap.bridge.v1.PlayersReplace;
+import xyz.jpenilla.squaremap.common.bridge.outbox.BridgeEvent;
 
 import static org.junit.jupiter.api.Assertions.assertTimeout;
 
@@ -26,6 +29,22 @@ class SidecarSupervisorTest {
         assertDoesNotThrow(connection::close);
         assertTrue(connection.isClosed());
         assertDoesNotThrow(supervisor::close);
+    }
+
+    @Test
+    void publishesFramedReplacementAndConsumesAcknowledgement() throws Exception {
+        final SidecarSupervisor supervisor = new SidecarSupervisor();
+        final BridgeConnection connection = supervisor.start(config("ack-publish", Duration.ofSeconds(5)))
+            .toCompletableFuture().get(6, TimeUnit.SECONDS);
+        final Envelope payload = Envelope.newBuilder()
+            .setPlayersReplace(PlayersReplace.newBuilder().setMaxPlayers(20))
+            .build();
+        final BridgeEvent event = new BridgeEvent.ReplaceState("players", payload);
+        assertTrue(connection.publish(event) == xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher.PublishResult.ACCEPTED);
+        Thread.sleep(100L);
+        assertFalse(connection.isClosed());
+        connection.close();
+        supervisor.close();
     }
     @Test
     void closeStopsOwnedSidecarThreads() throws Exception {
@@ -132,6 +151,35 @@ class SidecarSupervisorTest {
         assertTrue(first == supervisor.start(config));
         assertDoesNotThrow(supervisor::close);
     }
+    @Test
+    void childReceivesConfiguredRustOutputRoot() throws Exception {
+        final SidecarSupervisor supervisor = new SidecarSupervisor();
+        final BridgeConnection connection = supervisor.start(config("root-check", Duration.ofSeconds(5)))
+            .toCompletableFuture().get(6, TimeUnit.SECONDS);
+        connection.close();
+        supervisor.close();
+    }
+    @Test
+    void nonJavaBackendRejectsMissingRustOutputRoot() {
+        assertThrows(IllegalArgumentException.class, () -> new BridgeBootstrapConfig(
+            BackendMode.RUST,
+            "fixture",
+            new SidecarCommand(List.of("fixture")),
+            Duration.ofSeconds(1),
+            Duration.ofSeconds(1)
+        ));
+    }
+    @Test
+    void rejectsNestedAndSymlinkAliasedOutputRoots() throws Exception {
+        final Path root = java.nio.file.Files.createTempDirectory("squaremap-roots");
+        final Path javaRoot = root.resolve("java");
+        java.nio.file.Files.createDirectories(javaRoot);
+        assertThrows(IllegalArgumentException.class, () -> BridgeBootstrapConfig.validateIsolatedRoots(javaRoot, javaRoot.resolve("rust")));
+        assertThrows(IllegalArgumentException.class, () -> BridgeBootstrapConfig.validateIsolatedRoots(javaRoot, root));
+        final Path alias = root.resolve("alias");
+        java.nio.file.Files.createSymbolicLink(alias, javaRoot);
+        assertThrows(IllegalArgumentException.class, () -> BridgeBootstrapConfig.validateIsolatedRoots(javaRoot, alias.resolve("rust")));
+    }
 
     private static void assertRejected(final String behavior) {
         final SidecarSupervisor supervisor = new SidecarSupervisor();
@@ -158,11 +206,16 @@ class SidecarSupervisorTest {
                 "-cp",
                 System.getProperty("java.class.path"),
                 FakeSidecar.class.getName(),
-                "--behavior=" + behavior
+                "--behavior=" + behavior,
+                "--expected-root=" + rustOutputRoot()
             )),
             timeout,
-            shutdownGrace
+            shutdownGrace,
+            Path.of(System.getProperty("java.io.tmpdir"), "squaremap-rust-fixture")
         );
+    }
+    private static String rustOutputRoot() {
+        return Path.of(System.getProperty("java.io.tmpdir"), "squaremap-rust-fixture").toAbsolutePath().normalize().toString();
     }
 
     private static Path javaExecutable() {

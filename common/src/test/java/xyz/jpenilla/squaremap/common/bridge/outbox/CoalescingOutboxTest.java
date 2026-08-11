@@ -47,6 +47,16 @@ class CoalescingOutboxTest {
             outbox.offer(new BridgeEvent.ReplaceState("players", latest)));
         assertEquals(List.of(new BridgeEvent.ReplaceState("players", latest)), outbox.drain());
     }
+    @Test
+    void replacementBaselineDrainsWorldsBeforeEpochDependentViews() {
+        final CoalescingOutbox outbox = new CoalescingOutbox();
+        outbox.offer(new BridgeEvent.ReplaceState("players", Envelope.getDefaultInstance()));
+        outbox.offer(new BridgeEvent.ReplaceState("markers:minecraft:overworld", Envelope.getDefaultInstance()));
+        outbox.offer(new BridgeEvent.ReplaceState("icons", Envelope.getDefaultInstance()));
+        outbox.offer(new BridgeEvent.ReplaceState("worlds", Envelope.getDefaultInstance()));
+        assertEquals(List.of("worlds", "markers:minecraft:overworld", "players", "icons"),
+            outbox.drain().stream().map(event -> ((BridgeEvent.ReplaceState) event).key()).toList());
+    }
 
     @Test
     void overflowCollapsesOnlyWorldEpochAndPostOverflowDirtiesDoNotRegrow() {

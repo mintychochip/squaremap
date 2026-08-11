@@ -1,5 +1,7 @@
 package xyz.jpenilla.squaremap.common.bridge.process;
 
+import com.google.inject.Singleton;
+
 import com.google.protobuf.ByteString;
 import java.io.IOException;
 import java.io.InputStream;
@@ -29,8 +31,11 @@ import xyz.jpenilla.squaremap.bridge.v1.HelloAck;
 import xyz.jpenilla.squaremap.bridge.v1.Shutdown;
 import xyz.jpenilla.squaremap.bridge.v1.ShutdownReason;
 import xyz.jpenilla.squaremap.common.bridge.protocol.FrameCodec;
+import xyz.jpenilla.squaremap.common.bridge.outbox.BridgeEvent;
+import xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher;
 
 /** Launches and authenticates one managed sidecar process. */
+@Singleton
 public final class SidecarSupervisor implements AutoCloseable {
     public static final int BOOTSTRAP_TOKEN_BYTES = 32;
     public static final int SESSION_ID_BYTES = 16;
@@ -100,6 +105,16 @@ public final class SidecarSupervisor implements AutoCloseable {
             return this.startFuture;
         }
     }
+    public BridgePublisher.PublishResult publish(final BridgeEvent event) {
+        synchronized (this.lock) {
+            if (this.connection == null || this.closed || this.lifecycleState == LifecycleState.FAILED) return BridgePublisher.PublishResult.COALESCED;
+            try {
+                return this.connection.publish(event);
+            } catch (final IllegalStateException failure) {
+                return BridgePublisher.PublishResult.COALESCED;
+            }
+        }
+    }
 
     public boolean isClosed() {
         synchronized (this.lock) {
@@ -167,7 +182,11 @@ public final class SidecarSupervisor implements AutoCloseable {
             synchronized (this.lock) {
                 this.launchedCommand = List.copyOf(command);
             }
+            if (config.rustOutputRoot() == null || !config.rustOutputRoot().isAbsolute()) {
+                throw new IllegalArgumentException("Rust output root must be configured as an absolute path");
+            }
             final ProcessBuilder builder = new ProcessBuilder(command);
+            builder.environment().put("SQUAREMAP_OUTPUT_ROOT", config.rustOutputRoot().toString());
             synchronized (this.lock) {
                 if (this.lifecycleState != LifecycleState.STARTING || this.closed) {
                     throw new IOException("supervisor closed");
@@ -224,6 +243,7 @@ public final class SidecarSupervisor implements AutoCloseable {
                 this.lifecycleState = LifecycleState.READY;
                 this.startFuture.complete(managed);
             }
+            this.executor.execute(managed::readFrames);
             final ScheduledFuture<?> timeout = this.timeoutTask;
             if (timeout != null) {
                 timeout.cancel(false);
@@ -265,18 +285,25 @@ public final class SidecarSupervisor implements AutoCloseable {
     }
 
     private void failStart(final Throwable failure) {
+        final ManagedConnection active;
         synchronized (this.lock) {
-            if (this.lifecycleState != LifecycleState.STARTING) {
+            if (this.lifecycleState != LifecycleState.STARTING && this.lifecycleState != LifecycleState.READY) {
                 return;
             }
             this.lifecycleState = LifecycleState.FAILED;
             this.closed = true;
+            active = this.connection;
+            this.connection = null;
+            if (active != null) active.closed.set(true);
         }
         final ScheduledFuture<?> timeout = this.timeoutTask;
         if (timeout != null) {
             timeout.cancel(false);
         }
         this.cleanup(false, Duration.ZERO);
+        if (active != null) {
+            active.publisher.close();
+        }
         final CompletableFuture<BridgeConnection> future = this.startFuture;
         if (future != null && !future.isDone()) {
             future.completeExceptionally(failure);
@@ -422,34 +449,39 @@ public final class SidecarSupervisor implements AutoCloseable {
         private final AtomicBoolean closed = new AtomicBoolean();
         private final Duration shutdownGrace;
         private final boolean noProcess;
+        private final BridgePublisher publisher;
 
-
-        private ManagedConnection(
-            final SocketChannel socket,
-            final Process process,
-            final byte[] sessionId,
-            final Duration shutdownGrace,
-            final boolean noProcess
-        ) {
+        private ManagedConnection(final SocketChannel socket, final Process process, final byte[] sessionId,
+                                  final Duration shutdownGrace, final boolean noProcess) {
             this.socket = socket;
             this.process = process;
             this.sessionId = sessionId.clone();
             this.shutdownGrace = shutdownGrace;
             this.noProcess = noProcess;
+            this.publisher = new BridgePublisher(this.sessionId, sent -> {
+                if (this.socket != null) FrameCodec.write(this.socket, sent.envelope());
+            });
         }
-
-        @Override
-        public byte[] sessionId() {
-            return this.sessionId.clone();
+        @Override public byte[] sessionId() { return this.sessionId.clone(); }
+        @Override public boolean isClosed() { return this.closed.get(); }
+        @Override public BridgePublisher.PublishResult publish(final BridgeEvent event) { return this.publisher.publish(event); }
+        private void readFrames() {
+            if (this.socket == null) return;
+            try {
+                while (!this.closed.get()) {
+                    final Envelope envelope = FrameCodec.read(this.socket);
+                    if (envelope.getProtocolMajor() != 1 || !java.util.Arrays.equals(envelope.getSessionId().toByteArray(), this.sessionId)) {
+                        throw new SecurityException("invalid bridge response session");
+                    }
+                    if (envelope.hasAck()) this.publisher.acknowledge(envelope);
+                    else if (envelope.hasProtocolError() && envelope.getProtocolError().getFatal()) throw new IOException("fatal bridge protocol error");
+                }
+            } catch (final Exception failure) {
+                if (!this.closed.get()) SidecarSupervisor.this.failStart(failure);
+            }
         }
-        @Override
-        public boolean isClosed() {
-            return this.closed.get();
-        }
-
-
-        @Override
-        public void close() {
+        @Override public void close() {
+            this.publisher.close();
             if (this.noProcess) {
                 this.closed.set(true);
                 SidecarSupervisor.this.cleanup(false, Duration.ZERO);

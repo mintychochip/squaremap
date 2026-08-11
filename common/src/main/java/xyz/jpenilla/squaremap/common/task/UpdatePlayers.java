@@ -1,138 +1,56 @@
 package xyz.jpenilla.squaremap.common.task;
 
 import com.google.inject.Inject;
-import com.google.inject.Provider;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ForkJoinPool;
-import net.kyori.adventure.text.flattener.ComponentFlattener;
-import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.tags.ItemTags;
-import net.minecraft.util.Mth;
-import net.minecraft.world.entity.EquipmentSlot;
-import net.minecraft.world.entity.ai.attributes.AttributeInstance;
-import net.minecraft.world.entity.ai.attributes.Attributes;
-import net.minecraft.world.entity.player.Player;
-import net.minecraft.world.level.GameType;
-import net.minecraft.world.phys.Vec3;
 import org.checkerframework.checker.nullness.qual.NonNull;
-import org.checkerframework.checker.nullness.qual.Nullable;
 import org.checkerframework.framework.qual.DefaultQualifier;
-import xyz.jpenilla.squaremap.api.HtmlComponentSerializer;
-import xyz.jpenilla.squaremap.common.AbstractPlayerManager;
-import xyz.jpenilla.squaremap.common.ServerAccess;
-import xyz.jpenilla.squaremap.common.config.ConfigManager;
-import xyz.jpenilla.squaremap.common.config.WorldConfig;
 import xyz.jpenilla.squaremap.common.httpd.JsonCache;
 import xyz.jpenilla.squaremap.common.util.Util;
 
 @DefaultQualifier(NonNull.class)
-public final class UpdatePlayers implements Runnable {
+public final class UpdatePlayers {
     private static final String JSON_PATH = "/tiles/players.json";
-
-    private final Provider<ComponentFlattener> flattener;
-    private final AbstractPlayerManager playerManager;
-    private final ServerAccess serverAccess;
-    private final ConfigManager configManager;
     private final JsonCache jsonCache;
-    private @Nullable Map<String, Object> lastData = null;
 
     @Inject
-    private UpdatePlayers(
-        final Provider<ComponentFlattener> flattener,
-        final AbstractPlayerManager playerManager,
-        final ServerAccess serverAccess,
-        final ConfigManager configManager,
-        final JsonCache jsonCache
-    ) {
-        this.flattener = flattener;
-        this.playerManager = playerManager;
-        this.serverAccess = serverAccess;
-        this.configManager = configManager;
+    private UpdatePlayers(final JsonCache jsonCache) {
         this.jsonCache = jsonCache;
     }
-
-    @Override
-    public void run() {
-        final @Nullable Map<String, Object> prev = this.lastData;
-        final Map<String, Object> data = this.collectData();
-        this.lastData = data;
-
-        ForkJoinPool.commonPool().execute(() -> {
-            if (prev == null || !prev.equals(data)) {
-                final String json = Util.gson().toJson(data);
-                this.jsonCache.put(JSON_PATH, json);
-            }
-        });
+    /** Writes an already-collected immutable snapshot without recollecting server state. */
+    public void publish(final xyz.jpenilla.squaremap.bridge.v1.PlayersReplace snapshot) {
+        ForkJoinPool.commonPool().execute(() -> this.jsonCache.put(JSON_PATH, document(snapshot)));
     }
 
-    private Map<String, Object> collectData() {
+    public static String document(final xyz.jpenilla.squaremap.bridge.v1.PlayersReplace snapshot) {
         final List<Object> players = new ArrayList<>();
-
-        final HtmlComponentSerializer htmlComponentSerializer = HtmlComponentSerializer.withFlattener(this.flattener.get());
-
-        this.serverAccess.levels().forEach(world -> {
-            final WorldConfig worldConfig = this.configManager.worldConfig(world);
-
-            world.players().forEach(player -> {
-                if (worldConfig.PLAYER_TRACKER_HIDE_SPECTATORS && player.gameMode.getGameModeForPlayer() == GameType.SPECTATOR) {
-                    return;
-                }
-                if (worldConfig.PLAYER_TRACKER_HIDE_INVISIBLE && player.isInvisible()) {
-                    return;
-                }
-                if (worldConfig.PLAYER_TRACKER_HIDE_MAP_INVISIBILITY_EQUIPMENT && hasMapInvisibilityItemEquipped(player)) {
-                    return;
-                }
-                if (this.playerManager.hidden(player) || this.playerManager.otherwiseHidden(player)) {
-                    return;
-                }
-                final Map<String, Object> playerEntry = new HashMap<>();
-                final Vec3 playerLoc = player.position();
-                playerEntry.put("name", player.getGameProfile().name());
-                if (worldConfig.PLAYER_TRACKER_USE_DISPLAY_NAME) {
-                    playerEntry.put("display_name", htmlComponentSerializer.serialize(this.playerManager.displayName(player)));
-                }
-                playerEntry.put("uuid", player.getUUID().toString().replace("-", ""));
-                playerEntry.put("world", Util.levelWebName(world));
-                if (worldConfig.PLAYER_TRACKER_ENABLED) {
-                    playerEntry.put("x", Mth.floor(playerLoc.x()));
-                    playerEntry.put("y", Mth.floor(playerLoc.y()));
-                    playerEntry.put("z", Mth.floor(playerLoc.z()));
-                    playerEntry.put("yaw", Math.round(player.getYHeadRot()));
-                    if (worldConfig.PLAYER_TRACKER_NAMEPLATE_SHOW_ARMOR) {
-                        playerEntry.put("armor", armorPoints(player));
-                    }
-                    if (worldConfig.PLAYER_TRACKER_NAMEPLATE_SHOW_HEALTH) {
-                        playerEntry.put("health", (int) player.getHealth());
-                    }
-                }
-                players.add(playerEntry);
-            });
-        });
-
-        final Map<String, Object> map = new HashMap<>();
-
-        map.put("players", players);
-        map.put("max", this.serverAccess.maxPlayers());
-
-        return map;
-    }
-
-    private static int armorPoints(final ServerPlayer player) {
-        final @Nullable AttributeInstance attribute = player.getAttribute(Attributes.ARMOR);
-        return attribute == null ? 0 : (int) attribute.getValue();
-    }
-
-    // Copied from MapItemSavedData#hasMapInvisibilityItemEquipped(Player)
-    private static boolean hasMapInvisibilityItemEquipped(final Player player) {
-        for (final EquipmentSlot slot : EquipmentSlot.values()) {
-            if (slot != EquipmentSlot.MAINHAND && slot != EquipmentSlot.OFFHAND && player.getItemBySlot(slot).is(ItemTags.MAP_INVISIBILITY_EQUIPMENT)) {
-                return true;
-            }
+        for (final xyz.jpenilla.squaremap.bridge.v1.Player player : snapshot.getPlayersList()) {
+            final Map<String, Object> entry = new HashMap<>();
+            entry.put("name", player.getName());
+            if (player.hasDisplayName()) entry.put("display_name", player.getDisplayName());
+            entry.put("uuid", hex(player.getUuid().toByteArray()));
+            entry.put("world", legacyWorldName(player.getWorld()));
+            if (player.hasX()) entry.put("x", player.getX());
+            if (player.hasY()) entry.put("y", player.getY());
+            if (player.hasZ()) entry.put("z", player.getZ());
+            if (player.hasYaw()) entry.put("yaw", player.getYaw());
+            if (player.hasArmor()) entry.put("armor", player.getArmor());
+            if (player.hasHealth()) entry.put("health", player.getHealth());
+            players.add(entry);
         }
-        return false;
+        return Util.gson().toJson(Map.of("players", players, "max", snapshot.getMaxPlayers()));
     }
+
+    private static String hex(final byte[] bytes) {
+        final StringBuilder out = new StringBuilder(bytes.length * 2);
+        for (final byte value : bytes) out.append(String.format("%02x", value & 0xff));
+        return out.toString();
+    }
+    private static String legacyWorldName(final xyz.jpenilla.squaremap.bridge.v1.WorldIdentity identity) {
+        return identity.getNamespace() + "_" + identity.getValue();
+    }
+
 }

@@ -2,48 +2,24 @@ package xyz.jpenilla.squaremap.common.task;
 
 import com.google.inject.assistedinject.Assisted;
 import com.google.inject.assistedinject.AssistedInject;
-import it.unimi.dsi.fastutil.objects.Object2LongMap;
-import it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap;
 import java.awt.Color;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ForkJoinPool;
-import java.util.stream.Stream;
 import org.checkerframework.checker.nullness.qual.NonNull;
-import xyz.jpenilla.squaremap.api.Key;
-import xyz.jpenilla.squaremap.api.LayerProvider;
-import xyz.jpenilla.squaremap.api.Point;
-import xyz.jpenilla.squaremap.api.Registry;
-import xyz.jpenilla.squaremap.api.marker.Circle;
-import xyz.jpenilla.squaremap.api.marker.Ellipse;
-import xyz.jpenilla.squaremap.api.marker.Icon;
-import xyz.jpenilla.squaremap.api.marker.Marker;
-import xyz.jpenilla.squaremap.api.marker.MarkerOptions;
-import xyz.jpenilla.squaremap.api.marker.MultiPolygon;
-import xyz.jpenilla.squaremap.api.marker.Polygon;
-import xyz.jpenilla.squaremap.api.marker.Polyline;
-import xyz.jpenilla.squaremap.api.marker.Rectangle;
 import xyz.jpenilla.squaremap.common.data.DirectoryProvider;
 import xyz.jpenilla.squaremap.common.data.MapWorldInternal;
 import xyz.jpenilla.squaremap.common.httpd.JsonCache;
 import xyz.jpenilla.squaremap.common.util.Util;
 
-public final class UpdateMarkers implements Runnable {
+public final class UpdateMarkers {
     private final MapWorldInternal mapWorld;
     private final String jsonPathString;
     private final JsonCache jsonCache;
-    private final Object2LongMap<Key> lastUpdatedTime = new Object2LongOpenHashMap<>();
-    private final Map<Key, Map<String, Object>> layerCache = new HashMap<>();
-    private final Map<Key, Map<String, Object>> serializedLayerCache = new HashMap<>();
-    private long lastResetTime = Long.MIN_VALUE; // min value to ensure initial write even with no layers
 
     @AssistedInject
     private UpdateMarkers(
@@ -56,241 +32,77 @@ public final class UpdateMarkers implements Runnable {
         this.jsonPathString = "/" + directoryProvider.webDirectory().relativize(jsonPath).toString().replace("\\", "/");
         this.jsonCache = jsonCache;
     }
+    /** Writes an already-collected immutable snapshot without recollecting the layer registry. */
+    public void publish(final xyz.jpenilla.squaremap.bridge.v1.MarkerLayersReplace snapshot) {
+        ForkJoinPool.commonPool().execute(() -> this.jsonCache.put(this.jsonPathString, document(snapshot)));
+    }
 
-    @Override
-    public void run() {
-        final Registry<LayerProvider> layerRegistry = this.mapWorld.layerRegistry();
-
+    public static String document(final xyz.jpenilla.squaremap.bridge.v1.MarkerLayersReplace snapshot) {
         final List<Map<String, Object>> layers = new ArrayList<>();
-        final Set<Key> layerKeys = new HashSet<>();
-        boolean[] changed = {false};
-        layerRegistry.entries().forEach(registeredLayer -> {
-            final LayerProvider provider = registeredLayer.right();
-            final Key key = registeredLayer.left();
-            layerKeys.add(key);
-            final List<Marker> markers = List.copyOf(provider.getMarkers());
+        for (final xyz.jpenilla.squaremap.bridge.v1.MarkerLayer layer : snapshot.getLayersList()) {
+            final Map<String, Object> value = new HashMap<>();
+            value.put("id", layer.getId());
+            value.put("name", layer.getLabel());
+            value.put("control", layer.getShowControls());
+            value.put("hide", layer.getDefaultHidden());
+            value.put("order", layer.getLayerPriority());
+            value.put("z_index", layer.getZIndex());
+            value.put("timestamp", layer.getTimestamp());
+            value.put("markers", layer.getMarkersList().stream().map(UpdateMarkers::legacyMarker).toList());
+            layers.add(value);
+        }
+        return Util.gson().toJson(layers);
+    }
 
-            final Map<String, Object> current = this.createMap(key, provider);
-            current.put("markers", markers.hashCode());
-
-            final Map<String, Object> previous = this.layerCache.get(key);
-
-            if (previous == null || !previous.equals(current)) {
-                changed[0] = true; // new or changed layer
-                this.layerCache.put(key, current);
-
-                final Map<String, Object> serializedLayer = this.serializeLayer(key, provider, markers);
-                this.serializedLayerCache.put(key, serializedLayer);
-
-                final long time = System.currentTimeMillis();
-                this.lastUpdatedTime.put(key, time);
-
-                final Map<String, Object> timeStampedLayer = new HashMap<>(serializedLayer);
-                timeStampedLayer.put("timestamp", time);
-                layers.add(timeStampedLayer);
-            } else {
-                final Map<String, Object> serializedLayer = this.serializedLayerCache.get(key);
-                final long lastUpdate = this.lastUpdatedTime.getLong(key);
-
-                final Map<String, Object> timeStampedLayer = new HashMap<>(serializedLayer);
-                timeStampedLayer.put("timestamp", lastUpdate);
-                layers.add(timeStampedLayer);
+    private static Map<String, Object> legacyMarker(final xyz.jpenilla.squaremap.bridge.v1.Marker marker) {
+        final Map<String, Object> value = new HashMap<>();
+        final xyz.jpenilla.squaremap.bridge.v1.MarkerStyle style = marker.getStyle();
+        if (!style.getStroke()) value.put("stroke", false);
+        if (!style.getStrokeColor().equals("#0000ff")) value.put("color", style.getStrokeColor());
+        if (style.getStrokeWeight() != 3) value.put("weight", style.getStrokeWeight());
+        if (style.getStrokeOpacity() != 1.0) value.put("opacity", style.getStrokeOpacity());
+        if (!style.getFill()) value.put("fill", false);
+        if (style.hasFillColor()) value.put("fillColor", style.getFillColor());
+        if (style.getFillOpacity() != 0.2) value.put("fillOpacity", style.getFillOpacity());
+        if (!style.getFillRule().equals("evenodd")) value.put("fillRule", style.getFillRule());
+        if (marker.hasTooltip()) {
+            if (marker.getTooltip().hasClick()) value.put("popup", marker.getTooltip().getClick());
+            if (marker.getTooltip().hasHover()) value.put("tooltip", marker.getTooltip().getHover());
+        }
+        switch (marker.getGeometryCase()) {
+            case ICON -> {
+                final var icon = marker.getIcon();
+                value.put("type", "icon");
+                value.put("point", point(icon.getPoint()));
+                value.put("size", Map.of("x", icon.getSizeX(), "z", icon.getSizeZ()));
+                value.put("anchor", point(icon.getAnchor())); value.put("tooltip_anchor", point(icon.getTooltipAnchor()));
+                value.put("icon", icon.getImage());
             }
-        });
-
-        // set flag to ensure update on removed layers
-        changed[0] |= clearUnused(layerKeys, this.layerCache);
-        changed[0] |= clearUnused(layerKeys, this.serializedLayerCache);
-        changed[0] |= clearUnused(layerKeys, this.lastUpdatedTime);
-
-        if (changed[0] || this.mapWorld.lastReset() != this.lastResetTime) {
-            this.lastResetTime = this.mapWorld.lastReset();
-            ForkJoinPool.commonPool().execute(() -> this.jsonCache.put(this.jsonPathString, Util.gson().toJson(layers)));
-        }
-    }
-
-    @SuppressWarnings("rawtypes")
-    private static <K> boolean clearUnused(final Set<K> keepKeys, final Map<K, ?> map) {
-        boolean madeChange = false;
-        for (final K key : Set.copyOf(map.keySet())) {
-            if (!keepKeys.contains(key)) {
-                madeChange = true;
-                if (map instanceof Object2LongMap longMap) {
-                    longMap.removeLong(key);
-                } else {
-                    map.remove(key);
-                }
+            case CIRCLE -> { value.put("type", "circle"); value.put("center", point(marker.getCircle().getCenter())); value.put("radius", marker.getCircle().getRadius()); }
+            case ELLIPSE -> { value.put("type", "ellipse"); value.put("center", point(marker.getEllipse().getCenter())); value.put("radiusX", marker.getEllipse().getRadiusX()); value.put("radiusZ", marker.getEllipse().getRadiusZ()); }
+            case RECTANGLE -> { value.put("type", "rectangle"); value.put("points", List.of(point(marker.getRectangle().getPoint1()), point(marker.getRectangle().getPoint2()))); }
+            case POLYLINE -> {
+                value.put("type", "polyline");
+                final List<List<Map<String, Integer>>> lines = marker.getPolyline().getLinesList().stream().map(UpdateMarkers::points).toList();
+                value.put("points", lines.size() == 1 ? lines.get(0) : lines);
             }
+            case POLYGON -> { value.put("type", "polygon"); value.put("points", polygon(marker.getPolygon())); }
+            case MULTI_POLYGON -> { value.put("type", "polygon"); value.put("points", marker.getMultiPolygon().getPolygonsList().stream().map(UpdateMarkers::polygon).toList()); }
+            case GEOMETRY_NOT_SET -> throw new IllegalArgumentException("marker geometry not set");
         }
-        return madeChange;
+        return value;
     }
 
-    private @NonNull Map<String, Object> serializeLayer(final @NonNull Key key, final @NonNull LayerProvider provider, final @NonNull List<Marker> markers) {
-        final Map<String, Object> map = this.createMap(key, provider);
-        map.put("markers", this.serializeMarkers(markers));
-        return map;
+    private static Map<String, Integer> point(final xyz.jpenilla.squaremap.bridge.v1.Point point) {
+        return Map.of("x", point.getX(), "z", point.getZ());
     }
-
-    private Map<String, Object> createMap(Key key, LayerProvider provider) {
-        final Map<String, Object> map = new HashMap<>();
-        map.put("id", key.getKey());
-        map.put("name", provider.getLabel());
-        map.put("control", provider.showControls());
-        map.put("hide", provider.defaultHidden());
-        map.put("order", provider.layerPriority());
-        map.put("z_index", provider.zIndex());
-        return map;
+    private static List<Map<String, Integer>> points(final xyz.jpenilla.squaremap.bridge.v1.PointList points) {
+        return points.getPointsList().stream().map(UpdateMarkers::point).toList();
     }
-
-    private @NonNull List<Map<String, Object>> serializeMarkers(final @NonNull Collection<Marker> markers) {
-        final List<Map<String, Object>> processed = new ArrayList<>();
-
-        for (final Marker marker : markers) {
-            final Map<String, Object> markerMap = new HashMap<>();
-            populateOptions(markerMap, marker.markerOptions());
-            serialize(marker, markerMap);
-            processed.add(markerMap);
-        }
-
-        return processed;
-    }
-
-    private static void populateOptions(final @NonNull Map<String, Object> marker, final @NonNull MarkerOptions options) {
-        final MarkerOptions defaults = MarkerOptions.defaultOptions();
-        if (options.stroke() != defaults.stroke()) {
-            marker.put("stroke", options.stroke());
-        }
-        if (!options.strokeColor().equals(defaults.strokeColor())) {
-            marker.put("color", toHexString(options.strokeColor()));
-        }
-        if (options.strokeWeight() != defaults.strokeWeight()) {
-            marker.put("weight", options.strokeWeight());
-        }
-        if (options.strokeOpacity() != defaults.strokeOpacity()) {
-            marker.put("opacity", options.strokeOpacity());
-        }
-        if (options.fill() != defaults.fill()) {
-            marker.put("fill", options.fill());
-        }
-        final Color fillColor = options.fillColor();
-        if (fillColor != null) {
-            marker.put("fillColor", toHexString(fillColor));
-        }
-        if (options.fillOpacity() != defaults.fillOpacity()) {
-            marker.put("fillOpacity", options.fillOpacity());
-        }
-        if (options.fillRule() != defaults.fillRule()) {
-            marker.put("fillRule", options.fillRule().toString().toLowerCase(Locale.ENGLISH));
-        }
-        final String clickTooltip = options.clickTooltip();
-        if (clickTooltip != null) {
-            marker.put("popup", clickTooltip);
-        }
-        final String hoverTooltip = options.hoverTooltip();
-        if (hoverTooltip != null) {
-            marker.put("tooltip", hoverTooltip);
-        }
-    }
-
-    private static @NonNull String toHexString(final @NonNull Color color) {
-        return "#" + Integer.toHexString(color.getRGB()).substring(2);
-    }
-
-    @SuppressWarnings("unchecked")
-    private static <T extends Marker> void serialize(final @NonNull T marker, final @NonNull Map<String, Object> destination) {
-        final Class<? extends Marker> markerClass = marker.getClass();
-        final MarkerSerializer<T> markerSerializer = (MarkerSerializer<T>) serializers.get(markerClass);
-        if (markerSerializer == null) {
-            throw new IllegalStateException("unknown marker type! no serializer present for " + markerClass.getName());
-        }
-        markerSerializer.serialize(destination, marker);
-    }
-
-    private static final Map<Class<? extends Marker>, MarkerSerializer<?>> serializers = new HashMap<>();
-
-    private static <T extends Marker> void register(final @NonNull Class<T> markerClass, final @NonNull MarkerSerializer<T> serializer) {
-        serializers.put(markerClass, serializer);
-    }
-
-    static {
-        register(Polyline.class, (destination, line) -> {
-            destination.put("type", "polyline");
-            final Object points;
-            if (line.points().size() == 1) {
-                points = line.points().get(0).stream()
-                    .map(UpdateMarkers::toMap)
-                    .toList();
-            } else {
-                points = serializePoints(line.points().stream());
-            }
-            destination.put("points", points);
-        });
-
-        register(Rectangle.class, (destination, rectangle) -> {
-            destination.put("type", "rectangle");
-            destination.put("points", List.of(
-                toMap(rectangle.point1()),
-                toMap(rectangle.point2())
-            ));
-        });
-
-        register(Circle.class, (destination, circle) -> {
-            destination.put("type", "circle");
-            destination.put("center", toMap(circle.center()));
-            destination.put("radius", circle.radius());
-        });
-
-        register(Ellipse.class, (destination, ellipse) -> {
-            destination.put("type", "ellipse");
-            destination.put("center", toMap(ellipse.center()));
-            destination.put("radiusX", ellipse.radiusX());
-            destination.put("radiusZ", ellipse.radiusZ());
-        });
-
-        register(Polygon.class, (destination, polygon) -> {
-            destination.put("type", "polygon");
-            final List<List<Point>> list = new ArrayList<>(Collections.singleton(polygon.mainPolygon()));
-            list.addAll(polygon.negativeSpace());
-            destination.put(
-                "points",
-                serializePoints(list.stream())
-            );
-        });
-
-        register(MultiPolygon.class, (destination, multiPolygon) -> {
-            destination.put("type", "polygon");
-            destination.put(
-                "points",
-                multiPolygon.subPolygons().stream().map(subPoly -> {
-                    final List<List<Point>> list = new ArrayList<>(Collections.singleton(subPoly.mainPolygon()));
-                    list.addAll(subPoly.negativeSpace());
-                    return serializePoints(list.stream());
-                }).toList()
-            );
-        });
-
-        register(Icon.class, (destination, icon) -> {
-            destination.put("type", "icon");
-            destination.put("point", toMap(icon.point()));
-            destination.put("size", toMap(Point.of(icon.sizeX(), icon.sizeZ())));
-            destination.put("anchor", toMap(icon.anchor()));
-            destination.put("tooltip_anchor", toMap(icon.tooltipAnchor()));
-            destination.put("icon", icon.image().getKey());
-        });
-    }
-
-    private static @NonNull List<List<Map<String, Integer>>> serializePoints(final @NonNull Stream<List<Point>> stream) {
-        return stream.map(points ->
-            points.stream().map(UpdateMarkers::toMap).toList()
-        ).toList();
-    }
-
-    @FunctionalInterface
-    private interface MarkerSerializer<T extends Marker> {
-        void serialize(@NonNull Map<String, Object> destination, @NonNull T marker);
-    }
-
-    private static @NonNull Map<String, Integer> toMap(final @NonNull Point point) {
-        return Map.of("x", (int) point.x(), "z", (int) point.z());
+    private static List<Object> polygon(final xyz.jpenilla.squaremap.bridge.v1.MarkerPolygon polygon) {
+        final List<Object> points = new ArrayList<>();
+        points.add(polygon.getMainPolygonList().stream().map(UpdateMarkers::point).toList());
+        points.addAll(polygon.getNegativeSpaceList().stream().map(UpdateMarkers::points).toList());
+        return points;
     }
 }

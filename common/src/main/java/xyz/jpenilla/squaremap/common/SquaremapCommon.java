@@ -1,10 +1,11 @@
 package xyz.jpenilla.squaremap.common;
 
 import com.google.inject.Inject;
+import com.google.inject.Provider;
 import com.google.inject.Injector;
 import com.google.inject.Singleton;
-import java.io.IOException;
 import java.lang.reflect.Method;
+import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ForkJoinPool;
@@ -44,7 +45,7 @@ public final class SquaremapCommon {
     private final Commands commands;
     private final SquaremapJarAccess squaremapJar;
     private final JsonCache jsonCache;
-    private final BridgeBootstrapConfig bootstrapConfig;
+    private final Provider<BridgeBootstrapConfig> bootstrapConfig;
     private final SidecarSupervisor sidecarSupervisor;
     private BridgeConnection bridgeConnection;
     private boolean sidecarLaunchAttempted;
@@ -60,7 +61,7 @@ public final class SquaremapCommon {
         final Commands commands,
         final SquaremapJarAccess squaremapJar,
         final JsonCache jsonCache,
-        final BridgeBootstrapConfig bootstrapConfig,
+        final Provider<BridgeBootstrapConfig> bootstrapConfig,
         final SidecarSupervisor sidecarSupervisor
     ) {
         this.injector = injector;
@@ -96,19 +97,23 @@ public final class SquaremapCommon {
             Logging.logger().info(Messages.LOG_INTERNAL_WEB_DISABLED);
         }
     }
-
     private void startSidecarIfNeeded() {
-        if (this.bootstrapConfig.backendMode() == BackendMode.JAVA || this.sidecarLaunchAttempted) {
+        final BridgeBootstrapConfig bootstrapConfig = this.bootstrapConfig.get();
+        if (bootstrapConfig.backendMode() == BackendMode.JAVA || this.sidecarLaunchAttempted) {
             return;
         }
         this.sidecarLaunchAttempted = true;
+        if (bootstrapConfig.rustOutputRoot() == null) {
+            throw new IllegalArgumentException("Rust backend requires an isolated output root distinct from Java web output");
+        }
+        BridgeBootstrapConfig.validateIsolatedRoots(this.directoryProvider.webDirectory(), bootstrapConfig.rustOutputRoot());
         try {
-            this.bridgeConnection = this.sidecarSupervisor.start(this.bootstrapConfig)
+            this.bridgeConnection = this.sidecarSupervisor.start(bootstrapConfig)
                 .toCompletableFuture()
                 .join();
         } catch (final CompletionException failure) {
             this.bridgeConnection = null;
-            if (this.bootstrapConfig.backendMode() == BackendMode.SHADOW) {
+            if (bootstrapConfig.backendMode() == BackendMode.SHADOW) {
                 Logging.logger().warn("Shadow sidecar failed to launch; Java remains primary", failure.getCause());
             } else {
                 throw failure;
@@ -152,13 +157,13 @@ public final class SquaremapCommon {
 
     private void setupApi() {
         final Squaremap api = this.injector.getInstance(Squaremap.class);
-
+        final IconRegistry iconRegistry = this.injector.getInstance(IconRegistry.class);
+        iconRegistry.setBridgeSink(snapshot -> this.injector.getInstance(xyz.jpenilla.squaremap.common.bridge.state.BridgeStatePublisher.class).publishIcons(snapshot));
         try {
             api.iconRegistry().register(SpawnIconLayer.KEY, ImageIO.read(this.directoryProvider.webDirectory().resolve("images/icon/spawn.png").toFile()));
         } catch (final IOException ex) {
             Logging.logger().warn("Failed to register spawn icon", ex);
         }
-
         final Method register = ReflectionUtil.needMethod(SquaremapProvider.class, List.of("register"), Squaremap.class);
         ReflectionUtil.invokeOrThrow(register, null, api);
     }

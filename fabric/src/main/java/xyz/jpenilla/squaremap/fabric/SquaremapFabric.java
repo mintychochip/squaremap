@@ -24,8 +24,7 @@ import xyz.jpenilla.squaremap.common.SquaremapPlatform;
 import xyz.jpenilla.squaremap.common.WorldManagerImpl;
 import xyz.jpenilla.squaremap.common.data.MapWorldInternal;
 import xyz.jpenilla.squaremap.common.inject.SquaremapModulesBuilder;
-import xyz.jpenilla.squaremap.common.task.UpdatePlayers;
-import xyz.jpenilla.squaremap.common.task.UpdateWorldData;
+import xyz.jpenilla.squaremap.common.bridge.state.BridgeStatePublisher;
 import xyz.jpenilla.squaremap.fabric.data.FabricMapWorld;
 import xyz.jpenilla.squaremap.fabric.inject.module.FabricModule;
 import xyz.jpenilla.squaremap.fabric.listener.FabricMapUpdates;
@@ -38,8 +37,7 @@ public final class SquaremapFabric implements SquaremapPlatform {
     private final FabricServerAccess serverAccess;
     private final WorldManagerImpl worldManager;
     private final ModContainer modContainer;
-    private @Nullable UpdatePlayers updatePlayers;
-    private @Nullable UpdateWorldData updateWorldData;
+    private @Nullable BridgeStatePublisher statePublisher;
 
     SquaremapFabric() {
         this.injector = Guice.createInjector(
@@ -87,14 +85,11 @@ public final class SquaremapFabric implements SquaremapPlatform {
 
     @Override
     public void startCallback() {
-        this.updatePlayers = this.injector.getInstance(UpdatePlayers.class);
-        this.updateWorldData = this.injector.getInstance(UpdateWorldData.class);
+        this.statePublisher = this.injector.getInstance(BridgeStatePublisher.class);
     }
 
     @Override
     public void stopCallback() {
-        this.updatePlayers = null;
-        this.updateWorldData = null;
     }
 
     @Override
@@ -114,14 +109,10 @@ public final class SquaremapFabric implements SquaremapPlatform {
         public void onEndTick(final MinecraftServer server) {
             if (this.tick % 20 == 0) {
                 if (this.tick % 100 == 0) {
-                    if (SquaremapFabric.this.updateWorldData != null) {
-                        SquaremapFabric.this.updateWorldData.run();
-                    }
+                    if (SquaremapFabric.this.statePublisher != null) SquaremapFabric.this.statePublisher.publishWorlds();
                 }
 
-                if (SquaremapFabric.this.updatePlayers != null) {
-                    SquaremapFabric.this.updatePlayers.run();
-                }
+                if (SquaremapFabric.this.statePublisher != null) SquaremapFabric.this.statePublisher.publishPlayers();
 
                 for (final MapWorldInternal mapWorld : SquaremapFabric.this.worldManager.worlds()) {
                     ((FabricMapWorld) mapWorld).tickEachSecond(this.tick);

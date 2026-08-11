@@ -220,6 +220,10 @@ message UiSettings {
   bool coordinates_enabled = 1;
   bool link_enabled = 2;
   string sidebar_pinned = 3;
+  string title = 4;
+  string coordinates_html = 5;
+  string sidebar_player_list_label = 6;
+  string sidebar_world_list_label = 7;
 }
 
 enum VisibilityLimitKind {
@@ -357,6 +361,7 @@ message WorldRemove {
 message WorldStateReplace {
   uint64 revision = 1;
   repeated World worlds = 2;
+  UiSettings ui = 3;
 }
 
 message Player {
@@ -464,6 +469,7 @@ message MarkerLayer {
   bool default_hidden = 6;
   sint32 layer_priority = 7;
   sint32 z_index = 8;
+  uint64 timestamp = 9;
 }
 
 message MarkerLayersReplace {
@@ -476,6 +482,8 @@ message Icon {
   string id = 1;
   bytes image = 2;
   string mime_type = 3;
+  uint32 width = 4;
+  uint32 height = 5;
 }
 
 message IconsReplace {

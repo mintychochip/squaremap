@@ -2,6 +2,7 @@ package xyz.jpenilla.squaremap.common.bridge.outbox;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -49,7 +50,10 @@ public final class CoalescingOutbox {
     public List<BridgeEvent> drain() {
         synchronized (this.lock) {
             final List<BridgeEvent> result = new ArrayList<>(this.states.size() + this.dirty.size() + this.resyncs.size());
-            result.addAll(this.states.values());
+            this.states.values().stream()
+                .sorted(Comparator.comparingInt((BridgeEvent.ReplaceState state) -> replacementPriority(state.key()))
+                    .thenComparing(BridgeEvent.ReplaceState::key))
+                .forEach(result::add);
             result.addAll(this.dirty.values());
             result.addAll(this.resyncs.values());
             this.states.clear();
@@ -99,6 +103,14 @@ public final class CoalescingOutbox {
                 this.offerLocked(event);
             }
         }
+    }
+
+    private static int replacementPriority(final String key) {
+        if ("worlds".equals(key)) return 0;
+        if (key.startsWith("markers:")) return 1;
+        if ("players".equals(key)) return 2;
+        if ("icons".equals(key)) return 3;
+        return 4;
     }
 
     private BridgePublisher.PublishResult offerLocked(final BridgeEvent event) {

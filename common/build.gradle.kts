@@ -38,8 +38,9 @@ dependencies {
   api(libs.protobufJava)
   implementation(libs.aircompressor)
   testImplementation(libs.junitJupiter)
+  testImplementation("com.google.code.gson:gson:2.13.1")
   testRuntimeOnly(libs.junitPlatformLauncher)
-
+  testRuntimeOnly("com.google.guava:guava:33.4.8-jre")
   api(projects.squaremapApi)
   api("com.google.inject:guice:${libs.versions.guice.get()}:classes") {
     exclude("com.google.guava") // provided by minecraft

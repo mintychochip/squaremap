@@ -1548,6 +1548,8 @@ dependencies = [
  "prost",
  "rand 0.9.5",
  "reqwest",
+ "serde",
+ "serde_json",
  "squaremap-protocol",
  "squaremap-state",
  "tempfile",

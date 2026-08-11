@@ -8,30 +8,29 @@ import org.checkerframework.framework.qual.DefaultQualifier;
 import xyz.jpenilla.squaremap.common.config.ConfigManager;
 import xyz.jpenilla.squaremap.common.data.DirectoryProvider;
 import xyz.jpenilla.squaremap.common.data.MapWorldInternal;
+import xyz.jpenilla.squaremap.common.bridge.state.BridgeStatePublisher;
 import xyz.jpenilla.squaremap.common.task.TaskFactory;
-import xyz.jpenilla.squaremap.common.task.UpdateMarkers;
 import xyz.jpenilla.squaremap.common.task.render.RenderFactory;
 
 @DefaultQualifier(NonNull.class)
 public final class ForgeMapWorld extends MapWorldInternal {
-    private final UpdateMarkers updateMarkers;
-
+    private final BridgeStatePublisher statePublisher;
     @AssistedInject
     private ForgeMapWorld(
         @Assisted final ServerLevel level,
         final RenderFactory renderFactory,
         final DirectoryProvider directoryProvider,
         final ConfigManager configManager,
-        final TaskFactory taskFactory
+        final TaskFactory taskFactory,
+        final BridgeStatePublisher statePublisher
     ) {
         super(level, renderFactory, directoryProvider, configManager);
-
-        this.updateMarkers = taskFactory.createUpdateMarkers(this);
+        this.statePublisher = statePublisher;
     }
 
     public void tickEachSecond(final long tick) {
         if (tick % (this.config().MARKER_API_UPDATE_INTERVAL_SECONDS * 20L) == 0) {
-            this.updateMarkers.run();
+            this.statePublisher.publishMarkers(this);
         }
     }
 }

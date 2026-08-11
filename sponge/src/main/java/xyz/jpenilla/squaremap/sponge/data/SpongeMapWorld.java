@@ -13,6 +13,7 @@ import org.spongepowered.plugin.PluginContainer;
 import xyz.jpenilla.squaremap.common.config.ConfigManager;
 import xyz.jpenilla.squaremap.common.data.DirectoryProvider;
 import xyz.jpenilla.squaremap.common.data.MapWorldInternal;
+import xyz.jpenilla.squaremap.common.bridge.state.BridgeStatePublisher;
 import xyz.jpenilla.squaremap.common.task.TaskFactory;
 import xyz.jpenilla.squaremap.common.task.render.RenderFactory;
 
@@ -28,16 +29,16 @@ public final class SpongeMapWorld extends MapWorldInternal {
         final Game game,
         final PluginContainer pluginContainer,
         final ConfigManager configManager,
-        final TaskFactory taskFactory
+        final TaskFactory taskFactory,
+        final BridgeStatePublisher statePublisher
     ) {
         super(level, renderFactory, directoryProvider, configManager);
-
         this.updateMarkers = game.server().scheduler().submit(
             Task.builder()
                 .plugin(pluginContainer)
                 .delay(Duration.ofSeconds(5))
                 .interval(Duration.ofSeconds(this.config().MARKER_API_UPDATE_INTERVAL_SECONDS))
-                .execute(taskFactory.createUpdateMarkers(this))
+                .execute(() -> statePublisher.publishMarkers(this))
                 .build()
         );
     }

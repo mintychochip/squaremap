@@ -18,6 +18,8 @@ tokio = { workspace = true, features = ["net", "time", "rt-multi-thread", "macro
 zeroize = "1.8.1"
 squaremap-protocol = { path = "../squaremap-protocol" }
 squaremap-state = { path = "../squaremap-state" }
+serde.workspace = true
+serde_json.workspace = true
 axum = { version = "0.8.9", features = ["ws"] }
 http-body-util = "0.1.3"
 hyper = { version = "1.6.0", features = ["client", "http1", "server"] }
