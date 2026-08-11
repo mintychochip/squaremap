@@ -76,6 +76,17 @@ public final class FakeSidecar {
                 System.err.write(noise);
                 System.err.flush();
             }
+            if ("ignore-shutdown".equals(behavior)) {
+                Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                    try {
+                        Thread.sleep(5_000L);
+                    } catch (final InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                    }
+                }));
+                Thread.sleep(60_000L);
+            }
+
             try {
                 read(socket);
             } catch (Exception ignored) {

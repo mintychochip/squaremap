@@ -2,7 +2,8 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use rand::RngCore;
 use squaremap_protocol::wire::{envelope, Envelope, Hello, Shutdown};
-use squaremap_protocol::{read_envelope, write_envelope, FrameError, FrameLimits};
+use squaremap_protocol::{read_envelope, FrameClass, FrameError, FrameLimits};
+use prost::Message;
 use std::fmt;
 use std::io::{self, BufRead, Read};
 use std::net::SocketAddr;
@@ -10,6 +11,7 @@ use std::str::FromStr;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use zeroize::{Zeroize, Zeroizing};
 
 const PROTOCOL_MAJOR: u32 = 1;
@@ -67,7 +69,7 @@ pub fn parse_connect(value: &str) -> Result<SocketAddr, BootstrapError> {
 
 pub fn read_token<R: BufRead>(reader: R) -> Result<Zeroizing<Vec<u8>>, BootstrapError> {
     let mut bounded = reader.take((MAX_TOKEN_LINE_BYTES + 1) as u64);
-    let mut line = Vec::with_capacity(MAX_TOKEN_LINE_BYTES + 1);
+    let mut line = Zeroizing::new(Vec::with_capacity(MAX_TOKEN_LINE_BYTES + 1));
     bounded.read_to_end(&mut line)?;
     if !line.ends_with(b"\n") {
         return Err(BootstrapError::Token("expected one newline-terminated line of at most 88 characters".to_string()));
@@ -79,13 +81,73 @@ pub fn read_token<R: BufRead>(reader: R) -> Result<Zeroizing<Vec<u8>>, Bootstrap
     if line.len() > MAX_TOKEN_LINE_BYTES || !line.is_ascii() {
         return Err(BootstrapError::Token("token line is too long or non-ASCII".to_string()));
     }
-    let decoded = STANDARD
-        .decode(&line)
-        .map_err(|error| BootstrapError::Token(error.to_string()))?;
+    let decoded = Zeroizing::new(
+        STANDARD
+            .decode(&line)
+            .map_err(|error| BootstrapError::Token(error.to_string()))?,
+    );
     if decoded.len() != BOOTSTRAP_TOKEN_BYTES {
         return Err(BootstrapError::Token("token must decode to exactly 32 bytes".to_string()));
     }
-    Ok(Zeroizing::new(decoded))
+    Ok(decoded)
+}
+
+async fn write_bootstrap_hello<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    plugin_version: &str,
+    session_id: &[u8; SESSION_ID_BYTES],
+    token: &mut Zeroizing<Vec<u8>>,
+) -> Result<(), BootstrapError> {
+    let result = write_bootstrap_hello_inner(writer, plugin_version, session_id, token.as_slice()).await;
+    token.zeroize();
+    result
+}
+
+async fn write_bootstrap_hello_inner<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    plugin_version: &str,
+    session_id: &[u8; SESSION_ID_BYTES],
+    token: &[u8],
+) -> Result<(), BootstrapError> {
+    let mut hello = Envelope {
+        protocol_major: PROTOCOL_MAJOR,
+        protocol_minor: PROTOCOL_MINOR,
+        session_id: session_id.to_vec(),
+        sequence: 1,
+        correlation_id: 0,
+        payload: Some(envelope::Payload::Hello(Hello {
+            plugin_version: plugin_version.to_string(),
+            bootstrap_token: token.to_vec(),
+        })),
+    };
+    let mut encoded_payload = Vec::with_capacity(hello.encoded_len());
+    let encoded = hello.encode(&mut encoded_payload);
+    zeroize_hello_payload(&mut hello);
+    let payload = Zeroizing::new(encoded_payload);
+    encoded.map_err(FrameError::ProtobufEncode).map_err(BootstrapError::Frame)?;
+    if payload.is_empty() {
+        return Err(BootstrapError::Frame(FrameError::ZeroLength));
+    }
+    if payload.len() > FrameLimits::MAX_CONTROL_BYTES as usize {
+        return Err(BootstrapError::Frame(FrameError::DeclaredLength {
+            class: FrameClass::Control,
+            length: payload.len() as u32,
+            max: FrameLimits::MAX_CONTROL_BYTES,
+        }));
+    }
+    let mut prefix = [0_u8; 5];
+    prefix[0] = FrameClass::Control as u8;
+    prefix[1..].copy_from_slice(&(payload.len() as u32).to_be_bytes());
+    writer.write_all(&prefix).await?;
+    writer.write_all(payload.as_slice()).await?;
+    Ok(())
+}
+
+fn zeroize_hello_payload(envelope: &mut Envelope) {
+    if let Some(envelope::Payload::Hello(hello)) = envelope.payload.as_mut() {
+        hello.bootstrap_token.zeroize();
+        hello.bootstrap_token.clear();
+    }
 }
 
 pub async fn run_bridge(
@@ -98,29 +160,13 @@ pub async fn run_bridge(
         .map_err(|_| BootstrapError::ConnectTimeout)??;
     let mut session_id = [0_u8; SESSION_ID_BYTES];
     rand::rng().fill_bytes(&mut session_id);
-    let mut hello = Envelope {
-        protocol_major: PROTOCOL_MAJOR,
-        protocol_minor: PROTOCOL_MINOR,
-        session_id: session_id.to_vec(),
-        sequence: 1,
-        correlation_id: 0,
-        payload: Some(envelope::Payload::Hello(Hello {
-            plugin_version: plugin_version.to_string(),
-            bootstrap_token: token.to_vec(),
-        })),
-    };
     tracing::info!(
         session_id = %hex::encode(session_id),
         protocol_major = PROTOCOL_MAJOR,
         plugin_version,
         "bridge hello sent"
     );
-    write_envelope(&mut stream, &hello, FrameLimits::default()).await?;
-    if let Some(envelope::Payload::Hello(hello_payload)) = hello.payload.as_mut() {
-        hello_payload.bootstrap_token.zeroize();
-        hello_payload.bootstrap_token.clear();
-    }
-    token.zeroize();
+    write_bootstrap_hello(&mut stream, plugin_version, &session_id, &mut token).await?;
 
     let ack = read_envelope(&mut stream, FrameLimits::default()).await?;
     let ack_payload = match ack.payload {
@@ -186,9 +232,13 @@ mod tests {
 }
 #[cfg(test)]
 mod protocol_tests {
-    use super::{run_bridge, BootstrapError};
+    use super::{run_bridge, write_bootstrap_hello, BootstrapError};
     use squaremap_protocol::wire::{envelope, Envelope, HelloAck, Shutdown, ShutdownReason};
     use squaremap_protocol::{read_envelope, write_envelope, FrameLimits};
+    use std::io;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::AsyncWrite;
     use tokio::net::TcpListener;
     use zeroize::Zeroizing;
 
@@ -258,5 +308,40 @@ mod protocol_tests {
         let result = run_bridge(address, "fixture", Zeroizing::new(vec![0; 32])).await;
         server.await.unwrap();
         assert!(matches!(result, Err(BootstrapError::Rejected(_))));
+    }
+    struct FailingWriter;
+
+    impl AsyncWrite for FailingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+            _buffer: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "fixture failure")))
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn secret_hello_writer_zeroizes_token_on_write_error() {
+        let mut token = Zeroizing::new(vec![0xa5; 32]);
+        let mut writer = FailingWriter;
+        let session_id = [0_u8; 16];
+        let result = write_bootstrap_hello(&mut writer, "fixture", &session_id, &mut token).await;
+        assert!(result.is_err());
+        assert!(token.iter().all(|byte| *byte == 0));
     }
 }

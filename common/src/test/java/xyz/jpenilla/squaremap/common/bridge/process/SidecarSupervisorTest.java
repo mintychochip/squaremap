@@ -8,6 +8,8 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertTimeout;
+
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -22,6 +24,7 @@ class SidecarSupervisorTest {
         assertFalse(connection.isClosed());
         connection.close();
         assertDoesNotThrow(connection::close);
+        assertTrue(connection.isClosed());
         assertDoesNotThrow(supervisor::close);
     }
 
@@ -43,6 +46,16 @@ class SidecarSupervisorTest {
         assertTrue(supervisor.isClosed());
         assertDoesNotThrow(supervisor::close);
     }
+    @Test
+    void closeDuringStartupFailsStageWithoutRestart() {
+        final SidecarSupervisor supervisor = new SidecarSupervisor();
+        final var stage = supervisor.start(config("timeout", Duration.ofSeconds(5)));
+        supervisor.close();
+        assertThrows(CompletionException.class, () -> stage.toCompletableFuture().join());
+        assertTrue(supervisor.isClosed());
+        assertTrue(supervisor.start(config("timeout", Duration.ofSeconds(5))) == stage);
+    }
+
 
     @Test
     void stderrCaptureIsBounded() throws Exception {
@@ -74,6 +87,19 @@ class SidecarSupervisorTest {
             return false;
         }
     }
+    @Test
+    void configuredShutdownGraceBoundsForcedTermination() throws Exception {
+        final SidecarSupervisor supervisor = new SidecarSupervisor();
+        final BridgeConnection connection = supervisor.start(config(
+                "ignore-shutdown",
+                Duration.ofSeconds(5),
+                Duration.ofMillis(100)
+            ))
+            .toCompletableFuture().get(6, TimeUnit.SECONDS);
+        assertTimeout(Duration.ofSeconds(3), connection::close);
+        assertTrue(connection.isClosed());
+    }
+
 
     @Test
     void startIsSingleUseAndDoesNotRestartAfterClose() throws Exception {
@@ -95,6 +121,14 @@ class SidecarSupervisorTest {
     }
 
     private static BridgeBootstrapConfig config(final String behavior, final Duration timeout) {
+        return config(behavior, timeout, Duration.ofMillis(200));
+    }
+
+    private static BridgeBootstrapConfig config(
+        final String behavior,
+        final Duration timeout,
+        final Duration shutdownGrace
+    ) {
         return new BridgeBootstrapConfig(
             BackendMode.RUST,
             "fixture",
@@ -106,7 +140,7 @@ class SidecarSupervisorTest {
                 "--behavior=" + behavior
             )),
             timeout,
-            Duration.ofMillis(200)
+            shutdownGrace
         );
     }
 

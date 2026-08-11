@@ -34,6 +34,14 @@ import xyz.jpenilla.squaremap.common.bridge.protocol.FrameCodec;
 public final class SidecarSupervisor implements AutoCloseable {
     public static final int BOOTSTRAP_TOKEN_BYTES = 32;
     public static final int SESSION_ID_BYTES = 16;
+    private enum LifecycleState {
+        NEW,
+        STARTING,
+        READY,
+        FAILED,
+        CLOSED
+    }
+
     public static final int MAX_STDERR_BYTES = 64 * 1024;
 
     private final Object lock = new Object();
@@ -49,6 +57,7 @@ public final class SidecarSupervisor implements AutoCloseable {
     private SocketChannel socket;
     private Process process;
     private ManagedConnection connection;
+    private LifecycleState lifecycleState = LifecycleState.NEW;
     private volatile boolean closed;
     private ScheduledFuture<?> timeoutTask;
 
@@ -75,23 +84,27 @@ public final class SidecarSupervisor implements AutoCloseable {
                 return this.startFuture;
             }
             this.startFuture = new CompletableFuture<>();
-            if (this.closed) {
+            if (this.lifecycleState == LifecycleState.CLOSED || this.lifecycleState == LifecycleState.FAILED) {
                 this.startFuture.completeExceptionally(new IllegalStateException("supervisor is closed"));
                 return this.startFuture;
             }
             if (config.backendMode() == BackendMode.JAVA) {
                 final byte[] session = new byte[SESSION_ID_BYTES];
-                this.connection = new ManagedConnection(null, null, session, true);
+                this.connection = new ManagedConnection(null, null, session, config.shutdownGrace(), true);
+                this.lifecycleState = LifecycleState.READY;
                 this.startFuture.complete(this.connection);
                 return this.startFuture;
             }
+            this.lifecycleState = LifecycleState.STARTING;
             this.executor.execute(() -> this.launch(config));
             return this.startFuture;
         }
     }
 
     public boolean isClosed() {
-        return this.closed;
+        synchronized (this.lock) {
+            return this.lifecycleState == LifecycleState.FAILED || this.lifecycleState == LifecycleState.CLOSED;
+        }
     }
 
     /** Returns a bounded copy of child stderr captured so far. */
@@ -102,20 +115,21 @@ public final class SidecarSupervisor implements AutoCloseable {
             return copy;
         }
     }
+
     List<String> launchedCommandSnapshot() {
         synchronized (this.lock) {
             return this.launchedCommand;
         }
     }
 
-
     @Override
     public void close() {
         final ManagedConnection active;
         synchronized (this.lock) {
-            if (this.closed) {
+            if (this.lifecycleState == LifecycleState.CLOSED) {
                 return;
             }
+            this.lifecycleState = LifecycleState.CLOSED;
             this.closed = true;
             active = this.connection;
         }
@@ -133,9 +147,16 @@ public final class SidecarSupervisor implements AutoCloseable {
     private void launch(final BridgeBootstrapConfig config) {
         final byte[] token = new byte[BOOTSTRAP_TOKEN_BYTES];
         try {
-            this.listener = ServerSocketChannel.open();
-            this.listener.bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0));
-            final InetSocketAddress address = (InetSocketAddress) this.listener.getLocalAddress();
+            final ServerSocketChannel openedListener = ServerSocketChannel.open();
+            openedListener.bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0));
+            synchronized (this.lock) {
+                if (this.lifecycleState != LifecycleState.STARTING || this.closed) {
+                    closeQuietly(openedListener);
+                    throw new IOException("supervisor closed");
+                }
+                this.listener = openedListener;
+            }
+            final InetSocketAddress address = (InetSocketAddress) openedListener.getLocalAddress();
 
             final List<String> command = new ArrayList<>(config.sidecarCommand().command());
             command.add("bridge");
@@ -148,7 +169,7 @@ public final class SidecarSupervisor implements AutoCloseable {
             }
             final ProcessBuilder builder = new ProcessBuilder(command);
             synchronized (this.lock) {
-                if (this.closed) {
+                if (this.lifecycleState != LifecycleState.STARTING || this.closed) {
                     throw new IOException("supervisor closed");
                 }
                 this.process = builder.start();
@@ -164,7 +185,8 @@ public final class SidecarSupervisor implements AutoCloseable {
             );
             final SocketChannel accepted = this.listener.accept();
             synchronized (this.lock) {
-                if (this.closed) {
+                if (this.lifecycleState != LifecycleState.STARTING || this.closed) {
+                    closeQuietly(accepted);
                     throw new IOException("supervisor closed");
                 }
                 this.socket = accepted;
@@ -186,15 +208,26 @@ public final class SidecarSupervisor implements AutoCloseable {
             if (!acceptedHandshake) {
                 throw new SecurityException("sidecar handshake rejected");
             }
-            final ManagedConnection managed = new ManagedConnection(accepted, this.process, sessionId, false);
+            final ManagedConnection managed = new ManagedConnection(
+                accepted,
+                this.process,
+                sessionId,
+                config.shutdownGrace(),
+                false
+            );
             synchronized (this.lock) {
+                if (this.lifecycleState != LifecycleState.STARTING || this.closed) {
+                    closeQuietly(accepted);
+                    throw new IOException("supervisor closed");
+                }
                 this.connection = managed;
+                this.lifecycleState = LifecycleState.READY;
+                this.startFuture.complete(managed);
             }
             final ScheduledFuture<?> timeout = this.timeoutTask;
             if (timeout != null) {
                 timeout.cancel(false);
             }
-            this.startFuture.complete(managed);
         } catch (final Throwable failure) {
             this.failStart(failure);
         } finally {
@@ -233,6 +266,10 @@ public final class SidecarSupervisor implements AutoCloseable {
 
     private void failStart(final Throwable failure) {
         synchronized (this.lock) {
+            if (this.lifecycleState != LifecycleState.STARTING) {
+                return;
+            }
+            this.lifecycleState = LifecycleState.FAILED;
             this.closed = true;
         }
         final ScheduledFuture<?> timeout = this.timeoutTask;
@@ -241,7 +278,7 @@ public final class SidecarSupervisor implements AutoCloseable {
         }
         this.cleanup(false, Duration.ZERO);
         final CompletableFuture<BridgeConnection> future = this.startFuture;
-        if (future != null) {
+        if (future != null && !future.isDone()) {
             future.completeExceptionally(failure);
         }
     }
@@ -271,17 +308,15 @@ public final class SidecarSupervisor implements AutoCloseable {
             closeQuietly(child.getInputStream());
             closeQuietly(child.getErrorStream());
         }
-        this.scheduler.shutdownNow();
-        this.executor.shutdownNow();
     }
 
     private void closeAccepted(final ManagedConnection accepted) {
         synchronized (this.lock) {
-            if (accepted.closed.compareAndSet(false, true)) {
-                this.closed = true;
-            } else {
+            if (!accepted.closed.compareAndSet(false, true)) {
                 return;
             }
+            this.lifecycleState = LifecycleState.CLOSED;
+            this.closed = true;
         }
         try {
             final Envelope shutdown = Envelope.newBuilder()
@@ -298,7 +333,7 @@ public final class SidecarSupervisor implements AutoCloseable {
             // Forced process termination below is the fallback when the bridge is unavailable.
         } finally {
             closeQuietly(accepted.socket);
-            this.cleanup(true, BridgeBootstrapConfig.DEFAULT_SHUTDOWN_GRACE);
+            this.cleanup(true, accepted.shutdownGrace);
         }
     }
 
@@ -383,17 +418,21 @@ public final class SidecarSupervisor implements AutoCloseable {
         private final Process process;
         private final byte[] sessionId;
         private final AtomicBoolean closed = new AtomicBoolean();
+        private final Duration shutdownGrace;
         private final boolean noProcess;
+
 
         private ManagedConnection(
             final SocketChannel socket,
             final Process process,
             final byte[] sessionId,
+            final Duration shutdownGrace,
             final boolean noProcess
         ) {
             this.socket = socket;
             this.process = process;
             this.sessionId = sessionId.clone();
+            this.shutdownGrace = shutdownGrace;
             this.noProcess = noProcess;
         }
 

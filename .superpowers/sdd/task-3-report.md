@@ -95,3 +95,50 @@ Modified:
 - No JNI, gRPC, HTTP, persistence, event/session ordering, backend routing, binary resolution/download, or automatic restart behavior was added.
 - The required CLI command and focused tests pass. Cargo emits an existing `squaremap-protocol` unused-import warning; no formatter, linter, or project-wide suite was run per task constraints.
 - No unresolved concerns were found in the focused scope.
+
+
+## Review-fix evidence
+
+The lifecycle/secret-handling review fixes were developed test-first against commit `0ea0c3f`.
+
+RED command:
+
+```text
+./gradlew --no-daemon --no-configuration-cache :squaremap-common:test --tests '*SidecarSupervisorTest'
+```
+
+With the new configured-grace regression test and the baseline supervisor, the focused suite reported `8 tests completed, 1 failed`; `configuredShutdownGraceBoundsForcedTermination()` failed with `AssertionFailedError` at `SidecarSupervisorTest.java:88`. This demonstrated the baseline hardcoded 10-second grace defect.
+
+GREEN Java command:
+
+```text
+./gradlew --no-daemon --no-configuration-cache :squaremap-common:test --tests '*SidecarSupervisorTest'
+```
+
+Result: `BUILD SUCCESSFUL`; focused XML report recorded 9 tests, 0 skipped, 0 failures, and 0 errors. Added coverage includes configured shutdown grace, startup close/failure/no-restart, and `BridgeConnection.isClosed()` after teardown.
+
+GREEN Rust command:
+
+```text
+cargo test --manifest-path rust/Cargo.toml -p squaremap-server
+```
+
+Result: `7 passed (1 suite, 0.00s)`, including secret Hello-writer zeroization on writer error.
+
+CLI smoke:
+
+```text
+cargo run --manifest-path rust/Cargo.toml -p squaremap-server -- --help
+```
+
+Result: exit 0 and help listed `bridge`.
+
+Leak check:
+
+```text
+pgrep -af 'xyz.jpenilla.squaremap.common.bridge.process.FakeSidecar' || true
+```
+
+Output: no matching process.
+
+The review fixes register-or-close listeners and accepted sockets under the supervisor lock, make startup state transitions deterministic, prevent readiness completion after cleanup, propagate configured shutdown grace, and zeroize the stdin line, decoded token, Hello payload, and serialized Hello protobuf buffer on success and error paths.
