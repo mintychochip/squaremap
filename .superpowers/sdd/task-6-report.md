@@ -12,14 +12,21 @@ It failed during test compilation because `squaremap_server` had no library crat
 
 ## GREEN
 
-Focused contract tests now pass:
+At the recorded review base `4c7b93b`, the required focused command had the exact baseline result:
 
 ```text
 cargo test --manifest-path rust/Cargo.toml -p squaremap-server --test http_contract --test dev_frontend
-cargo test: 13 passed (2 suites, 15 warnings; existing protocol/session warnings only)
+cargo test: 13 passed (2 suites, 15 warnings)
 ```
 
-The tests cover static index/JSON/PNG responses, GET/HEAD, explicit MIME and length headers, quoted/weak/wildcard ETags and 304, tile cache headers and missing-PNG behavior, non-tile 404, method/path rejection, root-confined writes, symlink rejection, disabled mode, dev URL rejection/readiness timeout, HTTP POST body/query/status forwarding, HTTP and WebSocket forwarding, and local tile exclusions.
+That baseline contained exactly two Task 6 unreachable-statement warnings; the remaining warnings were pre-existing protocol/session warnings. The follow-up regressions now pass:
+
+```text
+cargo test --manifest-path rust/Cargo.toml -p squaremap-server --test http_contract --test dev_frontend
+cargo test: 19 passed (2 suites, 13 warnings)
+```
+
+The tests cover static index/JSON/PNG responses, GET/HEAD, explicit MIME and length headers, quoted/weak/wildcard ETags and 304, tile cache headers and missing-PNG behavior, non-tile 404, method/path rejection, root-confined writes, symlink rejection, disabled mode, dev URL rejection/readiness timeout, delayed readiness and multiple candidates, immediate exit, bounded multibyte/sustained logs, HTTP POST body/query/status forwarding, infinite-response cancellation, stalled WebSocket-handshake cancellation, WebSocket header/subprotocol forwarding, descendant process-group shutdown, concurrent atomic writes, HTTP and WebSocket forwarding, and local tile exclusions.
 
 ## Smoke
 
@@ -40,6 +47,14 @@ Fetching `/` returned HTTP 200 and 1952 bytes. Fetching `/tiles/missing.png` ret
 - Missing tiles are only synthesized for the exact `tiles` first component and `.png` extension; `/tiles2` is not an exclusion.
 - Proxy bodies use bounded streaming adapters rather than whole-body copies; request/response hop-by-hop filtering parses `Connection` extension tokens and suppresses Host forwarding.
 
+
+The requested Windows-target check was attempted exactly as follows:
+
+```text
+cargo check --manifest-path rust/Cargo.toml -p squaremap-server --target x86_64-pc-windows-gnu
+```
+
+It did not reach `squaremap-server` compilation because the workspace's `libsqlite3-sys` build script could not find `x86_64-w64-mingw32-gcc`; this is an environment/toolchain blocker, not a reported Windows compile success.
 ## Lifecycle review
 
 Dev startup runs the injected executable exactly as `bun run dev` in the configured frontend directory, merges bounded stdout/stderr line capture, continues draining logs after readiness, accepts only loopback URLs before the configured timeout, tracks and cancels WebSocket tunnels, and terminates the Unix process group on readiness, bind, and shutdown failures. HTTP shutdown is idempotent, stops the listener before the frontend child, and disabled mode never binds.

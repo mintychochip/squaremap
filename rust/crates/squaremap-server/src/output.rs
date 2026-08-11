@@ -1,4 +1,6 @@
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
+#[cfg(not(unix))]
+use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -42,33 +44,36 @@ impl OutputRoot {
         let _guard = self.writes.lock().map_err(|_| io::Error::other("output lock poisoned"))?;
         let relative = validate_relative(relative.as_ref())?;
         #[cfg(unix)]
-        { return self.atomic_write_unix(&relative, bytes); }
-        #[cfg(not(unix))]
-        let _ = (&relative, bytes);
-        let target = self.prepare_parent(&relative)?;
-        if let Ok(meta) = fs::symlink_metadata(&target) {
-            if meta.file_type().is_symlink() || !meta.is_file() {
-                return Err(io::Error::new(io::ErrorKind::AlreadyExists, "target is not a regular file"));
-            }
+        {
+            return self.atomic_write_unix(&relative, bytes);
         }
-        let file_name = target.file_name().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty target"))?;
-        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let temp_name = format!(".{}.squaremap-{}-{}", file_name.to_string_lossy(), std::process::id(), stamp);
-        let temp = target.with_file_name(temp_name);
-        let result = (|| {
-            let mut options = OpenOptions::new();
-            options.write(true).create_new(true);
-            let mut file = options.open(&temp)?;
-            file.write_all(bytes)?;
-            file.flush()?;
-            file.sync_all()?;
-            drop(file);
-            replace_file(&temp, &target)?;
-            sync_parent(&target)?;
-            Ok(())
-        })();
-        if result.is_err() { let _ = fs::remove_file(&temp); }
-        result
+        #[cfg(not(unix))]
+        {
+            let target = self.prepare_parent(&relative)?;
+            if let Ok(meta) = fs::symlink_metadata(&target) {
+                if meta.file_type().is_symlink() || !meta.is_file() {
+                    return Err(io::Error::new(io::ErrorKind::AlreadyExists, "target is not a regular file"));
+                }
+            }
+            let file_name = target.file_name().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty target"))?;
+            let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+            let temp_name = format!(".{}.squaremap-{}-{}", file_name.to_string_lossy(), std::process::id(), stamp);
+            let temp = target.with_file_name(temp_name);
+            let result = (|| {
+                let mut options = OpenOptions::new();
+                options.write(true).create_new(true);
+                let mut file = options.open(&temp)?;
+                file.write_all(bytes)?;
+                file.flush()?;
+                file.sync_all()?;
+                drop(file);
+                replace_file(&temp, &target)?;
+                sync_parent(&target)?;
+                Ok(())
+            })();
+            if result.is_err() { let _ = fs::remove_file(&temp); }
+            result
+        }
     }
 
     #[cfg(unix)]
@@ -104,28 +109,33 @@ impl OutputRoot {
     pub(crate) fn open_file(&self, relative: &Path) -> io::Result<Option<(File, fs::Metadata)>> {
         let relative = validate_relative(relative)?;
         #[cfg(unix)]
-        { return self.open_file_unix(&relative); }
-        let path = self.root.join(&relative);
-        let mut current = self.root.clone();
-        for component in relative.components() {
-            let Component::Normal(name) = component else { unreachable!() };
-            current.push(name);
-            let meta = match fs::symlink_metadata(&current) {
-                Ok(meta) => meta,
+        {
+            return self.open_file_unix(&relative);
+        }
+        #[cfg(not(unix))]
+        {
+            let path = self.root.join(&relative);
+            let mut current = self.root.clone();
+            for component in relative.components() {
+                let Component::Normal(name) = component else { unreachable!() };
+                current.push(name);
+                let meta = match fs::symlink_metadata(&current) {
+                    Ok(meta) => meta,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                    Err(error) => return Err(error),
+                };
+                if meta.file_type().is_symlink() { return Err(io::Error::new(io::ErrorKind::PermissionDenied, "symlink path component")); }
+                if current != path && !meta.is_dir() { return Ok(None); }
+            }
+            let file = match OpenOptions::new().read(true).open(&path) {
+                Ok(file) => file,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
                 Err(error) => return Err(error),
             };
-            if meta.file_type().is_symlink() { return Err(io::Error::new(io::ErrorKind::PermissionDenied, "symlink path component")); }
-            if current != path && !meta.is_dir() { return Ok(None); }
+            let metadata = file.metadata()?;
+            if !metadata.is_file() { return Ok(None); }
+            Ok(Some((file, metadata)))
         }
-        let file = match OpenOptions::new().read(true).open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let metadata = file.metadata()?;
-        if !metadata.is_file() { return Ok(None); }
-        Ok(Some((file, metadata)))
     }
     #[cfg(unix)]
     fn open_file_unix(&self, relative: &Path) -> io::Result<Option<(File, fs::Metadata)>> {
@@ -158,6 +168,7 @@ impl OutputRoot {
         Ok(None)
     }
 
+    #[cfg(not(unix))]
     fn prepare_parent(&self, relative: &Path) -> io::Result<PathBuf> {
         let mut current = self.root.clone();
         let mut components = relative.components().peekable();
@@ -185,7 +196,32 @@ fn open_root_handle(root: &Path) -> io::Result<File> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn open_root_handle(root: &Path) -> io::Result<File> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING,
+    };
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            FILE_GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE { return Err(io::Error::last_os_error()); }
+    Ok(unsafe { File::from_raw_handle(handle as _) })
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn open_root_handle(root: &Path) -> io::Result<File> { File::open(root) }
 fn cleanup_stale(directory: &Path) -> io::Result<()> {
     for entry in fs::read_dir(directory)? {
@@ -195,12 +231,35 @@ fn cleanup_stale(directory: &Path) -> io::Result<()> {
         if metadata.file_type().is_symlink() { continue; }
         if metadata.is_dir() {
             cleanup_stale(&path)?;
-        } else if path.file_name().is_some_and(|name| name.to_string_lossy().starts_with(".squaremap-")) {
-            let _ = fs::remove_file(path);
+        } else if path.file_name().is_some_and(|name| is_temp_name(&name.to_string_lossy()) && !temp_owner_alive(&name.to_string_lossy())) {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
         }
     }
     Ok(())
 }
+
+fn is_temp_name(name: &str) -> bool {
+    let Some((prefix, suffix)) = name.split_once(".squaremap-") else { return false };
+    if !prefix.starts_with('.') || prefix.len() <= 1 { return false; }
+    let mut fields = suffix.split('-');
+    let Some(pid) = fields.next() else { return false };
+    let Some(stamp) = fields.next() else { return false };
+    fields.next().is_none() && !pid.is_empty() && !stamp.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit()) && stamp.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+#[cfg(unix)]
+fn temp_owner_alive(name: &str) -> bool {
+    let Some((_, suffix)) = name.split_once(".squaremap-") else { return false };
+    let Some(pid) = suffix.split('-').next().and_then(|value| value.parse::<u32>().ok()) else { return false };
+    Path::new("/proc").join(pid.to_string()).exists()
+}
+
+#[cfg(not(unix))]
+fn temp_owner_alive(_name: &str) -> bool { false }
 pub(crate) fn validate_relative(path: &Path) -> io::Result<PathBuf> {
     if path.as_os_str().to_string_lossy().contains('\\') {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "backslash path"));
@@ -221,6 +280,7 @@ pub(crate) fn validate_relative(path: &Path) -> io::Result<PathBuf> {
     if clean.as_os_str().is_empty() { return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty path")); }
     Ok(clean)
 }
+#[cfg(not(unix))]
 
 fn replace_file(temp: &Path, target: &Path) -> io::Result<()> {
     #[cfg(windows)]
@@ -235,6 +295,7 @@ fn replace_file(temp: &Path, target: &Path) -> io::Result<()> {
     #[cfg(not(windows))]
     fs::rename(temp, target)
 }
+#[cfg(not(unix))]
 
 fn sync_parent(target: &Path) -> io::Result<()> {
     #[cfg(unix)]

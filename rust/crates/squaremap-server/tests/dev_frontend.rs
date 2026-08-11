@@ -201,3 +201,156 @@ async fn tunnels_websocket_echo() {
 fn fixture_is_platform_conditional() {
     // Process fixture details are Unix-specific; production API remains portable.
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn drains_sustained_logs_after_readiness() {
+    let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let dir = tempdir().unwrap();
+    let marker = dir.path().join("drained");
+    let script = format!("i=0; while [ $i -lt 20000 ]; do printf 'log-%s-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' \"$i\"; i=$((i+1)); done; printf done > '{}'; printf 'http://127.0.0.1:9\\n'; sleep 10", marker.display());
+    let root = OutputRoot::new(dir.path()).unwrap();
+    let fake = executable(dir.path(), &script);
+    let config = HttpConfig { bind: "127.0.0.1:0".parse().unwrap(), enabled: true, dev_frontend: Some(DevFrontendConfig { frontend_dir: dir.path().to_owned(), executable: fake, startup_timeout: Duration::from_secs(2) }) };
+    let mut server = HttpServer::bind(config, root).await.unwrap();
+    for _ in 0..100 {
+        if marker.exists() { break; }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(marker.exists());
+    server.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shutdown_cancels_infinite_proxy_response() {
+    use tokio::io::AsyncWriteExt;
+    let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let upstream = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let upstream_task = tokio::spawn(async move {
+        let (mut stream, _) = upstream.accept().await.unwrap();
+        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n").await;
+        loop {
+            if stream.write_all(b"4\r\nspam\r\n").await.is_err() { break; }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+    let dir = tempdir().unwrap();
+    let root = OutputRoot::new(dir.path()).unwrap();
+    let fake = executable(dir.path(), &format!("printf 'http://{}\\n'; sleep 10", upstream_addr));
+    let config = HttpConfig { bind: "127.0.0.1:0".parse().unwrap(), enabled: true, dev_frontend: Some(DevFrontendConfig { frontend_dir: dir.path().to_owned(), executable: fake, startup_timeout: Duration::from_secs(1) }) };
+    let mut server = HttpServer::bind(config, root).await.unwrap();
+    let client_task = tokio::spawn({
+        let url = format!("http://{}/stream", server.local_addr().unwrap());
+        async move { let _ = reqwest::get(url).await; }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::timeout(Duration::from_secs(1), server.shutdown()).await.unwrap().unwrap();
+    client_task.abort();
+    let _ = upstream_task.await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shutdown_cancels_stalled_websocket_handshake() {
+    use tokio::io::AsyncReadExt;
+    let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let upstream = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let upstream_task = tokio::spawn(async move {
+        let (mut stream, _) = upstream.accept().await.unwrap();
+        let mut byte = [0_u8; 1];
+        let _ = stream.read(&mut byte).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+    let dir = tempdir().unwrap();
+    let root = OutputRoot::new(dir.path()).unwrap();
+    let fake = executable(dir.path(), &format!("printf 'http://{}\\n'; sleep 10", upstream_addr));
+    let config = HttpConfig { bind: "127.0.0.1:0".parse().unwrap(), enabled: true, dev_frontend: Some(DevFrontendConfig { frontend_dir: dir.path().to_owned(), executable: fake, startup_timeout: Duration::from_secs(1) }) };
+    let mut server = HttpServer::bind(config, root).await.unwrap();
+    let public = format!("ws://{}/hmr", server.local_addr().unwrap());
+    let client_task = tokio::spawn(async move { let _ = tokio_tungstenite::connect_async(public).await; });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::timeout(Duration::from_secs(1), server.shutdown()).await.unwrap().unwrap();
+    client_task.abort();
+    let _ = upstream_task.await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn websocket_forwards_headers_and_selected_protocol() {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::handshake::server::{Request as WsRequest, Response as WsResponse};
+    let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let upstream = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let upstream_task = tokio::spawn(async move {
+        let (stream, _) = upstream.accept().await.unwrap();
+        let callback = |request: &WsRequest, mut response: WsResponse| {
+            assert_eq!(request.headers().get("origin").unwrap(), "https://example.test");
+            assert_eq!(request.headers().get("cookie").unwrap(), "sid=abc");
+            assert_eq!(request.headers().get("authorization").unwrap(), "Bearer token");
+            assert_eq!(request.headers().get("sec-websocket-protocol").unwrap(), "chat");
+            response.headers_mut().insert("sec-websocket-protocol", "chat".parse().unwrap());
+            Ok(response)
+        };
+        let _ = tokio_tungstenite::accept_hdr_async(stream, callback).await.unwrap();
+    });
+    let dir = tempdir().unwrap();
+    let root = OutputRoot::new(dir.path()).unwrap();
+    let fake = executable(dir.path(), &format!("printf 'http://{}\\n'; sleep 10", upstream_addr));
+    let config = HttpConfig { bind: "127.0.0.1:0".parse().unwrap(), enabled: true, dev_frontend: Some(DevFrontendConfig { frontend_dir: dir.path().to_owned(), executable: fake, startup_timeout: Duration::from_secs(1) }) };
+    let mut server = HttpServer::bind(config, root).await.unwrap();
+    let request = tokio_tungstenite::tungstenite::http::Request::builder()
+        .uri(format!("ws://{}/hmr", server.local_addr().unwrap()))
+        .header("Host", server.local_addr().unwrap().to_string())
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header("Origin", "https://example.test")
+        .header("Cookie", "sid=abc")
+        .header("Authorization", "Bearer token")
+        .header("Sec-WebSocket-Protocol", "chat")
+        .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+.body(())
+.unwrap();
+    let (_, response) = tokio_tungstenite::connect_async(request).await.unwrap();
+    assert_eq!(response.headers().get("sec-websocket-protocol").unwrap(), "chat");
+    server.shutdown().await.unwrap();
+    upstream_task.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shutdown_kills_descendant_process_group() {
+    let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let dir = tempdir().unwrap();
+    let pid_file = dir.path().join("descendant.pid");
+    let script = format!("sleep 30 & child=$!; echo $child > '{}'; printf 'http://127.0.0.1:9\\n'; wait", pid_file.display());
+    let root = OutputRoot::new(dir.path()).unwrap();
+    let fake = executable(dir.path(), &script);
+    let config = HttpConfig { bind: "127.0.0.1:0".parse().unwrap(), enabled: true, dev_frontend: Some(DevFrontendConfig { frontend_dir: dir.path().to_owned(), executable: fake, startup_timeout: Duration::from_secs(1) }) };
+    let mut server = HttpServer::bind(config, root).await.unwrap();
+    let pid = loop {
+        if let Ok(value) = std::fs::read_to_string(&pid_file) {
+            break value.trim().parse::<u32>().unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    server.shutdown().await.unwrap();
+    for _ in 0..100 {
+        if !std::path::Path::new(&format!("/proc/{pid}")).exists() { return; }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("descendant process survived shutdown");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_output_root_writes_nested_without_reparse_following() {
+    let dir = tempdir().unwrap();
+    let root = OutputRoot::new(dir.path()).unwrap();
+    root.atomic_write("nested/file.txt", b"ok").unwrap();
+    assert_eq!(std::fs::read(dir.path().join("nested/file.txt")).unwrap(), b"ok");
+}

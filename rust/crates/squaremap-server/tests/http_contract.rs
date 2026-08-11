@@ -87,13 +87,19 @@ fn atomic_writes_are_root_confined() {
 #[test]
 fn removes_stale_temp_siblings_recursively() {
     let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join(".target.squaremap-999999-456"), b"old").unwrap();
+    std::fs::write(dir.path().join(".target.squaremap-not-a-temp"), b"keep").unwrap();
     std::fs::create_dir_all(dir.path().join("nested")).unwrap();
-    std::fs::write(dir.path().join(".squaremap-old"), b"old").unwrap();
+    std::fs::write(dir.path().join("nested/.stale.squaremap-999999-456"), b"old").unwrap();
     std::fs::write(dir.path().join("nested/.squaremap-old"), b"old").unwrap();
     std::fs::write(dir.path().join("keep"), b"keep").unwrap();
+    let live = format!(".live.squaremap-{}-1", std::process::id());
+    std::fs::write(dir.path().join(&live), b"live").unwrap();
     let root = OutputRoot::new(dir.path()).unwrap();
-    assert!(!dir.path().join(".squaremap-old").exists());
-    assert!(!dir.path().join("nested/.squaremap-old").exists());
+    assert!(!dir.path().join(".target.squaremap-999999-456").exists());
+    assert!(!dir.path().join("nested/.stale.squaremap-999999-456").exists());
+    assert!(dir.path().join(".target.squaremap-not-a-temp").exists());
+    assert!(dir.path().join(live).exists());
     assert!(dir.path().join("keep").exists());
     root.atomic_write("nested/file", b"new").unwrap();
 }
@@ -120,4 +126,37 @@ fn rejects_symlink_escapes() {
     symlink(outside.path(), dir.path().join("link")).unwrap();
     let root = OutputRoot::new(dir.path()).unwrap();
     assert!(root.atomic_write("link/escape", b"x").is_err());
+}
+
+#[test]
+fn concurrent_atomic_writes_never_expose_partial_or_unrelated_temp_files() {
+    let dir = tempdir().unwrap();
+    let root = OutputRoot::new(dir.path()).unwrap();
+    let first = root.clone();
+    let second = root.clone();
+    let left = std::thread::spawn(move || {
+        for _ in 0..32 { first.atomic_write("nested/shared.bin", b"left").unwrap(); }
+    });
+    let right = std::thread::spawn(move || {
+        for _ in 0..32 { second.atomic_write("nested/shared.bin", b"right").unwrap(); }
+    });
+    left.join().unwrap();
+    right.join().unwrap();
+    let bytes = std::fs::read(dir.path().join("nested/shared.bin")).unwrap();
+    assert!(bytes == b"left" || bytes == b"right");
+    assert!(std::fs::read_dir(dir.path().join("nested")).unwrap().all(|entry| {
+        let name = entry.unwrap().file_name();
+        !name.to_string_lossy().contains(".squaremap-")
+    }));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_root_rejects_reparse_output_parent() {
+    use std::os::windows::fs::symlink_dir;
+    let dir = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    symlink_dir(outside.path(), dir.path().join("link")).unwrap();
+    let root = OutputRoot::new(dir.path()).unwrap();
+    assert!(root.atomic_write("link/escape.txt", b"blocked").is_err());
 }

@@ -9,9 +9,10 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, Mutex};
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::{handshake::derive_accept_key, protocol::Role}};
 
@@ -26,45 +27,59 @@ pub struct DevFrontendConfig {
 pub(crate) struct DevFrontend {
     inner: Arc<Inner>,
 }
-
 struct Inner {
     child: Mutex<Child>,
     upstream: String,
-    tunnels: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    tunnels: Mutex<Vec<JoinHandle<()>>>,
+    log_tasks: Mutex<Vec<JoinHandle<()>>>,
+    #[cfg(unix)]
+    pgid: i32,
+    #[cfg(windows)]
+    job: windows_sys::Win32::Foundation::HANDLE,
 }
 
 impl DevFrontend {
+
     pub(crate) async fn start(config: DevFrontendConfig) -> std::io::Result<Self> {
         let mut command = Command::new(&config.executable);
         command.args(["run", "dev"]).current_dir(&config.frontend_dir).stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(unix)]
-        {
-            command.process_group(0);
-        }
+        command.process_group(0);
         let mut child = command.spawn()?;
-        let stdout = child.stdout.take().ok_or_else(|| std::io::Error::other("frontend stdout unavailable"))?;
-        let stderr = child.stderr.take().ok_or_else(|| std::io::Error::other("frontend stderr unavailable"))?;
+        #[cfg(unix)]
+        let pgid = child.id().map(|id| id as i32).ok_or_else(|| std::io::Error::other("frontend process has no id"))?;
+        #[cfg(windows)]
+        let job = match create_job(child.id()) {
+            Ok(job) => job,
+            Err(error) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(error);
+            }
+        };
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                terminate(&mut child, #[cfg(unix)] pgid, #[cfg(windows)] job).await;
+                return Err(std::io::Error::other("frontend stdout unavailable"));
+            }
+        };
+        let stderr = match child.stderr.take() {
+            Some(stderr) => stderr,
+            None => {
+                terminate(&mut child, #[cfg(unix)] pgid, #[cfg(windows)] job).await;
+                return Err(std::io::Error::other("frontend stderr unavailable"));
+            }
+        };
         let (sender, mut receiver) = mpsc::channel::<String>(32);
-        let stdout_sender = sender.clone();
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let line = bound_line(line);
-                if stdout_sender.send(line).await.is_err() { break; }
-            }
-        });
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let line = bound_line(line);
-                if sender.send(line).await.is_err() { break; }
-            }
-        });
+        let stdout_task = tokio::spawn(drain_log(stdout, sender.clone()));
+        let stderr_task = tokio::spawn(drain_log(stderr, sender.clone()));
+        drop(sender);
         let deadline = Instant::now() + config.startup_timeout;
         let upstream = loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                terminate(&mut child).await;
+                terminate(&mut child, #[cfg(unix)] pgid, #[cfg(windows)] job).await;
                 return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "frontend URL readiness timeout"));
             }
             match timeout(remaining.min(Duration::from_millis(50)), receiver.recv()).await {
@@ -72,26 +87,37 @@ impl DevFrontend {
                     if let Some(url) = find_loopback_url(&line) { break url; }
                 }
                 Ok(None) => {
-                    terminate(&mut child).await;
+                    terminate(&mut child, #[cfg(unix)] pgid, #[cfg(windows)] job).await;
                     return Err(std::io::Error::other("frontend exited before readiness"));
                 }
                 Err(_) => {
                     if Instant::now() >= deadline {
-                        terminate(&mut child).await;
+                        terminate(&mut child, #[cfg(unix)] pgid, #[cfg(windows)] job).await;
                         return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "frontend URL readiness timeout"));
                     }
                 }
             }
             if let Ok(Some(_)) = child.try_wait() {
-                terminate(&mut child).await;
+                terminate(&mut child, #[cfg(unix)] pgid, #[cfg(windows)] job).await;
                 return Err(std::io::Error::other("frontend exited before readiness"));
             }
         };
         tokio::time::sleep(Duration::from_millis(10)).await;
         if let Ok(Some(_)) = child.try_wait() {
+            terminate(&mut child, #[cfg(unix)] pgid, #[cfg(windows)] job).await;
             return Err(std::io::Error::other("frontend exited immediately after readiness"));
         }
-        let inner = Arc::new(Inner { child: Mutex::new(child), upstream, tunnels: Mutex::new(Vec::new()) });
+        let drain_task = tokio::spawn(async move { while receiver.recv().await.is_some() {} });
+        let inner = Arc::new(Inner {
+            child: Mutex::new(child),
+            upstream,
+            tunnels: Mutex::new(Vec::new()),
+            log_tasks: Mutex::new(vec![stdout_task, stderr_task, drain_task]),
+            #[cfg(unix)]
+            pgid,
+            #[cfg(windows)]
+            job,
+        });
         Ok(Self { inner })
     }
 
@@ -133,13 +159,11 @@ impl DevFrontend {
         for (name, value) in &parts.headers {
             if name.as_str() != "sec-websocket-key" && super::cache::is_forwardable(name, &parts.headers) { builder = builder.header(name, value); }
         }
-        let custom = parts.headers.contains_key("cookie") || parts.headers.contains_key("authorization") || parts.headers.contains_key("sec-websocket-protocol");
-        let (upstream, upstream_response) = if custom {
-            let upstream_request = builder.body(()).map_err(std::io::Error::other)?;
-            connect_async(upstream_request).await.map_err(std::io::Error::other)?
-        } else {
-            connect_async(target).await.map_err(std::io::Error::other)?
-        };
+        let upstream_request = builder.body(()).map_err(std::io::Error::other)?;
+        let (upstream, upstream_response) = timeout(Duration::from_secs(10), connect_async(upstream_request))
+            .await
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "websocket upstream handshake timeout"))?
+            .map_err(std::io::Error::other)?;
         let upgrade = hyper::upgrade::on(Request::from_parts(parts, Body::empty()));
         let accept = derive_accept_key(key.as_bytes());
         let selected_protocol = upstream_response.headers().get("sec-websocket-protocol").cloned();
@@ -166,8 +190,12 @@ impl DevFrontend {
             }
         });
         let mut tunnels = self.inner.tunnels.lock().await;
-        tunnels.retain(|handle| !handle.is_finished());
-        tunnels.push(handle);
+        let mut active = Vec::with_capacity(tunnels.len() + 1);
+        for handle in tunnels.drain(..) {
+            if handle.is_finished() { let _ = handle.await; } else { active.push(handle); }
+        }
+        active.push(handle);
+        *tunnels = active;
         let mut headers = HeaderMap::new();
         headers.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
         headers.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
@@ -179,8 +207,11 @@ impl DevFrontend {
         let mut tunnels = self.inner.tunnels.lock().await;
         for handle in tunnels.drain(..) { handle.abort(); let _ = handle.await; }
         drop(tunnels);
+        let mut logs = self.inner.log_tasks.lock().await;
+        for handle in logs.drain(..) { handle.abort(); let _ = handle.await; }
+        drop(logs);
         let mut child = self.inner.child.lock().await;
-        terminate(&mut child).await;
+        terminate(&mut child, #[cfg(unix)] self.inner.pgid, #[cfg(windows)] self.inner.job).await;
     }
 }
 fn find_loopback_url(line: &str) -> Option<String> {
@@ -216,12 +247,87 @@ fn strip_ansi(value: &str) -> String {
     }
     result
 }
+async fn drain_log<R>(mut reader: R, sender: mpsc::Sender<String>)
+where
+    R: AsyncRead + Unpin,
+{
+    const LIMIT: usize = 16 * 1024;
+    let mut chunk = [0_u8; 4096];
+    let mut line = Vec::with_capacity(LIMIT);
+    loop {
+        let count = match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(count) => count,
+        };
+        for byte in &chunk[..count] {
+            if *byte == b'\n' {
+                let text = String::from_utf8_lossy(&line).into_owned();
+                if sender.send(bound_line(text)).await.is_err() { return; }
+                line.clear();
+            } else if line.len() < LIMIT {
+                line.push(*byte);
+            }
+        }
+    }
+    if !line.is_empty() {
+        let text = String::from_utf8_lossy(&line).into_owned();
+        let _ = sender.send(bound_line(text)).await;
+    }
+}
 
-async fn terminate(child: &mut Child) {
-    #[cfg(unix)]
-    if let Some(pid) = child.id() { unsafe { libc::kill(-(pid as i32), libc::SIGTERM); } }
-    let _ = timeout(Duration::from_secs(2), child.wait()).await;
-    #[cfg(unix)]
-    if let Some(pid) = child.id() { unsafe { libc::kill(-(pid as i32), libc::SIGKILL); } }
-    if child.id().is_some() { let _ = child.kill().await; let _ = child.wait().await; }
+#[cfg(windows)]
+fn create_job(pid: Option<u32>) -> std::io::Result<windows_sys::Win32::Foundation::HANDLE> {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+        JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
+    let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if job.is_null() { return Err(std::io::Error::last_os_error()); }
+    let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    let set = unsafe {
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            (&mut info as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    };
+    if set == 0 {
+        unsafe { CloseHandle(job); }
+        return Err(std::io::Error::last_os_error());
+    }
+    let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid.unwrap_or_default()) };
+    if process.is_null() {
+        unsafe { CloseHandle(job); }
+        return Err(std::io::Error::last_os_error());
+    }
+    let assigned = unsafe { AssignProcessToJobObject(job, process) };
+    unsafe { CloseHandle(process); }
+    if assigned == 0 {
+        unsafe { CloseHandle(job); }
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(job as HANDLE)
+}
+
+#[cfg(unix)]
+async fn terminate(child: &mut Child, pgid: i32) {
+    unsafe { libc::kill(-pgid, libc::SIGTERM); }
+    let waited = timeout(Duration::from_secs(2), child.wait()).await;
+    unsafe { libc::kill(-pgid, libc::SIGKILL); }
+    if waited.is_err() { let _ = child.wait().await; }
+}
+
+#[cfg(windows)]
+async fn terminate(child: &mut Child, job: windows_sys::Win32::Foundation::HANDLE) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    if timeout(Duration::from_secs(2), child.wait()).await.is_err() {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
+    unsafe { CloseHandle(job); }
 }

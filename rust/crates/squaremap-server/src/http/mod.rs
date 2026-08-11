@@ -65,8 +65,8 @@ impl HttpServer {
     pub fn local_addr(&self) -> Option<SocketAddr> { self.addr }
 
     pub async fn shutdown(&mut self) -> std::io::Result<()> {
-        if let Some(dev) = self.dev.take() { dev.shutdown().await; }
         if let Some(stop) = self.stop.take() { let _ = stop.send(()); }
+        if let Some(dev) = self.dev.take() { dev.shutdown().await; }
         if let Some(mut task) = self.task.take() {
             match tokio::time::timeout(std::time::Duration::from_millis(500), &mut task).await {
                 Ok(result) => result.map_err(std::io::Error::other)??,
