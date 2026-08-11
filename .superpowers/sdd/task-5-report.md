@@ -14,9 +14,9 @@ After implementation, the required recovery command passed:
 
 ```text
 $ cargo test --manifest-path rust/Cargo.toml -p squaremap-state --test recovery
-running 15 tests
-...............
-test result: ok. 15 passed; 0 failed
+running 17 tests
+.................
+test result: ok. 17 passed; 0 failed
 ```
 
 The session integration was exercised with the specifically permitted focused suite:
@@ -42,7 +42,7 @@ No formatter, linter, or project-wide test suite was run.
 ## Self-review
 
 - Review regressions were first run against commit `064c207`: 13 tests ran and 3 failed; after those fixes recovery passed 13/13 and session passed 12/12.
-- Final follow-up RED was run against commit `4061bc5` with the corrected unrelated-Full regression: 15 tests ran and 1 failed before implementation. After the fixes, recovery passed 15/15 and `session_ordering` passed 12/12.
-- Final self-review: render ownership is cleared only for the deterministic Resume job, marker lookups read only SQLite length plus a 33-byte prefix into a fixed array, and all prior/ownership marker paths use the bounded helper.
+- Final follow-up RED was run against commit `4061bc5`: 17 recovery tests ran and 1 failed on the deterministic resume identity-conflict regression before implementation. After the fixes, recovery passed 17/17 and `session_ordering` passed 12/12.
+- Final self-review: render ownership is cleared only for the deterministic Resume job after full namespace/value/epoch/kind identity validation; stored IDs, text, payloads, configs, session IDs, and marker hashes are read through SQLite length plus bounded prefixes, rejecting oversized values before materialization.
 
 Atomic task commit: this commit; SHA recorded externally

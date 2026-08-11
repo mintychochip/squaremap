@@ -394,6 +394,7 @@ async fn unsupported_schema_versions_and_strict_legacy_bounds_are_rejected() {
     let connection = rusqlite::Connection::open(&multiple_db).unwrap();
     connection.execute_batch("DROP TABLE schema_version; CREATE TABLE schema_version(version INTEGER); INSERT INTO schema_version VALUES(1),(1);").unwrap();
     drop(connection);
+
     assert!(Repository::open(&multiple_db).await.is_err());
 
     let files = dir.path().join("legacy");
@@ -413,6 +414,45 @@ async fn unsupported_schema_versions_and_strict_legacy_bounds_are_rejected() {
     fs::write(&dirty_path, format!("[{entries}]")).unwrap();
     let error = repository.import_legacy_state(&world.id(), &files).await.unwrap_err();
     assert!(error.to_string().contains("dirty_chunks.json"));
+}
+#[tokio::test]
+async fn deterministic_resume_id_identity_conflict_rolls_back_import() {
+    let dir = tempdir().unwrap();
+    let files = dir.path().join("world");
+    let db = dir.path().join("state.sqlite");
+    fs::create_dir_all(&files).unwrap();
+    fs::write(files.join("dirty_chunks.json"), br#"[]"#).unwrap();
+    fs::write(files.join("resume_render.json"), br#"[[{"x":1,"z":2},true]]"#).unwrap();
+    let repository = Repository::open(&db).await.unwrap();
+    let world = world(1);
+    repository.apply_world(world.clone()).await.unwrap();
+    repository.import_legacy_state(&world.id(), &files).await.unwrap();
+    drop(repository);
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection.execute("UPDATE render_jobs SET namespace='other',value='world',kind=1 WHERE id=?1", [squaremap_state::RenderJob::new(world.id(), JobKind::Resume, Vec::new()).id]).unwrap();
+    let before = connection.query_row("SELECT namespace,value,epoch,kind,payload FROM render_jobs", [], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?, row.get::<_, Vec<u8>>(4)?))).unwrap();
+    drop(connection);
+    fs::write(files.join("resume_render.json"), br#"[[{"x":9,"z":9},false]]"#).unwrap();
+    let repository = Repository::open(&db).await.unwrap();
+    assert!(repository.import_legacy_state(&world.id(), &files).await.is_err());
+    drop(repository);
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    let after = connection.query_row("SELECT namespace,value,epoch,kind,payload FROM render_jobs", [], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?, row.get::<_, Vec<u8>>(4)?))).unwrap();
+    assert_eq!(after, before);
+}
+
+#[tokio::test]
+async fn oversized_schema_valid_stored_values_fail_recovery_without_returning_blobs() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("state.sqlite");
+    let repository = Repository::open(&db).await.unwrap();
+    repository.apply_world(world(1)).await.unwrap();
+    drop(repository);
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection.execute("UPDATE worlds SET config=zeroblob(?1)", [17 * 1024 * 1024_i64]).unwrap();
+    drop(connection);
+    let repository = Repository::open(&db).await.unwrap();
+    assert!(repository.recover().await.is_err());
 }
 
 #[tokio::test]
