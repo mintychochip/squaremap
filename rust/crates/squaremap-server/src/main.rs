@@ -1,4 +1,5 @@
 mod bootstrap;
+mod session;
 
 use bootstrap::{parse_connect, read_token, run_bridge};
 use std::env;
