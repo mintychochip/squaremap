@@ -36,14 +36,14 @@ Controller-strengthened Java command:
 
 Result: expected compilation failure after the contract test added the remaining UI locale labels, marker-layer controls, and explicit compressed-body name. Generated builders lacked `setSpawnMarkerLabel`, `setShowControls`, and `setCompressedBody` (`4 errors`, `BUILD FAILED`).
 
-Fractional marker-coordinate RED was captured in both bindings before changing `Point`:
+Signed-coordinate binding RED was captured after review required the brief's exact `sint32` coordinate contract:
 
 ```text
 cargo test --manifest-path rust/Cargo.toml -p squaremap-protocol --test schema_contract
 ./gradlew --no-daemon --no-configuration-cache :squaremap-common:test --tests '*SchemaContractTest'
 ```
 
-Rust rejected floating-point literals where generated `Point.x/z` were `i32` (`4 errors`). Java rejected `setX(-1.25)` as a lossy `double`-to-`int` conversion (`1 error`, `BUILD FAILED`).
+Rust's compile-time `i32` assertions rejected generated `f64` `Point` and `VisibilityLimit` coordinates (`6 errors`). Java's descriptor assertion observed `DOUBLE` instead of `INT` (`1 test failed`, `BUILD FAILED`).
 
 ## Review-fix GREEN
 
@@ -82,7 +82,7 @@ BUILD SUCCESSFUL in 11s
 
 An earlier daemon-backed controller rerun produced passing XML for both tests but hung during Gradle teardown and timed out, so it is not counted as verification. The clean non-daemon result above is authoritative.
 
-The unchanged Rust and Java Hello tests still compare the same checked-in deterministic 37-byte `testdata/bridge/v1/hello.bin`; the schema tests exercise typed configuration/world/player/marker/chunk construction, all seven marker geometries, fractional marker coordinates, marker-layer controls and visibility, locale labels, compressed-body naming, and absent player coordinates.
+The unchanged Rust and Java Hello tests still compare the same checked-in deterministic 37-byte `testdata/bridge/v1/hello.bin`; the schema tests exercise typed configuration/world/player/marker/chunk construction, all seven marker geometries, signed marker/visibility coordinate types, marker-layer controls and visibility, locale labels, compressed-body naming, and absent player coordinates.
 
 ## Reviewer fixes
 
@@ -91,6 +91,7 @@ The unchanged Rust and Java Hello tests still compare the same checked-in determ
 - Expanded `World` with icon/order/environment/enabled state, typed spawn, player-tracker, zoom, marker/tile intervals, height/ceiling metadata, and typed settings.
 - Expanded `Player`/`PlayersReplace` with world identity, optional display name, optional armor/health, optional signed `x/y/z/yaw`, and top-level `max_players`. Proto3 `optional` preserves tracker-disabled coordinate absence; UUID remains a 16-byte `bytes` field.
 - Replaced the partial marker model with explicit typed `MarkerIcon`, `MarkerCircle`, `MarkerEllipse`, `MarkerRectangle`, `MarkerPolyline`, `MarkerPolygon`, and `MarkerMultiPolygon` oneof geometry, typed `MarkerStyle`/`MarkerTooltip`, and complete layer visibility/control/order metadata. `MarkerLayersReplace` carries the world identity so an empty world snapshot remains routable.
+- Kept marker and visibility coordinates as signed `sint32`, matching the protocol brief and the existing `UpdateMarkers.toMap` integer JSON contract. Marker radii and style opacity remain floating point. Per-marker id/label fields are intentionally absent because the existing serializer emits no such values; identity/name/control/hide/order/z-index belong to `MarkerLayer`.
 - Added typed `ChunkSnapshotBody` for sections and heightmap. `ChunkSnapshot` now has one body field: `compressed_body` is exactly the zstd-compressed serialization of `ChunkSnapshotBody`; `uncompressed_length` and `crc32c` cover the uncompressed serialized body bytes. The old competing inline section/heightmap fields were removed.
 
 ## Files
@@ -116,7 +117,7 @@ The unchanged Rust and Java Hello tests still compare the same checked-in determ
 
 - Envelope payload field numbers remain exactly the brief contract: control 10–16, replace 20–22, world 30–32, UI 40–42, chunk 50–54, render 60–62, health 70.
 - Every named payload remains defined. No `google.protobuf.Any`, `google.protobuf.Struct`, `map<...>`, or generic configuration/marker payload exists. The only byte fields are protocol UUID/token/image/compressed chunk-body data and packed chunk indices.
-- World identity remains `{namespace, value, epoch}`. Minecraft/chunk/player coordinates use signed `sint32`; marker and visibility-limit points preserve the public API's floating-point X/Z geometry. UUIDs are byte strings.
+- World identity remains `{namespace, value, epoch}`. Minecraft, chunk, player, marker, and visibility-limit coordinates use signed `sint32`; marker radii and style opacity retain their source floating-point types. UUIDs are byte strings.
 - Every enum has an explicit zero `*_UNSPECIFIED` value; field numbers are not reused inside messages.
 - Generated Java remains in `xyz.jpenilla.squaremap.bridge.v1`; generated Rust remains in `squaremap_protocol::wire`. Vendored `protoc-bin-vendored` is still selected by `build.rs`, so Rust generation does not require host-installed protoc.
 - Focused tests exercised both language bindings and the shared Hello bytes. No framing, declared-length allocation, sockets, process launch, persistence, rendering, or HTTP behavior was added.

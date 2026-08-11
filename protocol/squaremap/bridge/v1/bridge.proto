@@ -232,8 +232,8 @@ enum VisibilityLimitKind {
 
 message VisibilityLimit {
   VisibilityLimitKind kind = 1;
-  double center_x = 2;
-  double center_z = 3;
+  sint32 center_x = 2;
+  sint32 center_z = 3;
   double radius = 4;
   repeated Point points = 5;
 }
@@ -379,8 +379,8 @@ message PlayersReplace {
 }
 
 message Point {
-  double x = 1;
-  double z = 2;
+  sint32 x = 1;
+  sint32 z = 2;
 }
 
 message MarkerStyle {

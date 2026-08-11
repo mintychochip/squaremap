@@ -3,8 +3,10 @@ use squaremap_protocol::wire::{
     envelope, marker, ChunkSection, ChunkSnapshot, ChunkSnapshotBody, ConfigReplace, Envelope,
     LocaleSettings, Marker, MarkerCircle, MarkerEllipse, MarkerIcon, MarkerLayer,
     MarkerMultiPolygon, MarkerPolygon, MarkerPolyline, MarkerRectangle, Player, PlayersReplace, Point,
-    World,
+    VisibilityLimit, World,
 };
+fn assert_i32(_: i32) {}
+
 
 #[test]
 fn exposes_complete_typed_state_contract() {
@@ -53,7 +55,7 @@ fn exposes_complete_typed_state_contract() {
         marker::Geometry::Polygon(MarkerPolygon::default()),
         marker::Geometry::MultiPolygon(MarkerMultiPolygon::default()),
     ];
-    let point = Point { x: -1.25, z: 2.5 };
+    let point = Point { x: -1, z: 2 };
     let layer = MarkerLayer {
         visible: true,
         show_controls: true,
@@ -101,6 +103,8 @@ fn exposes_complete_typed_state_contract() {
     assert_eq!(geometries.len(), 7);
     assert!(layer.show_controls);
     assert!(layer.visible);
-    assert_eq!(point.x, -1.25);
-    assert_eq!(point.z, 2.5);
+    assert_eq!(point.x, -1);
+    assert_eq!(point.z, 2);
+    assert_i32(point.x);
+    assert_i32(VisibilityLimit::default().center_x);
 }

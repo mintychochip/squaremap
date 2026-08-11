@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.google.protobuf.Descriptors;
 import com.google.protobuf.ByteString;
 import java.util.HexFormat;
 import org.junit.jupiter.api.Test;
@@ -33,6 +34,7 @@ import xyz.jpenilla.squaremap.bridge.v1.PlayersReplace;
 import xyz.jpenilla.squaremap.bridge.v1.Point;
 import xyz.jpenilla.squaremap.bridge.v1.PointList;
 import xyz.jpenilla.squaremap.bridge.v1.Spawn;
+import xyz.jpenilla.squaremap.bridge.v1.VisibilityLimit;
 import xyz.jpenilla.squaremap.bridge.v1.UiSettings;
 import xyz.jpenilla.squaremap.bridge.v1.World;
 import xyz.jpenilla.squaremap.bridge.v1.WorldIdentity;
@@ -74,7 +76,7 @@ class SchemaContractTest {
             .setStyle(MarkerStyle.newBuilder().setStrokeColor("#0000ff").setFillColor("#0000ff"))
             .setTooltip(MarkerTooltip.newBuilder().setHover("hover"))
             .build();
-        final Point point = Point.newBuilder().setX(-1.25).setZ(2.5).build();
+        final Point point = Point.newBuilder().setX(-1).setZ(2).build();
         final PointList points = PointList.newBuilder().addPoints(point).build();
         final MarkerLayer layer = MarkerLayer.newBuilder()
             .setVisible(true)
@@ -113,8 +115,13 @@ class SchemaContractTest {
         assertTrue(marker.hasIcon());
         assertTrue(layer.getShowControls());
         assertTrue(layer.getVisible());
-        assertEquals(-1.25, point.getX());
-        assertEquals(2.5, point.getZ());
+        assertEquals(-1, point.getX());
+        assertEquals(2, point.getZ());
+        assertEquals(Descriptors.FieldDescriptor.JavaType.INT, Point.getDescriptor().findFieldByName("x").getJavaType());
+        assertEquals(
+            Descriptors.FieldDescriptor.JavaType.INT,
+            VisibilityLimit.getDescriptor().findFieldByName("center_x").getJavaType()
+        );
         assertTrue(circle.hasCircle());
         assertTrue(ellipse.hasEllipse());
         assertTrue(rectangle.hasRectangle());
