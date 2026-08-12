@@ -80,6 +80,16 @@ record ChunkSnapshotImpl(
     }
 
     @Override
+    public PalettedContainer<BlockState> blockStates(final int sectionIndex) {
+        return this.states[sectionIndex];
+    }
+
+    @Override
+    public PalettedContainer<Holder<Biome>> biomeStates(final int sectionIndex) {
+        return this.biomes[sectionIndex];
+    }
+
+    @Override
     public boolean sectionEmpty(final int sectionIndex) {
         return this.emptySections[sectionIndex];
     }

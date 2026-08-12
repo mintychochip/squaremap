@@ -33,6 +33,18 @@ public interface ChunkSnapshot extends LevelHeightAccessor, BiomeManager.NoiseBi
     ChunkPos pos();
 
     boolean sectionEmpty(int sectionIndex);
+    /** Loader-safe copied section state container. */
+    PalettedContainer<BlockState> blockStates(int sectionIndex);
+
+    /** Loader-safe copied section biome container. */
+    PalettedContainer<Holder<Biome>> biomeStates(int sectionIndex);
+    /** Returns the exact signed section coordinate for a zero-based section index. */
+    default int sectionY(final int sectionIndex) {
+        if (sectionIndex < 0 || sectionIndex >= this.getSectionsCount()) {
+            throw new IndexOutOfBoundsException("section index " + sectionIndex);
+        }
+        return Math.floorDiv(this.getMinY(), 16) + sectionIndex;
+    }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
     static ChunkSnapshot snapshot(final Level level, final ChunkAccess chunk, final boolean biomesOnly) {

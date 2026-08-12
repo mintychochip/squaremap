@@ -286,6 +286,8 @@ message BlockStateDescriptor {
   bool glass = 4;
   FluidClass fluid = 5;
   uint32 tint_index = 6;
+  // Glass alpha in percent (25 = glass, 50 = stained); zero when not glass.
+  uint32 glass_alpha_percent = 7;
 }
 
 message BiomeDescriptor {
@@ -300,6 +302,8 @@ message RegistryReplace {
   uint64 revision = 1;
   repeated BlockStateDescriptor block_states = 2;
   repeated BiomeDescriptor biomes = 3;
+  // Descriptor colors are dimension-specific and must precede dependent snapshots.
+  WorldIdentity world = 4;
 }
 
 message WorldIdentity {

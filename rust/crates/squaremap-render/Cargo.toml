@@ -1,0 +1,17 @@
+[package]
+name = "squaremap-render"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+bytes.workspace = true
+crc32c.workspace = true
+prost.workspace = true
+squaremap-protocol = { path = "../squaremap-protocol" }
+zstd.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+
+[dev-dependencies]
+hex.workspace = true

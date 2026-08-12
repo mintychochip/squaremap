@@ -1,6 +1,7 @@
 package xyz.jpenilla.squaremap.common;
 
 import com.google.inject.Inject;
+import com.google.inject.Provider;
 import com.google.inject.Singleton;
 import java.util.Collection;
 import java.util.Collections;
@@ -25,16 +26,22 @@ public class WorldManagerImpl implements WorldManager {
     private final MapWorldInternal.Factory factory;
     protected final ServerAccess serverAccess;
     private final ConfigManager configManager;
-
+    private final Provider<xyz.jpenilla.squaremap.common.bridge.snapshot.SnapshotRequestHandler> snapshotHandler;
     @Inject
     protected WorldManagerImpl(
         final MapWorldInternal.Factory factory,
         final ServerAccess serverAccess,
-        final ConfigManager configManager
+        final ConfigManager configManager,
+        final Provider<xyz.jpenilla.squaremap.common.bridge.snapshot.SnapshotRequestHandler> snapshotHandler
     ) {
         this.factory = factory;
         this.serverAccess = serverAccess;
         this.configManager = configManager;
+        this.snapshotHandler = snapshotHandler;
+    }
+
+    protected WorldManagerImpl(final MapWorldInternal.Factory factory, final ServerAccess serverAccess, final ConfigManager configManager) {
+        this(factory, serverAccess, configManager, null);
     }
 
     @Override
@@ -70,7 +77,9 @@ public class WorldManagerImpl implements WorldManager {
     }
 
     public void worldUnloaded(final ServerLevel world) {
-        final @Nullable MapWorldInternal removed = this.worlds.remove(Util.worldIdentifier(world));
+        final WorldIdentifier identifier = Util.worldIdentifier(world);
+        final @Nullable MapWorldInternal removed = this.worlds.remove(identifier);
+        if (this.snapshotHandler != null) this.snapshotHandler.get().invalidateWorld(identifier, Long.MAX_VALUE);
         if (removed != null) {
             tryShutdown(removed);
         }
@@ -83,7 +92,6 @@ public class WorldManagerImpl implements WorldManager {
             tryShutdown(world);
         }
     }
-
     private static void tryShutdown(final MapWorldInternal mapWorld) {
         try {
             mapWorld.shutdown();

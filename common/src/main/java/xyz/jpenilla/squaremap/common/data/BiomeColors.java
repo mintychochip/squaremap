@@ -43,6 +43,12 @@ public final class BiomeColors {
         Blocks.DARK_OAK_LEAVES,
         Blocks.MANGROVE_LEAVES
     );
+    /** Returns the wire tint category used by the renderer. */
+    public static int tintIndex(final Block block) {
+        if (GRASS_COLOR_BLOCKS.contains(block)) return 1;
+        if (FOLIAGE_COLOR_BLOCKS.contains(block)) return 2;
+        return block.defaultMapColor() == net.minecraft.world.level.material.MapColor.WATER ? 3 : 0;
+    }
 
     private final ColorBlender colorBlender = new ColorBlender();
     private final BlockPos.MutableBlockPos mutablePos = new BlockPos.MutableBlockPos();

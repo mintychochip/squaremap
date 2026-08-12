@@ -17,6 +17,7 @@ tracing-subscriber = { version = "0.3.19", features = ["fmt", "env-filter"] }
 tokio = { workspace = true, features = ["net", "time", "rt-multi-thread", "macros", "sync", "signal", "process"] }
 zeroize = "1.8.1"
 squaremap-protocol = { path = "../squaremap-protocol" }
+squaremap-render = { path = "../squaremap-render" }
 squaremap-state = { path = "../squaremap-state" }
 serde.workspace = true
 serde_json.workspace = true

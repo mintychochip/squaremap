@@ -67,6 +67,7 @@ public final class BridgePublisher implements AutoCloseable {
     private Throwable failure;
     private Consumer<Throwable> failureListener = ignored -> {};
     private long sentCount;
+    private Consumer<Sent> acknowledgementListener = ignored -> {};
     private long nextSequence;
     private long generation;
     private byte[] sessionId;
@@ -113,6 +114,9 @@ public final class BridgePublisher implements AutoCloseable {
     public void setFailureListener(final Consumer<Throwable> listener) {
         this.failureListener = Objects.requireNonNull(listener, "listener");
     }
+    public void setAcknowledgementListener(final Consumer<Sent> listener) {
+        this.acknowledgementListener = Objects.requireNonNull(listener, "listener");
+    }
     public ControlDisposition cancelControl(final long correlationId) {
         synchronized (this.lock) {
             this.current.remove("control:" + correlationId);
@@ -137,9 +141,7 @@ public final class BridgePublisher implements AutoCloseable {
         final long deadline = System.nanoTime() + timeout.toNanos();
         while (System.nanoTime() < deadline) {
             synchronized (this.lock) {
-                if (this.sentCount >= count) {
-                    return true;
-                }
+                if (this.sentCount >= count) return true;
             }
             try {
                 Thread.sleep(2L);
@@ -154,27 +156,20 @@ public final class BridgePublisher implements AutoCloseable {
     /** Handles an authenticated Ack envelope from the currently active session. */
     public void acknowledge(final Envelope envelope) {
         Objects.requireNonNull(envelope, "envelope");
-        if (!envelope.hasAck()) {
-            return;
-        }
+        if (!envelope.hasAck()) return;
         final Ack ack = envelope.getAck();
+        Sent acknowledged;
         synchronized (this.lock) {
-            if (!java.util.Arrays.equals(this.sessionId, envelope.getSessionId().toByteArray())) {
-                return;
-            }
-            if (ack.getStatus() != AckStatus.ACK_STATUS_ACCEPTED
-                && ack.getStatus() != AckStatus.ACK_STATUS_DUPLICATE) {
-                return;
-            }
+            if (!java.util.Arrays.equals(this.sessionId, envelope.getSessionId().toByteArray())) return;
+            if (ack.getStatus() != AckStatus.ACK_STATUS_ACCEPTED && ack.getStatus() != AckStatus.ACK_STATUS_DUPLICATE) return;
             final InFlight sent = this.inFlight.remove(ack.getAcknowledgedSequence());
-            if (sent == null || sent.generation() != this.generation) {
-                return;
-            }
+            if (sent == null || sent.generation() != this.generation) return;
             final Object identity = identity(sent.event());
-            if (Objects.equals(this.current.get(identity), sent.event())) {
-                this.current.remove(identity);
-            }
+            if (Objects.equals(this.current.get(identity), sent.event())) this.current.remove(identity);
+            final Published published = sent.event() instanceof BridgeEvent.ReplaceState state ? new Published(state.payload()) : new Published(sent.event());
+            acknowledged = new Sent(ack.getAcknowledgedSequence(), published, sent.envelope());
         }
+        this.acknowledgementListener.accept(acknowledged);
     }
 
     /** Activates a caller-authenticated session after the old writer generation is idle. */
@@ -375,7 +370,7 @@ public final class BridgePublisher implements AutoCloseable {
                 final long sequence = ++this.nextSequence;
                 final Sent sent = new Sent(sequence, new Published(event instanceof BridgeEvent.ReplaceState state ? state.payload() : event),
                     toEnvelope(event, sequence, this.sessionId));
-                this.inFlight.put(sequence, new InFlight(event, batchGeneration));
+                this.inFlight.put(sequence, new InFlight(event, sent.envelope(), batchGeneration));
                 batch.add(sent);
             }
             this.dispatching = true;
@@ -480,7 +475,7 @@ public final class BridgePublisher implements AutoCloseable {
         return sessionId.clone();
     }
 
-    private record InFlight(BridgeEvent event, long generation) {}
+    private record InFlight(BridgeEvent event, Envelope envelope, long generation) {}
     private record DirtyIdentity(BridgeEvent.WorldKey world, long epoch, int x, int z) {}
     private record WorldIdentityKey(BridgeEvent.WorldKey world, long epoch) {}
 }

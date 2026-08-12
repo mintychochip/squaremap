@@ -12,23 +12,24 @@ import xyz.jpenilla.squaremap.common.bridge.process.BackendMode;
 import xyz.jpenilla.squaremap.common.bridge.process.BridgeBootstrapConfig;
 
 @Singleton
-public final class BackendController {
+public final class BackendController implements AutoCloseable {
     private final BackendMode mode;
     private final BackendExecutor legacy;
     private final BackendExecutor bridge;
+    private final AutoCloseable bridgeLifecycle;
     private final xyz.jpenilla.squaremap.common.config.ConfigBridgeExporter configExporter;
     @Inject
     public BackendController(final BridgeBootstrapConfig config, final LegacyBackendController legacy, final BridgeBackendController bridge,
                              final xyz.jpenilla.squaremap.common.config.ConfigBridgeExporter configExporter) {
-        this(config.backendMode(), legacy::execute, bridge::execute, configExporter);
+        this(config.backendMode(), legacy::execute, bridge::execute, bridge, configExporter);
     }
     private BackendController(final BackendMode mode, final BackendExecutor legacy, final BackendExecutor bridge,
-                              final xyz.jpenilla.squaremap.common.config.ConfigBridgeExporter configExporter) {
+                              final AutoCloseable bridgeLifecycle, final xyz.jpenilla.squaremap.common.config.ConfigBridgeExporter configExporter) {
         this.mode = Objects.requireNonNull(mode); this.legacy = Objects.requireNonNull(legacy);
-        this.bridge = Objects.requireNonNull(bridge); this.configExporter = Objects.requireNonNull(configExporter);
+        this.bridge = Objects.requireNonNull(bridge); this.bridgeLifecycle = bridgeLifecycle; this.configExporter = configExporter;
     }
     BackendController(final BackendMode mode, final BackendExecutor legacy, final BackendExecutor bridge) {
-        this.mode = Objects.requireNonNull(mode); this.legacy = Objects.requireNonNull(legacy); this.bridge = Objects.requireNonNull(bridge); this.configExporter = null;
+        this(mode, legacy, bridge, null, null);
     }
     public CompletionStage<BackendResult> fullRender(final WorldIdentifier world) { return route(new FullRender(world)); }
     public CompletionStage<BackendResult> radiusRender(final WorldIdentifier world, int x, int z, int radius) { return route(new RadiusRender(world,x,z,radius)); }
@@ -57,4 +58,12 @@ public final class BackendController {
     record Health() implements BackendRequest { public WorldIdentifier world(){return null;} }
     record RestartProgressLogging() implements BackendRequest { public WorldIdentifier world(){return null;} }
     record ConfigSync(xyz.jpenilla.squaremap.bridge.v1.ConfigReplace config) implements BackendRequest { public ConfigSync { Objects.requireNonNull(config); } public WorldIdentifier world(){return null;} }
+    @Override public void close() {
+        if (this.bridgeLifecycle != null) {
+            try { this.bridgeLifecycle.close(); } catch (final Exception failure) { throw new IllegalStateException("failed to close bridge backend", failure); }
+        }
+    }
+    public void abortForRestart() {
+        if (this.bridgeLifecycle instanceof BridgeBackendController bridgeController) bridgeController.abortForRestart();
+    }
 }

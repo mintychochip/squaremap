@@ -463,6 +463,7 @@ public final class SidecarSupervisor implements AutoCloseable {
         private final InboundSequenceTracker inboundSequences;
         private volatile FrameLimits frameLimits = FrameLimits.DEFAULT;
         private volatile Consumer<Envelope> responseListener = ignored -> {};
+        private volatile Consumer<Envelope> snapshotRequestListener = ignored -> {};
         private volatile Consumer<Throwable> failureListener = ignored -> {};
 
         private ManagedConnection(final SocketChannel socket, final Process process, final byte[] sessionId,
@@ -493,8 +494,14 @@ public final class SidecarSupervisor implements AutoCloseable {
         @Override public void setResponseListener(final Consumer<Envelope> listener) {
             this.responseListener = java.util.Objects.requireNonNull(listener, "listener");
         }
+        @Override public void setSnapshotRequestListener(final Consumer<Envelope> listener) {
+            this.snapshotRequestListener = java.util.Objects.requireNonNull(listener, "listener");
+        }
         @Override public void setFailureListener(final Consumer<Throwable> listener) {
             this.failureListener = java.util.Objects.requireNonNull(listener, "listener");
+        }
+        @Override public void setAcknowledgementListener(final Consumer<BridgePublisher.Sent> listener) {
+            this.publisher.setAcknowledgementListener(listener);
         }
 
         private void readFrames() {
@@ -502,11 +509,12 @@ public final class SidecarSupervisor implements AutoCloseable {
             try {
                 while (!this.closed.get()) {
                     final Envelope envelope = FrameCodec.read(this.socket, this.frameLimits);
-                    if (!this.inboundSequences.accept(envelope.getSequence())) {
-                        throw new SecurityException("bridge response sequence gap or duplicate");
+                    if (!java.security.MessageDigest.isEqual(this.sessionId, envelope.getSessionId().toByteArray())) {
+                        throw new SecurityException("bridge envelope session mismatch");
                     }
                     if (envelope.hasAck()) this.publisher.acknowledge(envelope);
                     else if (envelope.hasProtocolError() && envelope.getProtocolError().getFatal()) throw new IOException("fatal bridge protocol error");
+                    else if (envelope.hasChunkSnapshotRequest()) this.snapshotRequestListener.accept(envelope);
                     else this.responseListener.accept(envelope);
                 }
             } catch (final Exception failure) {

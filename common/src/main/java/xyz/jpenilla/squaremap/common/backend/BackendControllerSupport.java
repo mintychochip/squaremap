@@ -21,4 +21,16 @@ public final class BackendControllerSupport {
     public CompletionStage<BackendResult> restartProgressLogging() {
         return this.controller.restartProgressLogging();
     }
+    public void close() {
+        if (this.controller instanceof AutoCloseable closeable) {
+            try {
+                closeable.close();
+            } catch (final Exception failure) {
+                throw new IllegalStateException("failed to close backend controller", failure);
+            }
+        }
+    }
+    public void abortForRestart() {
+        this.controller.abortForRestart();
+    }
 }

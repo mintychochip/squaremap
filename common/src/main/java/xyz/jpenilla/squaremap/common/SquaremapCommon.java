@@ -152,6 +152,7 @@ public final class SquaremapCommon {
     }
 
     public void reload() {
+        this.backendSupport.abortForRestart();
         this.stop();
         this.configManager.reload();
         this.playerManager.reload();
@@ -159,6 +160,7 @@ public final class SquaremapCommon {
     }
 
     public void reloadForBridge() {
+        this.backendSupport.abortForRestart();
         this.stop();
         this.configManager.reload();
         this.playerManager.reload();
@@ -205,6 +207,7 @@ public final class SquaremapCommon {
 
     public void shutdown() {
         this.shutdownApi();
+        this.backendSupport.close();
         this.stop();
         if (this.bridgeConnection != null) {
             this.bridgeConnection.close();

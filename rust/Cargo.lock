@@ -1532,6 +1532,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "squaremap-render"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "crc32c",
+ "hex",
+ "prost",
+ "squaremap-protocol",
+ "tokio",
+ "zstd",
+]
+
+[[package]]
 name = "squaremap-server"
 version = "0.1.0"
 dependencies = [
@@ -1551,6 +1564,7 @@ dependencies = [
  "serde",
  "serde_json",
  "squaremap-protocol",
+ "squaremap-render",
  "squaremap-state",
  "tempfile",
  "tokio",

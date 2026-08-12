@@ -25,7 +25,14 @@ public interface BridgeConnection extends AutoCloseable {
     default void setResponseListener(final Consumer<Envelope> listener) {
         Objects.requireNonNull(listener, "listener");
     }
+    default void setSnapshotRequestListener(final Consumer<Envelope> listener) {
+        Objects.requireNonNull(listener, "listener");
+    }
+
     default void setFailureListener(final Consumer<Throwable> listener) {
+        Objects.requireNonNull(listener, "listener");
+    }
+    default void setAcknowledgementListener(final Consumer<BridgePublisher.Sent> listener) {
         Objects.requireNonNull(listener, "listener");
     }
 

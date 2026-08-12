@@ -28,12 +28,13 @@ import xyz.jpenilla.squaremap.bridge.v1.Envelope;
 import xyz.jpenilla.squaremap.bridge.v1.WorldIdentity;
 import xyz.jpenilla.squaremap.common.ServerAccess;
 import xyz.jpenilla.squaremap.common.SquaremapCommon;
+import xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher;
 import xyz.jpenilla.squaremap.common.bridge.process.BackendMode;
 import xyz.jpenilla.squaremap.common.bridge.process.BridgeBootstrapConfig;
 import xyz.jpenilla.squaremap.common.bridge.process.BridgeConnection;
 import xyz.jpenilla.squaremap.common.bridge.process.SidecarSupervisor;
+import xyz.jpenilla.squaremap.common.bridge.snapshot.SnapshotRequestHandler;
 import xyz.jpenilla.squaremap.common.bridge.state.WorldEpochRegistry;
-import xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher;
 import xyz.jpenilla.squaremap.common.config.ConfigBridgeExporter;
 
 /** Rust control implementation with bounded correlation and timeout handling. */
@@ -49,6 +50,7 @@ public final class BridgeBackendController implements AutoCloseable {
     private final ConfigBridgeExporter configExporter;
     private final Provider<SquaremapCommon> common;
     private final EpochResolver epochs;
+    private final SnapshotRequestHandler snapshotHandler;
     private final ConcurrentMap<Long, CompletableFuture<BackendResult>> pending = new ConcurrentHashMap<>();
     private final ConcurrentMap<Long, ScheduledFuture<?>> timeouts = new ConcurrentHashMap<>();
     private final AtomicLong nextCorrelation = new AtomicLong(0L);
@@ -57,18 +59,17 @@ public final class BridgeBackendController implements AutoCloseable {
     private volatile ScheduledFuture<?> configTimeout;
     private volatile long configPendingRevision;
     private volatile BridgeConnection listeningConnection;
-
     @Inject
     public BridgeBackendController(final BridgeBootstrapConfig config, final SidecarSupervisor supervisor,
                                    final ConfigBridgeExporter configExporter, final Provider<SquaremapCommon> common,
-                                   final ServerAccess serverAccess, final WorldEpochRegistry epochs) {
+                                   final ServerAccess serverAccess, final WorldEpochRegistry epochs,
+                                   final SnapshotRequestHandler snapshotHandler) {
         this(supervisor, defaultScheduler(), REQUEST_TIMEOUT, config.backendMode(), configExporter, common,
             world -> {
                 final net.minecraft.server.level.ServerLevel level = serverAccess.level(world);
                 return level == null ? 0L : epochs.epoch(world, level);
-            });
+            }, snapshotHandler);
     }
-
     private static ScheduledExecutorService defaultScheduler() {
         return Executors.newSingleThreadScheduledExecutor(runnable -> {
             final Thread thread = new Thread(runnable, "squaremap-backend-control");
@@ -79,7 +80,7 @@ public final class BridgeBackendController implements AutoCloseable {
 
     /** Embedded constructor retaining the pre-existing test seam. */
     public BridgeBackendController(final SidecarSupervisor supervisor, final ScheduledExecutorService scheduler) {
-        this(supervisor, scheduler, REQUEST_TIMEOUT, BackendMode.RUST, null, null, world -> 0L);
+        this(supervisor, scheduler, REQUEST_TIMEOUT, BackendMode.RUST, null, null, world -> 0L, null);
     }
 
     public BridgeBackendController(final BridgeConnection connection, final ScheduledExecutorService scheduler) {
@@ -88,15 +89,16 @@ public final class BridgeBackendController implements AutoCloseable {
 
     public BridgeBackendController(final BridgeConnection connection, final ScheduledExecutorService scheduler,
                                    final Duration requestTimeout, final EpochResolver epochs) {
-        this(null, scheduler, requestTimeout, BackendMode.RUST, null, null, epochs);
+        this(null, scheduler, requestTimeout, BackendMode.RUST, null, null, epochs, null);
         this.attach(connection);
     }
 
     private BridgeBackendController(final SidecarSupervisor supervisor, final ScheduledExecutorService scheduler,
                                     final Duration requestTimeout, final BackendMode mode,
                                     final ConfigBridgeExporter configExporter, final Provider<SquaremapCommon> common,
-                                    final EpochResolver epochs) {
+                                    final EpochResolver epochs, final SnapshotRequestHandler snapshotHandler) {
         this.supervisor = supervisor;
+        this.snapshotHandler = snapshotHandler;
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
         this.requestTimeout = Objects.requireNonNull(requestTimeout, "requestTimeout");
         this.mode = Objects.requireNonNull(mode, "mode");
@@ -238,6 +240,7 @@ public final class BridgeBackendController implements AutoCloseable {
     private void failed(final Throwable ignored) {
         this.clearPending(BackendResult.Code.BACKEND_UNAVAILABLE);
         this.completeConfig(BackendResult.of(BackendResult.Code.BACKEND_UNAVAILABLE));
+        if (this.snapshotHandler != null) this.snapshotHandler.abortAll();
     }
 
     private BridgeConnection connection() {
@@ -249,6 +252,10 @@ public final class BridgeBackendController implements AutoCloseable {
     private void attach(final BridgeConnection connection) {
         this.listeningConnection = Objects.requireNonNull(connection, "connection");
         connection.setResponseListener(this::dispatch);
+        if (this.snapshotHandler != null) {
+            connection.setSnapshotRequestListener(envelope -> this.snapshotHandler.handle(envelope, connection::publish));
+            connection.setAcknowledgementListener(this.snapshotHandler::acknowledge);
+        }
         connection.setFailureListener(this::failed);
     }
 
@@ -311,9 +318,15 @@ public final class BridgeBackendController implements AutoCloseable {
         return new BackendResult(code, substitutions);
     }
 
-    @Override public void close() {
+    public void abortForRestart() {
         this.clearPending(BackendResult.Code.BACKEND_UNAVAILABLE);
         this.completeConfig(BackendResult.of(BackendResult.Code.BACKEND_UNAVAILABLE));
+        if (this.snapshotHandler != null) this.snapshotHandler.abortAll();
+    }
+
+    @Override public void close() {
+        this.abortForRestart();
+        if (this.snapshotHandler != null) this.snapshotHandler.close();
         this.scheduler.shutdownNow();
     }
 }

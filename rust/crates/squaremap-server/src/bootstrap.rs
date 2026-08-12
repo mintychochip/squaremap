@@ -191,6 +191,8 @@ pub async fn run_bridge(
     let mut session = Session::from_session_id(&session_id).map_err(|error| BootstrapError::Rejected(error.to_string()))?;
     let mut config_store = ConfigStore::default();
     let mut control_state = ControlState::default();
+    let mut snapshot_client = squaremap_server::snapshot_client::SnapshotClient::new(session_id, squaremap_render::Limits::default())
+        .map_err(|error| BootstrapError::Rejected(error.to_string()))?;
     let mut next_outbound_sequence = ack.sequence.saturating_add(1);
     loop {
         match read_envelope(&mut stream, FrameLimits::default()).await {
@@ -221,13 +223,19 @@ pub async fn run_bridge(
                     break;
                 }
                 let sequence = envelope.sequence;
+                let is_snapshot = matches!(envelope.payload,
+                    Some(envelope::Payload::RegistryReplace(_) | envelope::Payload::ChunkSnapshot(_) | envelope::Payload::ChunkMissing(_)));
+                if is_snapshot {
+                    snapshot_client.accept(&envelope).map_err(|error| BootstrapError::Rejected(error.to_string()))?;
+                }
                 let handler_root = root.clone();
                 let handler_envelope = envelope.clone();
                 let outcome = match session.process(envelope.clone(), move |_| {
                     let handler_root = handler_root.clone();
                     let handler_envelope = handler_envelope.clone();
                     async move {
-                        if matches!(handler_envelope.payload, Some(envelope::Payload::ControlRequest(_) | envelope::Payload::ConfigReplace(_))) {
+                        if matches!(handler_envelope.payload, Some(envelope::Payload::ControlRequest(_) | envelope::Payload::ConfigReplace(_)
+                            | envelope::Payload::RegistryReplace(_) | envelope::Payload::ChunkSnapshot(_) | envelope::Payload::ChunkMissing(_))) {
                             return Ok(());
                         }
                         squaremap_server::views::apply_replacement(&handler_root, &handler_envelope)
