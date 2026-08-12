@@ -1,7 +1,9 @@
+use async_trait::async_trait;
 use fs2::FileExt;
+use squaremap_render::{MAX_ENCODED_TILE_BYTES, PublishResult, TileStore, TileStoreError};
 use squaremap_state::CanonicalState;
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -9,6 +11,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
+
+#[derive(Debug, Default)]
+struct AtomicWriteOutcome {
+    directory_sync_warning: Option<String>,
+}
 
 #[derive(Debug)]
 pub struct OutputRoot {
@@ -63,14 +70,19 @@ impl OutputRoot {
         #[cfg(unix)]
         {
             let result = self.atomic_write_unix(&relative, bytes);
-            if result.is_ok() { self.remember_latest(&relative, bytes); }
-            return result;
+            if let Ok(outcome) = &result {
+                self.remember_latest(&relative, bytes);
+                if let Some(message) = &outcome.directory_sync_warning {
+                    return Err(io::Error::other(message.clone()));
+                }
+            }
+            return result.map(|_| ());
         }
         #[cfg(windows)]
         {
             let result = self.atomic_write_windows(&relative, bytes);
             if result.is_ok() { self.remember_latest(&relative, bytes); }
-            return result;
+            return result.map(|_| ());
         }
         #[cfg(all(not(unix), not(windows)))]
         {
@@ -119,7 +131,7 @@ impl OutputRoot {
     }
 
     #[cfg(unix)]
-    fn atomic_write_unix(&self, relative: &Path, bytes: &[u8]) -> io::Result<()> {
+    fn atomic_write_unix(&self, relative: &Path, bytes: &[u8]) -> io::Result<AtomicWriteOutcome> {
         let mut components = relative.components().peekable();
         let mut parent = self.root_dir.try_clone()?;
         while let Some(Component::Normal(name)) = components.next() {
@@ -128,19 +140,19 @@ impl OutputRoot {
                 let temp = next_temp_name();
                 let temp_c = std::ffi::CString::new(temp).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
                 let target_c = std::ffi::CString::new(target).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
-                let fd = unsafe { libc::openat(parent.as_raw_fd(), temp_c.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW, 0o600) };
+                let fd = unsafe { libc::openat(parent.as_raw_fd(), temp_c.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o600) };
                 if fd < 0 { return Err(io::Error::last_os_error()); }
                 let mut file = unsafe { File::from_raw_fd(fd) };
-                let result = (|| { file.write_all(bytes)?; file.flush()?; file.sync_all()?; let rc = unsafe { libc::renameat(parent.as_raw_fd(), temp_c.as_ptr(), parent.as_raw_fd(), target_c.as_ptr()) }; if rc != 0 { return Err(io::Error::last_os_error()); } if unsafe { libc::fsync(parent.as_raw_fd()) } != 0 { return Err(io::Error::last_os_error()); } Ok(()) })();
+                let result = (|| { file.write_all(bytes)?; file.flush()?; file.sync_all()?; let rc = unsafe { libc::renameat(parent.as_raw_fd(), temp_c.as_ptr(), parent.as_raw_fd(), target_c.as_ptr()) }; if rc != 0 { return Err(io::Error::last_os_error()); } let directory_sync_warning = (unsafe { libc::fsync(parent.as_raw_fd()) } != 0).then(|| format!("published {} but could not sync its directory: {}", relative.display(), io::Error::last_os_error())); Ok(AtomicWriteOutcome { directory_sync_warning }) })();
                 if result.is_err() { unsafe { libc::unlinkat(parent.as_raw_fd(), temp_c.as_ptr(), 0); } }
                 return result;
             }
             let name = name.to_str().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "non-UTF8 path"))?;
             let c = std::ffi::CString::new(name).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL path"))?;
-            let mut fd = unsafe { libc::openat(parent.as_raw_fd(), c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW) };
+            let mut fd = unsafe { libc::openat(parent.as_raw_fd(), c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
             if fd < 0 && io::Error::last_os_error().kind() == io::ErrorKind::NotFound {
                 if unsafe { libc::mkdirat(parent.as_raw_fd(), c.as_ptr(), 0o755) } != 0 && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists { return Err(io::Error::last_os_error()); }
-                fd = unsafe { libc::openat(parent.as_raw_fd(), c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW) };
+                fd = unsafe { libc::openat(parent.as_raw_fd(), c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
             }
             if fd < 0 { return Err(io::Error::last_os_error()); }
             parent = unsafe { File::from_raw_fd(fd) };
@@ -190,7 +202,7 @@ impl OutputRoot {
         }
     }
     #[cfg(windows)]
-    fn atomic_write_windows(&self, relative: &Path, bytes: &[u8]) -> io::Result<()> {
+    fn atomic_write_windows(&self, relative: &Path, bytes: &[u8]) -> io::Result<AtomicWriteOutcome> {
         let mut components = relative.components().peekable();
         let mut parent = self.root_dir.try_clone()?;
         while let Some(Component::Normal(name)) = components.next() {
@@ -200,7 +212,7 @@ impl OutputRoot {
                 let mut options = cap_std::fs::OpenOptions::new();
                 options.write(true).create_new(true);
                 let mut file = parent.open_with(&temp, &options)?;
-                let result = (|| { file.write_all(bytes)?; file.flush()?; file.sync_all()?; parent.rename(&temp, &parent, target)?; Ok(()) })();
+                let result = (|| { file.write_all(bytes)?; file.flush()?; file.sync_all()?; parent.rename(&temp, &parent, target)?; Ok(AtomicWriteOutcome::default()) })();
                 if result.is_err() { let _ = parent.remove_file(&temp); }
                 return result;
             }
@@ -296,6 +308,50 @@ impl OutputRoot {
         Ok(None)
     }
 
+}
+
+#[async_trait]
+impl TileStore for OutputRoot {
+    async fn read(&self, path: &Path) -> Result<Option<Vec<u8>>, TileStoreError> {
+        let root = self.clone();
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || -> io::Result<Option<Vec<u8>>> {
+            let Some((file, metadata)) = root.open_file(&path)? else { return Ok(None) };
+            if metadata.len() > MAX_ENCODED_TILE_BYTES {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, format!("encoded tile has {} bytes; maximum is {MAX_ENCODED_TILE_BYTES}", metadata.len())));
+            }
+            let mut bytes = Vec::with_capacity(metadata.len() as usize);
+            file.take(MAX_ENCODED_TILE_BYTES + 1).read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > MAX_ENCODED_TILE_BYTES {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, format!("encoded tile exceeds {MAX_ENCODED_TILE_BYTES} bytes while being read")));
+            }
+            Ok(Some(bytes))
+        }).await.map_err(|error| TileStoreError::new(format!("blocking tile read failed: {error}")))?
+            .map_err(|error| TileStoreError::new(error.to_string()))
+    }
+
+    async fn publish(&self, path: &Path, bytes: &[u8]) -> Result<PublishResult, TileStoreError> {
+        if bytes.len() as u64 > MAX_ENCODED_TILE_BYTES {
+            return Err(TileStoreError::new(format!("encoded tile has {} bytes; maximum is {MAX_ENCODED_TILE_BYTES}", bytes.len())));
+        }
+        let root = self.clone();
+        let path = path.to_owned();
+        let bytes = bytes.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let _guard = root.writes.lock().map_err(|_| io::Error::other("output lock poisoned"))?;
+            let relative = validate_relative(&path)?;
+            #[cfg(unix)]
+            let result = root.atomic_write_unix(&relative, &bytes);
+            #[cfg(windows)]
+            let result = root.atomic_write_windows(&relative, &bytes);
+            #[cfg(all(not(unix), not(windows)))]
+            let result = Err(io::Error::new(io::ErrorKind::Unsupported, "output confinement unsupported on this platform"));
+            if result.is_ok() { root.remember_latest(&relative, &bytes); }
+            result
+        }).await.map_err(|error| TileStoreError::new(format!("blocking tile publish failed: {error}")))?
+            .map(|outcome| PublishResult { warning: outcome.directory_sync_warning })
+            .map_err(|error| TileStoreError::new(error.to_string()))
+    }
 }
 fn collect_existing_files(base: &Path, relative: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
     let base_metadata = match fs::symlink_metadata(base) {

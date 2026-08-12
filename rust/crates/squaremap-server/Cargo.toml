@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 fs2 = "0.4.3"
 cap-std = "4.0.2"
 base64 = "0.22.1"

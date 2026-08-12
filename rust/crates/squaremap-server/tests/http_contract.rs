@@ -1,6 +1,7 @@
 use reqwest::StatusCode;
 use squaremap_server::http::{HttpConfig, HttpServer};
 use squaremap_server::output::OutputRoot;
+use squaremap_render::{MAX_ENCODED_TILE_BYTES, TileStore};
 use std::net::{SocketAddr, TcpListener};
 use tempfile::tempdir;
 
@@ -95,6 +96,18 @@ fn atomic_writes_are_root_confined() {
     }
 
     assert!(dir.path().join("nested").read_dir().unwrap().all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with('.')));
+}
+
+#[tokio::test]
+async fn output_root_is_a_confined_bounded_tile_store() {
+    let dir = tempdir().unwrap();
+    let root = OutputRoot::new(dir.path()).unwrap();
+    let published = root.publish(std::path::Path::new("tiles/0/0_0.png"), b"png").await.unwrap();
+    assert!(published.warning.is_none());
+    assert_eq!(root.read(std::path::Path::new("tiles/0/0_0.png")).await.unwrap().unwrap(), b"png");
+    assert!(root.publish(std::path::Path::new("../escape"), b"bad").await.is_err());
+    assert!(root.read(std::path::Path::new("../escape")).await.is_err());
+    assert!(root.publish(std::path::Path::new("tiles/oversized.png"), &vec![0; MAX_ENCODED_TILE_BYTES as usize + 1]).await.is_err());
 }
 #[test]
 fn removes_stale_temp_siblings_recursively() {
