@@ -42,6 +42,7 @@ import xyz.jpenilla.squaremap.common.data.Image;
 import xyz.jpenilla.squaremap.common.data.MapWorldInternal;
 import xyz.jpenilla.squaremap.common.data.RegionCoordinate;
 import xyz.jpenilla.squaremap.common.util.ChunkHashMapKey;
+import xyz.jpenilla.squaremap.common.util.RenderPrimitiveEngine;
 import xyz.jpenilla.squaremap.common.util.Colors;
 import xyz.jpenilla.squaremap.common.util.ConcurrentFIFOLoadingCache;
 import xyz.jpenilla.squaremap.common.util.Numbers;
@@ -394,7 +395,7 @@ public abstract class AbstractRender implements Runnable {
             final float glassAlpha = state.getBlock() == Blocks.GLASS ? 0.25F : 0.5F;
             state = this.handleGlass(chunk, mutablePos);
             final int color = this.getColor(chunk, imgX, imgZ, lastY, state, mutablePos);
-            return Colors.mix(color, glassColor, glassAlpha);
+            return RenderPrimitiveEngine.glass(color, glassColor, glassAlpha);
         }
 
         return this.getColor(chunk, imgX, imgZ, lastY, state, mutablePos);
@@ -408,7 +409,7 @@ public abstract class AbstractRender implements Runnable {
                 .modifyColorFromBiome(color, chunk, mutablePos);
         }
 
-        final int odd = (imgX + imgZ & 1);
+        final int odd = RenderPrimitiveEngine.parity(imgX, imgZ);
 
         final @Nullable DepthResult fluidDepthResult = findDepthIfFluid(mutablePos, state, chunk);
         if (fluidDepthResult != null) {
@@ -418,10 +419,9 @@ public abstract class AbstractRender implements Runnable {
         }
 
         final int curY = mutablePos.getY();
-        final double diffY = ((double) curY - lastY[imgX]) * 4.0D / (double) 4 + ((double) odd - 0.5D) * 0.4D;
-        final byte colorOffset = (byte) (diffY > 0.6D ? 2 : (diffY < -0.6D ? 0 : 1));
+        final int previousY = lastY[imgX];
         lastY[imgX] = curY;
-        return Colors.shade(color, colorOffset);
+        return RenderPrimitiveEngine.terrain(curY, previousY, color, odd);
     }
 
     private BlockState iterateDown(final ChunkSnapshot chunk, final BlockPos.MutableBlockPos mutablePos) {
@@ -495,49 +495,27 @@ public abstract class AbstractRender implements Runnable {
         return null;
     }
 
-    private int getFluidColor(final int fluidCountY, int color, final BlockState fluidState, final BlockState underBlock, final int odd) {
-        final Fluid fluid = fluidTypeForRender(color, fluidState.getFluidState());
-        boolean shaded = false;
-        if (fluid == Fluids.WATER || fluid == Fluids.FLOWING_WATER) {
-            if (this.mapWorld.config().MAP_WATER_CHECKERBOARD) {
-                color = applyDepthCheckerboard(fluidCountY, color, odd);
-                shaded = true;
-            }
-            if (this.mapWorld.config().MAP_WATER_CLEAR) {
-                if (!this.mapWorld.config().MAP_WATER_CHECKERBOARD) {
-                    color = Colors.shade(color, 0.85F - (fluidCountY * 0.01F)); // darken water color
-                }
-                color = Colors.mix(color, this.mapWorld.getMapColor(underBlock), 0.20F / (fluidCountY / 2.0F)); // mix block color with water color
-                shaded = true;
-            }
-        } else if (fluid == Fluids.LAVA || fluid == Fluids.FLOWING_LAVA) {
-            if (this.mapWorld.config().MAP_LAVA_CHECKERBOARD) {
-                color = applyDepthCheckerboard(fluidCountY, color, odd);
-                shaded = true;
-            }
-        }
-        return shaded ? color : Colors.removeAlpha(color);
+    private int getFluidColor(final int fluidCountY, final int color, final BlockState fluidState, final BlockState underBlock, final int odd) {
+        final RenderPrimitiveEngine.FluidKind kind = fluidKindForRender(color, fluidState.getFluidState());
+        return RenderPrimitiveEngine.fluid(
+            fluidCountY,
+            color,
+            kind == RenderPrimitiveEngine.FluidKind.WATER,
+            this.mapWorld.getMapColor(underBlock),
+            this.mapWorld.config().MAP_WATER_CHECKERBOARD,
+            this.mapWorld.config().MAP_WATER_CLEAR,
+            kind == RenderPrimitiveEngine.FluidKind.LAVA && this.mapWorld.config().MAP_LAVA_CHECKERBOARD,
+            odd
+        );
     }
 
-    private static Fluid fluidTypeForRender(final int color, final FluidState fluidState) {
-        // treat modded fluids with alpha like water, and those without like lava
-        Fluid fluid = fluidState.getType();
-        if (fluid != Fluids.WATER && fluid != Fluids.FLOWING_WATER && fluid != Fluids.LAVA && fluid != Fluids.FLOWING_LAVA) {
-            final int a = color >> 24 & 255;
-            if (a == 255) {
-                fluid = Fluids.LAVA;
-            } else {
-                fluid = Fluids.WATER;
-            }
-        }
-        return fluid;
+    private static RenderPrimitiveEngine.FluidKind fluidKindForRender(final int color, final FluidState fluidState) {
+        final Fluid fluid = fluidState.getType();
+        final boolean nativeWater = fluid == Fluids.WATER || fluid == Fluids.FLOWING_WATER;
+        final boolean nativeLava = fluid == Fluids.LAVA || fluid == Fluids.FLOWING_LAVA;
+        return RenderPrimitiveEngine.classifyUnknownFluid(color, nativeWater, nativeLava);
     }
 
-    private static int applyDepthCheckerboard(final double fluidCountY, final int color, final double odd) {
-        double diffY = fluidCountY * 0.1D + odd * 0.2D;
-        byte colorOffset = (byte) (diffY < 0.5D ? 2 : (diffY > 0.9D ? 0 : 1));
-        return Colors.shade(color, colorOffset);
-    }
 
     private static ExecutorService createRenderWorkerPool(final MapWorldInternal world) {
         return Util.newFixedThreadPool(
