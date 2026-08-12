@@ -17,4 +17,10 @@ tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 proptest = "1.7.0"
+criterion = "0.5.1"
+
+[[bench]]
+name = "chunk_render"
+harness = false

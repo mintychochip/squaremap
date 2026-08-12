@@ -53,13 +53,39 @@ public final class BiomeColors {
     private final ColorBlender colorBlender = new ColorBlender();
     private final BlockPos.MutableBlockPos mutablePos = new BlockPos.MutableBlockPos();
     private final LevelBiomeColorData colorData;
-    private final MapWorldInternal world;
-    private final BiomeCache biomeCache;
+    private final BiomeLookup biomeLookup;
+    private final int blendRadius;
+
+    @FunctionalInterface
+    public interface BiomeLookup {
+        Biome biome(BlockPos pos);
+    }
 
     public BiomeColors(final MapWorldInternal world, final AbstractRender.ChunkSnapshotManager chunkSnapshotProvider) {
-        this.world = world;
-        this.colorData = world.levelBiomeColorData();
-        this.biomeCache = BiomeCache.sized(this.world.serverLevel(), chunkSnapshotProvider, BLOCKPOS_BIOME_CACHE_SIZE);
+        this(world, chunkSnapshotProvider, world.config().MAP_BIOMES_BLEND);
+    }
+
+    public BiomeColors(final MapWorldInternal world, final AbstractRender.ChunkSnapshotManager chunkSnapshotProvider, final int blendRadius) {
+        this(
+            BiomeCache.sized(world.serverLevel(), chunkSnapshotProvider, BLOCKPOS_BIOME_CACHE_SIZE)::biome,
+            world.levelBiomeColorData(),
+            blendRadius
+        );
+    }
+
+    public static BiomeColors fixture(
+        final BiomeLookup biomeLookup,
+        final LevelBiomeColorData colorData,
+        final int blendRadius
+    ) {
+        return new BiomeColors(biomeLookup, colorData, blendRadius);
+    }
+
+    private BiomeColors(final BiomeLookup biomeLookup, final LevelBiomeColorData colorData, final int blendRadius) {
+        if (blendRadius < 0 || blendRadius > 15) throw new IllegalArgumentException("biome blend radius out of range: " + blendRadius);
+        this.biomeLookup = biomeLookup;
+        this.colorData = colorData;
+        this.blendRadius = blendRadius;
     }
 
     public int modifyColorFromBiome(int color, final ChunkSnapshot chunk, final BlockPos pos) {
@@ -79,28 +105,30 @@ public final class BiomeColors {
     }
 
     private int grass(final BlockPos pos) {
-        if (this.world.config().MAP_BIOMES_BLEND > 0) {
-            return this.sampleNeighbors(pos, this.world.config().MAP_BIOMES_BLEND, this::grassColorSampler);
+        if (this.blendRadius > 0) {
+            return this.sampleNeighbors(pos, this.blendRadius, this::grassColorSampler);
         }
         return this.grassColorSampler(this.biome(pos), pos);
     }
 
     private int grassColorSampler(final Biome biome, final BlockPos pos) {
-        return biome.getSpecialEffects().grassColorModifier().modifyColor(pos.getX(), pos.getZ(), this.colorData.grassColors().getInt(biome));
+        return biome.getSpecialEffects().grassColorModifier().modifyColor(pos.getX(), pos.getZ(), this.colorData.grassColor(biome));
     }
-
     private int foliage(final BlockPos pos) {
-        if (this.world.config().MAP_BIOMES_BLEND > 0) {
-            return this.sampleNeighbors(pos, this.world.config().MAP_BIOMES_BLEND, (biome, b) -> this.colorData.foliageColors().getInt(biome));
+        if (this.blendRadius > 0) {
+            return this.sampleNeighbors(pos, this.blendRadius, (biome, b) -> this.colorData.foliageColor(biome));
         }
-        return this.colorData.foliageColors().getInt(this.biome(pos));
+        return this.colorData.foliageColor(this.biome(pos));
     }
-
     private int water(final BlockPos pos) {
-        if (this.world.config().MAP_BIOMES_BLEND > 0) {
-            return this.sampleNeighbors(pos, this.world.config().MAP_BIOMES_BLEND, (biome, b) -> this.colorData.waterColors().getInt(biome));
+        if (this.blendRadius > 0) {
+            return this.sampleNeighbors(pos, this.blendRadius, (biome, b) -> this.colorData.waterColor(biome));
         }
-        return this.colorData.waterColors().getInt(this.biome(pos));
+        return this.colorData.waterColor(this.biome(pos));
+    }
+    private static int requiredColor(final it.unimi.dsi.fastutil.objects.Reference2IntMap<Biome> colors, final Biome biome, final String category) {
+        if (!colors.containsKey(biome)) throw new IllegalStateException("missing " + category + " biome color");
+        return colors.getInt(biome);
     }
 
     @FunctionalInterface
@@ -124,7 +152,7 @@ public final class BiomeColors {
     }
 
     private Biome biome(final BlockPos pos) {
-        return this.biomeCache.biome(pos);
+        return this.biomeLookup.biome(pos);
     }
 
     private static final class BiomeCache {

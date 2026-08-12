@@ -47,7 +47,7 @@ public final class ChunkSnapshotEncoder {
             final int[] biomeValues = new int[BIOME_ENTRIES];
             int index = 0;
             for (int y = 0; y < 4; y++) for (int z = 0; z < 4; z++) for (int x = 0; x < 4; x++) {
-                final int id = descriptors.biomeId(snapshot.biomeStates(section).get(x, y, z).value());
+                final int id = descriptors.biomeId(snapshot.biomeStates(section).get(x, y, z));
                 if (id <= 0) throw new IllegalStateException("missing biome descriptor for snapshot value");
                 biomeValues[index++] = biomePalette.computeIfAbsent(id, ignored -> biomePalette.size());
             }

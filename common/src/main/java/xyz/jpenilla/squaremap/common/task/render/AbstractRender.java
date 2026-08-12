@@ -56,13 +56,13 @@ public abstract class AbstractRender implements Runnable {
     private final ExecutorService executorService;
     private final Executor executor;
     private final Supplier<ChunkSnapshotProvider> createChunkSnapshotProvider;
-    private final @Nullable Map<Thread, BiomeColors> biomeColors;
+    private final @Nullable Map<BiomeCacheKey, BiomeColors> biomeColors;
     private ChunkSnapshotManager chunks;
+    private final ChunkRenderEngine chunkRenderEngine;
     private volatile @MonotonicNonNull Thread thread;
     protected volatile State state = State.RUNNING;
     protected final MapWorldInternal mapWorld;
     protected final ServerLevel level;
-
     protected final AtomicInteger processedChunks = new AtomicInteger(0);
     protected final AtomicInteger processedRegions = new AtomicInteger(0);
 
@@ -89,6 +89,35 @@ public abstract class AbstractRender implements Runnable {
         this.biomeColors = this.mapWorld.config().MAP_BIOMES
             ? new ConcurrentHashMap<>()
             : null; // this should be null if we are not mapping biomes
+        this.chunkRenderEngine = new ChunkRenderEngine(new ChunkRenderEngine.Adapter() {
+            @Override public ChunkRenderEngine.Settings settings() {
+                final var config = AbstractRender.this.mapWorld.config();
+                return new ChunkRenderEngine.Settings(
+                    config.MAP_MAX_HEIGHT, config.MAP_ITERATE_UP, config.MAP_GLASS_CLEAR,
+                    config.MAP_WATER_CHECKERBOARD, config.MAP_WATER_CLEAR,
+                    config.MAP_LAVA_CHECKERBOARD, config.MAP_BIOMES, config.MAP_BIOMES_BLEND
+                );
+            }
+            @Override public int mapColor(final net.minecraft.world.level.block.state.BlockState state) {
+                return AbstractRender.this.mapWorld.getMapColor(state);
+            }
+            @Override public boolean invisibleBlock(final net.minecraft.world.level.block.Block block) {
+                return AbstractRender.this.mapWorld.advanced().invisibleBlocks.contains(block);
+            }
+            @Override public boolean iterateUpBaseBlock(final net.minecraft.world.level.block.Block block) {
+                return AbstractRender.this.mapWorld.advanced().iterateUpBaseBlocks.contains(block);
+            }
+            @Override public ChunkRenderEngine.@Nullable BiomeModifier biomeModifier() {
+                if (AbstractRender.this.biomeColors == null) return null;
+                return (color, chunk, pos, blendRadius) -> AbstractRender.this.biomeColors
+                    .computeIfAbsent(new BiomeCacheKey(Thread.currentThread(), blendRadius), $ -> new BiomeColors(AbstractRender.this.mapWorld, AbstractRender.this.chunks, blendRadius))
+                    .modifyColorFromBiome(color, chunk, pos);
+            }
+            @Override public boolean running() { return AbstractRender.this.running(); }
+            @Override public boolean rendersPaused() { return AbstractRender.this.mapWorld.renderManager().rendersPaused(); }
+            @Override public boolean shouldRenderColumn(final int blockX, final int blockZ) { return AbstractRender.this.mapWorld.visibilityLimit().shouldRenderColumn(blockX, blockZ); }
+            @Override public void sleep(final long millis) { AbstractRender.sleep((int) millis); }
+        });
     }
 
     private int maximumActiveChunkRequests() {
@@ -224,6 +253,16 @@ public abstract class AbstractRender implements Runnable {
         }
     }
 
+    static ChunkRenderEngine.PixelResult renderChunkDispatch(
+        final ChunkRenderEngine engine,
+        final ChunkRenderEngine.PixelSink sink,
+        final @Nullable ChunkSnapshot north,
+        final ChunkSnapshot center,
+        final @Nullable ChunkSnapshot south
+    ) {
+        return engine.renderChunk(sink, north, center, south);
+    }
+
     protected final CompletableFuture<Void> mapSingleChunk(final Image image, final int chunkX, final int chunkZ) {
         final CompletableFuture<@Nullable ChunkSnapshot> chunkFuture = this.chunks.snapshot(new ChunkPos(chunkX, chunkZ));
         final CompletableFuture<@Nullable ChunkSnapshot> northChunk = this.chunks.snapshotDirect(new ChunkPos(chunkX, chunkZ - 1));
@@ -247,23 +286,10 @@ public abstract class AbstractRender implements Runnable {
             if (!this.running()) {
                 return;
             }
-            int[] lastY = new int[16];
-
-            // try scanning south row of northern chunk to get proper yDiff
             final @Nullable ChunkSnapshot north = northChunk.join();
-            if (north != null) {
-                lastY = this.getLastYFromBottomRow(north);
-            }
-
-            // scan the chunk itself
             final @Nullable ChunkSnapshot chunk = chunkFuture.join();
             if (chunk != null) {
-                this.scanChunk(image, lastY, chunk);
-            }
-
-            final @Nullable ChunkSnapshot south = southChunk.join();
-            if (south != null) {
-                this.scanTopRow(image, lastY, south);
+                renderChunkDispatch(this.chunkRenderEngine, image::setPixel, north, chunk, southChunk.join());
             }
 
             this.processedChunks.incrementAndGet();
@@ -311,209 +337,15 @@ public abstract class AbstractRender implements Runnable {
     }
 
     private void scanChunk(final Image image, final int[] lastY, final ChunkSnapshot chunk) {
-        while (this.mapWorld.renderManager().rendersPaused() && this.running()) {
-            sleep(500);
-        }
-        final int blockX = chunk.pos().getMinBlockX();
-        final int blockZ = chunk.pos().getMinBlockZ();
-        for (int x = 0; x < 16; x++) {
-            for (int z = 0; z < 16; z++) {
-                if (!this.running()) {
-                    return;
-                }
-                if (this.mapWorld.visibilityLimit().shouldRenderColumn(blockX + x, blockZ + z)) {
-                    image.setPixel(blockX + x, blockZ + z, this.scanBlock(chunk, x, z, lastY));
-                }
-            }
-        }
+        this.chunkRenderEngine.scanChunk(image, lastY, chunk);
     }
 
     private void scanTopRow(final Image image, final int[] lastY, final ChunkSnapshot chunk) {
-        final int blockX = chunk.pos().getMinBlockX();
-        final int blockZ = chunk.pos().getMinBlockZ();
-        for (int x = 0; x < 16; x++) {
-            if (!this.running()) {
-                return;
-            }
-            if (this.mapWorld.visibilityLimit().shouldRenderColumn(blockX + x, blockZ)) {
-                image.setPixel(blockX + x, blockZ, this.scanBlock(chunk, x, 0, lastY));
-            }
-        }
-    }
-
-    private int effectiveMaxHeight(final ChunkSnapshot chunk) {
-        return this.mapWorld.config().MAP_MAX_HEIGHT == -1
-            ? chunk.getMaxY() + 1
-            : this.mapWorld.config().MAP_MAX_HEIGHT;
+        this.chunkRenderEngine.scanTopRow(image, lastY, chunk);
     }
 
     private int[] getLastYFromBottomRow(final ChunkSnapshot chunk) {
-        final int[] lastY = new int[16];
-        final BlockPos.MutableBlockPos mutablePos = new BlockPos.MutableBlockPos();
-        for (int x = 0; x < 16; x++) {
-            if (!this.running()) {
-                return lastY;
-            }
-            final int topY = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, x, 15) + 1;
-            mutablePos.set(
-                chunk.pos().getMinBlockX() + x,
-                Math.min(topY, this.effectiveMaxHeight(chunk)),
-                chunk.pos().getMinBlockZ() + 15
-            );
-            final BlockState state = this.mapWorld.config().MAP_ITERATE_UP
-                ? this.iterateUp(chunk, mutablePos)
-                : this.iterateDown(chunk, mutablePos);
-            if (this.mapWorld.config().MAP_GLASS_CLEAR && isGlass(state)) {
-                this.handleGlass(chunk, mutablePos);
-            }
-            lastY[x] = mutablePos.getY();
-        }
-        return lastY;
-    }
-
-    private int scanBlock(final ChunkSnapshot chunk, final int imgX, final int imgZ, final int[] lastY) {
-        int blockX = chunk.pos().getMinBlockX() + imgX;
-        int blockZ = chunk.pos().getMinBlockZ() + imgZ;
-
-        BlockState state;
-        final BlockPos.MutableBlockPos mutablePos = new BlockPos.MutableBlockPos();
-
-        final int topY = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, imgX, imgZ) + 1;
-        mutablePos.set(blockX, Math.min(topY, this.effectiveMaxHeight(chunk)), blockZ);
-
-        if (topY > chunk.getMinY()) {
-            state = this.mapWorld.config().MAP_ITERATE_UP
-                ? this.iterateUp(chunk, mutablePos)
-                : this.iterateDown(chunk, mutablePos);
-        } else {
-            // no blocks found, show invisible/air
-            return Colors.clearMapColor();
-        }
-
-        if (this.mapWorld.config().MAP_GLASS_CLEAR && isGlass(state)) {
-            final int glassColor = this.mapWorld.getMapColor(state);
-            final float glassAlpha = state.getBlock() == Blocks.GLASS ? 0.25F : 0.5F;
-            state = this.handleGlass(chunk, mutablePos);
-            final int color = this.getColor(chunk, imgX, imgZ, lastY, state, mutablePos);
-            return RenderPrimitiveEngine.glass(color, glassColor, glassAlpha);
-        }
-
-        return this.getColor(chunk, imgX, imgZ, lastY, state, mutablePos);
-    }
-
-    private int getColor(final ChunkSnapshot chunk, final int imgX, final int imgZ, final int[] lastY, final BlockState state, final BlockPos.MutableBlockPos mutablePos) {
-        int color = this.mapWorld.getMapColor(state);
-
-        if (this.biomeColors != null) {
-            color = this.biomeColors.computeIfAbsent(Thread.currentThread(), $ -> new BiomeColors(this.mapWorld, this.chunks))
-                .modifyColorFromBiome(color, chunk, mutablePos);
-        }
-
-        final int odd = RenderPrimitiveEngine.parity(imgX, imgZ);
-
-        final @Nullable DepthResult fluidDepthResult = findDepthIfFluid(mutablePos, state, chunk);
-        if (fluidDepthResult != null) {
-            final int fluidDepth = fluidDepthResult.depth;
-            final BlockState blockUnder = fluidDepthResult.state;
-            return this.getFluidColor(fluidDepth, color, state, blockUnder, odd);
-        }
-
-        final int curY = mutablePos.getY();
-        final int previousY = lastY[imgX];
-        lastY[imgX] = curY;
-        return RenderPrimitiveEngine.terrain(curY, previousY, color, odd);
-    }
-
-    private BlockState iterateDown(final ChunkSnapshot chunk, final BlockPos.MutableBlockPos mutablePos) {
-        BlockState state;
-        if (chunk.dimensionType().hasCeiling()) {
-            do {
-                mutablePos.move(Direction.DOWN);
-                state = chunk.getBlockState(mutablePos);
-            } while (!state.isAir() && mutablePos.getY() > chunk.getMinY());
-        }
-        do {
-            mutablePos.move(Direction.DOWN);
-            state = chunk.getBlockState(mutablePos);
-        } while ((this.mapWorld.getMapColor(state) == Colors.clearMapColor() || this.mapWorld.advanced().invisibleBlocks.contains(state.getBlock())) && mutablePos.getY() > chunk.getMinY());
-        return state;
-    }
-
-    private BlockState iterateUp(final ChunkSnapshot chunk, final BlockPos.MutableBlockPos mutablePos) {
-        BlockState state;
-        int height = mutablePos.getY();
-        mutablePos.setY(chunk.getMinY());
-        if (chunk.dimensionType().hasCeiling()) {
-            do {
-                mutablePos.move(Direction.UP);
-                state = chunk.getBlockState(mutablePos);
-            } while (!state.isAir() && mutablePos.getY() < height);
-            do {
-                mutablePos.move(Direction.UP);
-                state = chunk.getBlockState(mutablePos);
-            } while (!this.mapWorld.advanced().iterateUpBaseBlocks.contains(state.getBlock()) && mutablePos.getY() < height);
-        }
-        do {
-            mutablePos.move(Direction.DOWN);
-            state = chunk.getBlockState(mutablePos);
-        } while ((this.mapWorld.getMapColor(state) == Colors.clearMapColor() || this.mapWorld.advanced().invisibleBlocks.contains(state.getBlock())) && mutablePos.getY() > chunk.getMinY());
-        return state;
-    }
-
-    private static boolean isGlass(final BlockState state) {
-        final Block block = state.getBlock();
-        return block == Blocks.GLASS || block instanceof StainedGlassBlock;
-    }
-
-    private BlockState handleGlass(final ChunkSnapshot chunk, final BlockPos.MutableBlockPos mutablePos) {
-        BlockState state = chunk.getBlockState(mutablePos);
-        while (isGlass(state)) {
-            state = this.iterateDown(chunk, mutablePos);
-        }
-        return state;
-    }
-
-    private record DepthResult(int depth, BlockState state) {
-    }
-
-    private static @Nullable DepthResult findDepthIfFluid(final BlockPos blockPos, final BlockState state, final ChunkSnapshot chunk) {
-        if (blockPos.getY() > chunk.getMinY() && !state.getFluidState().isEmpty()) {
-            BlockState fluidState;
-            int fluidDepth = 0;
-
-            int yBelowSurface = blockPos.getY() - 1;
-            final BlockPos.MutableBlockPos mutablePos = new BlockPos.MutableBlockPos();
-            mutablePos.set(blockPos);
-            do {
-                mutablePos.setY(yBelowSurface--);
-                fluidState = chunk.getBlockState(mutablePos);
-                ++fluidDepth;
-            } while (yBelowSurface > chunk.getMinY() && fluidDepth <= 10 && !fluidState.getFluidState().isEmpty());
-
-            return new DepthResult(fluidDepth, fluidState);
-        }
-        return null;
-    }
-
-    private int getFluidColor(final int fluidCountY, final int color, final BlockState fluidState, final BlockState underBlock, final int odd) {
-        final RenderPrimitiveEngine.FluidKind kind = fluidKindForRender(color, fluidState.getFluidState());
-        return RenderPrimitiveEngine.fluid(
-            fluidCountY,
-            color,
-            kind == RenderPrimitiveEngine.FluidKind.WATER,
-            this.mapWorld.getMapColor(underBlock),
-            this.mapWorld.config().MAP_WATER_CHECKERBOARD,
-            this.mapWorld.config().MAP_WATER_CLEAR,
-            kind == RenderPrimitiveEngine.FluidKind.LAVA && this.mapWorld.config().MAP_LAVA_CHECKERBOARD,
-            odd
-        );
-    }
-
-    private static RenderPrimitiveEngine.FluidKind fluidKindForRender(final int color, final FluidState fluidState) {
-        final Fluid fluid = fluidState.getType();
-        final boolean nativeWater = fluid == Fluids.WATER || fluid == Fluids.FLOWING_WATER;
-        final boolean nativeLava = fluid == Fluids.LAVA || fluid == Fluids.FLOWING_LAVA;
-        return RenderPrimitiveEngine.classifyUnknownFluid(color, nativeWater, nativeLava);
+        return this.chunkRenderEngine.getLastYFromBottomRow(chunk);
     }
 
 
@@ -641,6 +473,9 @@ public abstract class AbstractRender implements Runnable {
                 }
             }
         }
+    }
+
+    private record BiomeCacheKey(Thread thread, int blendRadius) {
     }
 
     protected enum State {

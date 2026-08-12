@@ -31,8 +31,17 @@ sourceSets {
 
 tasks.test {
   useJUnitPlatform()
+  systemProperty("squaremap.task11.root", rootProject.projectDir.absolutePath)
+  providers.systemProperty("squaremap.regenerate").orNull?.let { systemProperty("squaremap.regenerate", it) }
 }
 
+configurations.testCompileClasspath {
+  extendsFrom(configurations.compileClasspath.get())
+}
+
+configurations.testRuntimeClasspath {
+  extendsFrom(configurations.runtimeClasspath.get())
+}
 
 dependencies {
   api(libs.protobufJava)
@@ -40,7 +49,7 @@ dependencies {
   testImplementation(libs.junitJupiter)
   testImplementation("com.google.code.gson:gson:2.13.1")
   testRuntimeOnly(libs.junitPlatformLauncher)
-  testRuntimeOnly("com.google.guava:guava:33.4.8-jre")
+  testRuntimeOnly(tasks.named("createMinecraftArtifacts").map { it.outputs.files })
   testImplementation(libs.adventureApi)
   testImplementation(libs.miniMessage)
   api(projects.squaremapApi)

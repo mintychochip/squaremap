@@ -34,15 +34,11 @@ import xyz.jpenilla.squaremap.common.util.Util;
 public final class RegistryDescriptorExporter {
     private final RegistryReplace exported;
     private final Map<BlockState, Integer> blockIds;
-    private final Map<Biome, Integer> biomeIds;
-
-    public RegistryDescriptorExporter(final long revision, final List<BlockDescriptor> blocks, final List<BiomeDescriptorInput> biomes) {
-        this.exported = export(revision, blocks, biomes);
-        this.blockIds = Map.of(); this.biomeIds = Map.of();
-    }
-
-    private RegistryDescriptorExporter(final RegistryReplace exported, final Map<BlockState, Integer> blockIds, final Map<Biome, Integer> biomeIds) {
-        this.exported = exported; this.blockIds = Map.copyOf(blockIds); this.biomeIds = Map.copyOf(biomeIds);
+    private final Map<Holder<Biome>, Integer> biomeIds;
+    private RegistryDescriptorExporter(final RegistryReplace exported, final Map<BlockState, Integer> blockIds, final Map<Holder<Biome>, Integer> biomeIds) {
+        this.exported = exported;
+        this.blockIds = Map.copyOf(blockIds);
+        this.biomeIds = Map.copyOf(biomeIds);
     }
 
     /** Builds descriptors from the actual per-world Minecraft registries and color providers. */
@@ -58,14 +54,14 @@ public final class RegistryDescriptorExporter {
                 final int alpha = glass ? (block == Blocks.GLASS ? 25 : 50) : 0;
                 final BlockTransparency transparency = world.advanced().invisibleBlocks.contains(block) ? BlockTransparency.BLOCK_TRANSPARENCY_INVISIBLE
                     : (glass || color == Colors.clearMapColor() ? BlockTransparency.BLOCK_TRANSPARENCY_TRANSLUCENT : BlockTransparency.BLOCK_TRANSPARENCY_OPAQUE);
-                states.add(new StateInput(state, new BlockDescriptor(registryId, properties, color, transparency, glass, alpha, fluid(state.getFluidState()), BiomeColors.tintIndex(block))));
+                states.add(new StateInput(state, new BlockDescriptor(registryId, properties, color, transparency, glass, alpha, fluid(state.getFluidState()), state.isAir(), BiomeColors.tintIndex(block))));
             }
         }
         final List<BiomeInput> biomes = new ArrayList<>();
         final LevelBiomeColorData colors = world.levelBiomeColorData();
         for (final Biome biome : Util.biomeRegistry(world.serverLevel())) {
             biomes.add(new BiomeInput(biome, new BiomeDescriptorInput(Util.biomeRegistry(world.serverLevel()).getKey(biome).toString(),
-                colors.grassColors().getInt(biome), colors.foliageColors().getInt(biome), colors.waterColors().getInt(biome), 0)));
+                colors.grassColor(biome), colors.foliageColor(biome), colors.waterColor(biome), 0)));
         }
         states.sort(Comparator.comparing((StateInput input) -> new BlockKey(input.descriptor.registryId(), input.descriptor.properties())));
         biomes.sort(Comparator.comparing(input -> input.descriptor.registryId()));
@@ -76,16 +72,94 @@ public final class RegistryDescriptorExporter {
         for (final StateInput input : states) {
             wire.addBlockStates(input.descriptor.toProto(id)); blockIds.put(input.state, id++);
         }
-        final Map<Biome, Integer> biomeIds = new HashMap<>();
+        final Map<Holder<Biome>, Integer> biomeIds = new HashMap<>();
         for (final BiomeInput input : biomes) {
-            wire.addBiomes(input.descriptor.toProto(id)); biomeIds.put(input.biome, id++);
+            wire.addBiomes(input.descriptor.toProto(id));
+            biomeIds.put(Util.biomeRegistry(world.serverLevel()).wrapAsHolder(input.biome), id++);
+        }
+        return new RegistryDescriptorExporter(wire.build(), blockIds, biomeIds);
+    }
+    private static int requiredBiomeColor(final it.unimi.dsi.fastutil.objects.Reference2IntMap<Biome> colors, final Biome biome, final String category) {
+        if (!colors.containsKey(biome)) throw new IllegalStateException("missing " + category + " biome color");
+        return colors.getInt(biome);
+    }
+
+    public record FixtureState(BlockState state, BlockDescriptor descriptor) {
+        public FixtureState { Objects.requireNonNull(state); Objects.requireNonNull(descriptor); }
+    }
+
+    public record FixtureBiome(Holder<Biome> holder, BiomeDescriptorInput descriptor) {
+        public FixtureBiome { Objects.requireNonNull(holder); Objects.requireNonNull(descriptor); }
+    }
+
+    public static RegistryDescriptorExporter createFixture(final WorldIdentity world, final long revision,
+                                                            final List<FixtureState> states,
+                                                            final List<FixtureBiome> biomes) {
+        Objects.requireNonNull(world, "world");
+        Objects.requireNonNull(states, "states");
+        Objects.requireNonNull(biomes, "biomes");
+        final List<FixtureState> sortedStates = new ArrayList<>(states);
+        sortedStates.sort(Comparator.comparing((FixtureState input) -> BuiltInRegistries.BLOCK.getKey(input.state().getBlock()).toString())
+            .thenComparing(input -> input.state().toString()));
+        final List<FixtureBiome> sortedBiomes = new ArrayList<>(biomes);
+        sortedBiomes.sort(Comparator.comparing(input -> input.holder().unwrapKey()
+            .orElseThrow(() -> new IllegalStateException("fixture biome holder has no key")).identifier().toString()));
+        final Map<BlockKey, FixtureState> descriptorKeys = new TreeMap<>();
+        for (final FixtureState input : sortedStates) {
+            final String expectedRegistryId = BuiltInRegistries.BLOCK.getKey(input.state().getBlock()).toString();
+            final List<String> expectedProperties = List.of(input.state().toString());
+            if (!expectedRegistryId.equals(input.descriptor().registryId()) || !expectedProperties.equals(input.descriptor().properties())
+                || input.descriptor().air() != input.state().isAir()) {
+                throw new IllegalStateException("fixture descriptor does not match actual block state: " + input.state());
+            }
+            final BlockKey descriptorKey = new BlockKey(input.descriptor().registryId(), input.descriptor().properties());
+            if (descriptorKeys.put(descriptorKey, input) != null) {
+                throw new IllegalStateException("duplicate fixture block descriptor key: " + descriptorKey);
+            }
+        }
+        final Map<String, FixtureBiome> biomeKeys = new HashMap<>();
+        for (final FixtureBiome input : sortedBiomes) {
+            final String expectedRegistryId = input.holder().unwrapKey()
+                .orElseThrow(() -> new IllegalStateException("fixture biome holder has no key")).identifier().toString();
+            if (!expectedRegistryId.equals(input.descriptor().registryId())) {
+                throw new IllegalStateException("fixture descriptor does not match actual biome holder: " + expectedRegistryId);
+            }
+            if (biomeKeys.put(input.descriptor().registryId(), input) != null) {
+                throw new IllegalStateException("duplicate fixture biome descriptor key: " + input.descriptor().registryId());
+            }
+        }
+        final RegistryReplace.Builder wire = RegistryReplace.newBuilder().setRevision(revision).setWorld(world);
+        final Map<BlockState, Integer> blockIds = new HashMap<>();
+        final Map<Holder<Biome>, Integer> biomeIds = new HashMap<>();
+        int id = 1;
+        for (final FixtureState input : sortedStates) {
+            if (blockIds.put(input.state(), id) != null) throw new IllegalStateException("duplicate fixture block state");
+            wire.addBlockStates(input.descriptor().toProto(id++));
+        }
+        for (final FixtureBiome input : sortedBiomes) {
+            if (biomeIds.put(input.holder(), id) != null) throw new IllegalStateException("duplicate fixture biome holder");
+            wire.addBiomes(input.descriptor().toProto(id++));
         }
         return new RegistryDescriptorExporter(wire.build(), blockIds, biomeIds);
     }
 
     public RegistryReplace snapshot() { return this.exported; }
-    public int blockId(final BlockState state) { return this.blockIds.getOrDefault(state, 0); }
-    public int biomeId(final Biome biome) { return this.biomeIds.getOrDefault(biome, 0); }
+    public int blockId(final BlockState state) {
+        final Integer id = this.blockIds.get(state);
+        if (id == null) throw new IllegalStateException("undeclared block state: " + state);
+        return id;
+    }
+    public int biomeId(final Holder<Biome> biome) {
+        final Integer id = this.biomeIds.get(biome);
+        if (id == null) throw new IllegalStateException("undeclared biome holder: " + biome);
+        return id;
+    }
+    public int biomeId(final Biome biome) {
+        for (final Map.Entry<Holder<Biome>, Integer> entry : this.biomeIds.entrySet()) {
+            if (entry.getKey().value() == biome) return entry.getValue();
+        }
+        throw new IllegalStateException("undeclared biome value: " + biome);
+    }
 
     public static String blockKey(final String registryId, final String propertyString) {
         Objects.requireNonNull(registryId, "registryId");
@@ -93,6 +167,19 @@ public final class RegistryDescriptorExporter {
         return registryId.length() + ":" + registryId + propertyString.length() + ":" + propertyString;
     }
 
+    public BlockDescriptor blockDescriptor(final BlockState state) {
+        final int id = this.blockId(state);
+        final BlockStateDescriptor descriptor = this.exported.getBlockStates(id - 1);
+        return new BlockDescriptor(BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString(), List.of(state.toString()),
+            descriptor.getMapColor(), descriptor.getTransparency(), descriptor.getGlass(), descriptor.getGlassAlphaPercent(),
+            descriptor.getFluid(), descriptor.getAir(), descriptor.getTintIndex());
+    }
+    public BiomeDescriptorInput biomeDescriptor(final Holder<Biome> biome) {
+        final int id = this.biomeId(biome);
+        final BiomeDescriptor descriptor = this.exported.getBiomes(id - this.exported.getBlockStatesCount() - 1);
+        return new BiomeDescriptorInput(biome.unwrapKey().orElseThrow().identifier().toString(), descriptor.getGrassColor(),
+            descriptor.getFoliageColor(), descriptor.getWaterColor(), descriptor.getTintIndex());
+    }
     public static RegistryReplace export(final long revision, final List<BlockDescriptor> blocks, final List<BiomeDescriptorInput> biomes) {
         final TreeMap<BlockKey, BlockDescriptor> sortedBlocks = new TreeMap<>();
         for (final BlockDescriptor descriptor : blocks) if (sortedBlocks.put(new BlockKey(descriptor.registryId(), descriptor.properties()), descriptor) != null) throw new IllegalStateException("duplicate block descriptor key");
@@ -124,12 +211,12 @@ public final class RegistryDescriptorExporter {
     private record BiomeInput(Biome biome, BiomeDescriptorInput descriptor) {}
 
     public record BlockDescriptor(String registryId, List<String> properties, int mapColor, BlockTransparency transparency,
-                                  boolean glass, int glassAlphaPercent, FluidClass fluid, int tintIndex) {
+                                  boolean glass, int glassAlphaPercent, FluidClass fluid, boolean air, int tintIndex) {
         public BlockDescriptor { Objects.requireNonNull(registryId); properties = List.copyOf(properties); Objects.requireNonNull(transparency); Objects.requireNonNull(fluid); }
         public BlockDescriptor(final String registryId, final String propertyString, final int mapColor, final BlockTransparency transparency, final boolean glass, final FluidClass fluid, final int tintIndex) {
-            this(registryId, List.of(propertyString), mapColor, transparency, glass, glass ? (propertyString.contains("stained") ? 50 : 25) : 0, fluid, tintIndex);
+            this(registryId, List.of(propertyString), mapColor, transparency, glass, glass ? (propertyString.contains("stained") ? 50 : 25) : 0, fluid, false, tintIndex);
         }
-        BlockStateDescriptor toProto(final int id) { return BlockStateDescriptor.newBuilder().setId(id).setMapColor(mapColor).setTransparency(transparency).setGlass(glass).setGlassAlphaPercent(glassAlphaPercent).setFluid(fluid).setTintIndex(tintIndex).build(); }
+        BlockStateDescriptor toProto(final int id) { return BlockStateDescriptor.newBuilder().setId(id).setMapColor(mapColor).setTransparency(transparency).setGlass(glass).setGlassAlphaPercent(glassAlphaPercent).setFluid(fluid).setAir(air).setTintIndex(tintIndex).build(); }
     }
     public record BiomeDescriptorInput(String registryId, int grassColor, int foliageColor, int waterColor, int tintIndex) {
         public BiomeDescriptorInput { Objects.requireNonNull(registryId); }

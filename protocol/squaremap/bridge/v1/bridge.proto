@@ -288,6 +288,8 @@ message BlockStateDescriptor {
   uint32 tint_index = 6;
   // Glass alpha in percent (25 = glass, 50 = stained); zero when not glass.
   uint32 glass_alpha_percent = 7;
+  // True for the actual block state represented by this descriptor.
+  bool air = 8;
 }
 
 message BiomeDescriptor {

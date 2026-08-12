@@ -2,12 +2,12 @@ use crate::limits::FrameLimits;
 use bytes::BytesMut;
 use prost::Message;
 use std::fmt;
-use std::io::{self, BufRead, Read};
+use std::io::{self, Read};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
-use crate::wire::{envelope, ChunkSnapshot, ChunkSnapshotBody, Envelope};
+use crate::wire::{ChunkSnapshot, ChunkSnapshotBody, Envelope, envelope};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -31,28 +31,59 @@ impl TryFrom<u8> for FrameClass {
 #[derive(Debug)]
 pub enum SnapshotValidationReason {
     CompressedBodyEmpty,
-    CompressedBodyOversize { length: usize, max: u32 },
-    DeclaredUncompressedLength { length: u32, max: u32 },
-    DecompressionRatio { compressed: usize, uncompressed: u32 },
-    WindowLimit { max_log: u32 },
+    CompressedBodyOversize {
+        length: usize,
+        max: u32,
+    },
+    DeclaredUncompressedLength {
+        length: u32,
+        max: u32,
+    },
+    DecompressionRatio {
+        compressed: usize,
+        uncompressed: u32,
+    },
+    WindowLimit {
+        max_log: u32,
+    },
     InvalidZstd(String),
     DecompressionIo(String),
-    DecompressedLength { expected: u32, actual: usize },
-    Crc32c { expected: u32, actual: u32 },
+    DecompressedLength {
+        expected: u32,
+        actual: usize,
+    },
+    Crc32c {
+        expected: u32,
+        actual: u32,
+    },
     BodyProtobuf(String),
 }
 
 #[derive(Debug)]
 pub enum FrameError {
     Io(io::Error),
-    MalformedClass { class: u8 },
+    MalformedClass {
+        class: u8,
+    },
     ZeroLength,
-    DeclaredLength { class: FrameClass, length: u32, max: u32 },
-    EarlyEof { expected: usize, actual: usize },
+    DeclaredLength {
+        class: FrameClass,
+        length: u32,
+        max: u32,
+    },
+    EarlyEof {
+        expected: usize,
+        actual: usize,
+    },
     Protobuf(prost::DecodeError),
     ProtobufEncode(prost::EncodeError),
-    ClassMismatch { frame_class: FrameClass, payload_class: FrameClass },
-    SnapshotValidation { reason: SnapshotValidationReason },
+    ClassMismatch {
+        frame_class: FrameClass,
+        payload_class: FrameClass,
+    },
+    SnapshotValidation {
+        reason: SnapshotValidationReason,
+    },
 }
 
 impl fmt::Display for FrameError {
@@ -65,15 +96,23 @@ impl fmt::Display for FrameError {
                 write!(formatter, "{class:?} frame length {length} exceeds {max}")
             }
             Self::EarlyEof { expected, actual } => {
-                write!(formatter, "early EOF: expected {expected} bytes, got {actual}")
+                write!(
+                    formatter,
+                    "early EOF: expected {expected} bytes, got {actual}"
+                )
             }
             Self::Protobuf(error) => write!(formatter, "invalid envelope protobuf: {error}"),
             Self::ProtobufEncode(error) => write!(formatter, "failed to encode envelope: {error}"),
             Self::ClassMismatch {
                 frame_class,
                 payload_class,
-            } => write!(formatter, "frame class {frame_class:?} mismatches payload {payload_class:?}"),
-            Self::SnapshotValidation { reason } => write!(formatter, "invalid chunk snapshot: {reason}"),
+            } => write!(
+                formatter,
+                "frame class {frame_class:?} mismatches payload {payload_class:?}"
+            ),
+            Self::SnapshotValidation { reason } => {
+                write!(formatter, "invalid chunk snapshot: {reason}")
+            }
         }
     }
 }
@@ -86,7 +125,10 @@ impl fmt::Display for SnapshotValidationReason {
                 write!(formatter, "compressed body length {length} exceeds {max}")
             }
             Self::DeclaredUncompressedLength { length, max } => {
-                write!(formatter, "declared uncompressed length {length} exceeds {max}")
+                write!(
+                    formatter,
+                    "declared uncompressed length {length} exceeds {max}"
+                )
             }
             Self::WindowLimit { max_log } => {
                 write!(formatter, "zstd window exceeds maximum log {max_log}")
@@ -101,12 +143,17 @@ impl fmt::Display for SnapshotValidationReason {
             Self::InvalidZstd(error) => write!(formatter, "invalid zstd body: {error}"),
             Self::DecompressionIo(error) => write!(formatter, "zstd decompression failed: {error}"),
             Self::DecompressedLength { expected, actual } => {
-                write!(formatter, "decompressed length {actual}, expected {expected}")
+                write!(
+                    formatter,
+                    "decompressed length {actual}, expected {expected}"
+                )
             }
             Self::Crc32c { expected, actual } => {
                 write!(formatter, "CRC32C {actual:#x}, expected {expected:#x}")
             }
-            Self::BodyProtobuf(error) => write!(formatter, "invalid snapshot body protobuf: {error}"),
+            Self::BodyProtobuf(error) => {
+                write!(formatter, "invalid snapshot body protobuf: {error}")
+            }
         }
     }
 }
@@ -173,25 +220,24 @@ fn snapshot_error(reason: SnapshotValidationReason) -> FrameError {
     FrameError::SnapshotValidation { reason }
 }
 
-fn validate_snapshot(
-    snapshot: &ChunkSnapshot,
-    limits: FrameLimits,
-) -> Result<(), FrameError> {
+fn validate_snapshot(snapshot: &ChunkSnapshot, limits: FrameLimits) -> Result<(), FrameError> {
     let compressed_length = snapshot.compressed_body.len();
     if compressed_length == 0 {
-        return Err(snapshot_error(SnapshotValidationReason::CompressedBodyEmpty));
+        return Err(snapshot_error(
+            SnapshotValidationReason::CompressedBodyEmpty,
+        ));
     }
     if compressed_length > limits.max_snapshot_bytes as usize {
-        return Err(snapshot_error(SnapshotValidationReason::CompressedBodyOversize {
-            length: compressed_length,
-            max: limits.max_snapshot_bytes,
-        }));
+        return Err(snapshot_error(
+            SnapshotValidationReason::CompressedBodyOversize {
+                length: compressed_length,
+                max: limits.max_snapshot_bytes,
+            },
+        ));
     }
     let declared = snapshot.uncompressed_length;
 
-    if compressed_length < 4
-        || snapshot.compressed_body[..4] != [0x28, 0xb5, 0x2f, 0xfd]
-    {
+    if compressed_length < 4 || snapshot.compressed_body[..4] != [0x28, 0xb5, 0x2f, 0xfd] {
         return Err(snapshot_error(SnapshotValidationReason::InvalidZstd(
             "body is not one standard zstd frame".to_owned(),
         )));
@@ -208,17 +254,21 @@ fn validate_snapshot(
         .checked_mul(FrameLimits::MAX_SNAPSHOT_DECOMPRESSION_RATIO)
         .unwrap_or(u64::MAX);
     if declared as u64 > ratio_limit {
-        return Err(snapshot_error(SnapshotValidationReason::DecompressionRatio {
-            compressed: compressed_length,
-            uncompressed: declared,
-        }));
+        return Err(snapshot_error(
+            SnapshotValidationReason::DecompressionRatio {
+                compressed: compressed_length,
+                uncompressed: declared,
+            },
+        ));
     }
     let mut decoder = zstd::stream::read::Decoder::new(snapshot.compressed_body.as_slice())
         .map_err(|error| snapshot_error(SnapshotValidationReason::InvalidZstd(error.to_string())))?
         .single_frame();
     decoder
         .window_log_max(FrameLimits::MAX_ZSTD_WINDOW_LOG)
-        .map_err(|error| snapshot_error(SnapshotValidationReason::InvalidZstd(error.to_string())))?;
+        .map_err(|error| {
+            snapshot_error(SnapshotValidationReason::InvalidZstd(error.to_string()))
+        })?;
     let mut uncompressed = Vec::with_capacity(declared as usize);
     let mut chunk = [0_u8; 8192];
     loop {
@@ -236,10 +286,12 @@ fn validate_snapshot(
             break;
         }
         if count > declared as usize - uncompressed.len() {
-            return Err(snapshot_error(SnapshotValidationReason::DecompressedLength {
-                expected: declared,
-                actual: uncompressed.len() + count,
-            }));
+            return Err(snapshot_error(
+                SnapshotValidationReason::DecompressedLength {
+                    expected: declared,
+                    actual: uncompressed.len() + count,
+                },
+            ));
         }
         uncompressed.extend_from_slice(&chunk[..count]);
     }
@@ -252,10 +304,12 @@ fn validate_snapshot(
     }
     let _ = decoder.finish();
     if uncompressed.len() != declared as usize {
-        return Err(snapshot_error(SnapshotValidationReason::DecompressedLength {
-            expected: declared,
-            actual: uncompressed.len(),
-        }));
+        return Err(snapshot_error(
+            SnapshotValidationReason::DecompressedLength {
+                expected: declared,
+                actual: uncompressed.len(),
+            },
+        ));
     }
 
     let actual_crc = crc32c::crc32c(&uncompressed);

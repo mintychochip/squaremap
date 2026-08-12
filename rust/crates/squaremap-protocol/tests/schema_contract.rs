@@ -1,13 +1,23 @@
 use prost::Message;
 use squaremap_protocol::wire::{
-    envelope, marker, ChunkSection, ChunkSnapshot, ChunkSnapshotBody, ConfigReplace, Envelope,
-    LocaleSettings, Marker, MarkerCircle, MarkerEllipse, MarkerIcon, MarkerLayer,
-    MarkerMultiPolygon, MarkerPolygon, MarkerPolyline, MarkerRectangle, Player, PlayersReplace, Point,
-    VisibilityLimit, World,
+    envelope, marker, BlockStateDescriptor, ChunkSection, ChunkSnapshot, ChunkSnapshotBody,
+    ConfigReplace, Envelope, LocaleSettings, Marker, MarkerCircle, MarkerEllipse, MarkerIcon,
+    MarkerLayer, MarkerMultiPolygon, MarkerPolygon, MarkerPolyline, MarkerRectangle, Player,
+    PlayersReplace, Point, VisibilityLimit, World,
 };
 fn assert_i32(_: i32) {}
 
-
+#[test]
+fn block_descriptor_air_field_round_trips_true_and_false() {
+    for expected in [false, true] {
+        let descriptor = BlockStateDescriptor {
+            air: expected,
+            ..Default::default()
+        };
+        let decoded = BlockStateDescriptor::decode(descriptor.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(decoded.air, expected);
+    }
+}
 #[test]
 fn exposes_complete_typed_state_contract() {
     let config = ConfigReplace {
