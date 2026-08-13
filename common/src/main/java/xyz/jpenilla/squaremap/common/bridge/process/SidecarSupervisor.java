@@ -183,15 +183,6 @@ public final class SidecarSupervisor implements AutoCloseable {
             final InetSocketAddress address = (InetSocketAddress) openedListener.getLocalAddress();
 
             final List<String> command = new ArrayList<>(config.sidecarCommand().command());
-            final Path executable = config.sidecarCommand().executable();
-            if (executable.isAbsolute()) {
-                final BackendManifest manifest = BackendManifest.load().requireVersion(config.pluginVersion());
-                final BackendManifest.BackendBinary binary = manifest.forTarget(currentTargetTriple());
-                if (binary == null) {
-                    throw new IllegalArgumentException("no Rust backend binary is published for " + currentTargetTriple());
-                }
-                BinaryResolver.verifyConfiguredPath(executable, binary);
-            }
             command.add("bridge");
             command.add("--connect");
             command.add(connectAddress(address));
