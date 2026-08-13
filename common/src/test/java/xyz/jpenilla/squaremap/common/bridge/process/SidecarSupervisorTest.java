@@ -87,6 +87,17 @@ class SidecarSupervisorTest {
         assertDoesNotThrow(supervisor::close);
     }
     @Test
+    void sidecarDisconnectSignalsFailureAndCleansUp() throws Exception {
+        final SidecarSupervisor supervisor = new SidecarSupervisor();
+        final BridgeConnection connection = supervisor.start(config("disconnect", Duration.ofSeconds(5)))
+            .toCompletableFuture().get(6, TimeUnit.SECONDS);
+        final java.util.concurrent.CountDownLatch failure = new java.util.concurrent.CountDownLatch(1);
+        connection.setFailureListener(ignored -> failure.countDown());
+        assertTrue(failure.await(3, TimeUnit.SECONDS));
+        assertTrue(connection.isClosed());
+        supervisor.close();
+    }
+    @Test
     void closeDuringStartupFailsStageWithoutRestart() {
         final SidecarSupervisor supervisor = new SidecarSupervisor();
         final var stage = supervisor.start(config("timeout", Duration.ofSeconds(5)));

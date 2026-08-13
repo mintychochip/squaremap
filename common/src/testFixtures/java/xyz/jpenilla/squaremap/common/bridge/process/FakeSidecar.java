@@ -82,6 +82,10 @@ public final class FakeSidecar {
                 System.err.write(noise);
                 System.err.flush();
             }
+            if ("disconnect".equals(behavior)) {
+                read(socket);
+                return;
+            }
             if ("ack-publish".equals(behavior)) {
                 read(socket); // authenticated HelloAck
                 final Envelope published = read(socket);
