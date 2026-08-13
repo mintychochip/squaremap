@@ -82,6 +82,9 @@ public final class FakeSidecar {
                 System.err.write(noise);
                 System.err.flush();
             }
+            if ("crash-after-handshake".equals(behavior)) {
+                return;
+            }
             if ("disconnect".equals(behavior)) {
                 read(socket);
                 return;
