@@ -93,42 +93,50 @@ public final class SquaremapCommon {
         this.commands.registerCommands();
     }
     private void start() {
-        this.start(true);
-    }
-
-    private void start(final boolean publishBridgeConfig) {
         this.startSidecarIfNeeded();
         this.squaremapJar.extract("web", this.directoryProvider.webDirectory(), Config.UPDATE_WEB_DIR);
         LevelBiomeColorData.loadImages(this.directoryProvider);
         this.worldManager.start();
-        if (publishBridgeConfig && this.bridgeConnection != null && this.bootstrapConfig.get().backendMode() != BackendMode.JAVA) {
-            this.backendSupport.publishConfig().whenComplete((result, failure) -> {
-                if (failure != null || result.code() != xyz.jpenilla.squaremap.common.backend.BackendResult.Code.HEALTHY) {
-                    Logging.logger().warn("Bridge configuration was not accepted", failure);
-                }
-            });
-        }
         this.platform.startCallback();
-        if (Config.HTTPD_ENABLED) {
-            IntegratedServer.startServer(this.directoryProvider, this.jsonCache);
-        } else {
+        if (Config.HTTPD_ENABLED && this.bootstrapConfig.get().backendMode() != BackendMode.RUST) {
+            IntegratedServer.startServer(this.directoryProvider, this.jsonCache, null);
+        } else if (!Config.HTTPD_ENABLED) {
             Logging.logger().info(Messages.LOG_INTERNAL_WEB_DISABLED);
         }
     }
+
     private void startSidecarIfNeeded() {
         final BridgeBootstrapConfig bootstrapConfig = this.bootstrapConfig.get();
+        Logging.logger().info(
+            "Configured bridge backend mode {} with sidecar command {} and output root {}",
+            bootstrapConfig.backendMode(),
+            bootstrapConfig.sidecarCommand() == null ? List.of() : bootstrapConfig.sidecarCommand().command(),
+            bootstrapConfig.rustOutputRoot()
+        );
         if (bootstrapConfig.backendMode() == BackendMode.JAVA || this.sidecarLaunchAttempted) {
             return;
         }
-        this.sidecarLaunchAttempted = true;
         if (bootstrapConfig.rustOutputRoot() == null) {
             throw new IllegalArgumentException("Rust backend requires an isolated output root distinct from Java web output");
         }
         BridgeBootstrapConfig.validateIsolatedRoots(this.directoryProvider.webDirectory(), bootstrapConfig.rustOutputRoot());
         try {
+            Logging.logger().info(
+                "Starting {} backend sidecar with command {} and output root {}",
+                bootstrapConfig.backendMode(),
+                bootstrapConfig.sidecarCommand().command(),
+                bootstrapConfig.rustOutputRoot()
+            );
             this.bridgeConnection = this.sidecarSupervisor.start(bootstrapConfig)
                 .toCompletableFuture()
                 .join();
+            this.bridgeConnection.setFailureListener(failure -> {
+                Logging.logger().error("Bridge sidecar connection failed", failure);
+                final byte[] captured = this.sidecarSupervisor.stderrSnapshot();
+                if (captured.length > 0) {
+                    Logging.logger().error("Bridge sidecar stderr: {}", new String(captured, java.nio.charset.StandardCharsets.UTF_8));
+                }
+            });
         } catch (final CompletionException failure) {
             this.bridgeConnection = null;
             if (bootstrapConfig.backendMode() == BackendMode.SHADOW) {
@@ -140,15 +148,18 @@ public final class SquaremapCommon {
     }
 
     private void stop() {
-        if (Config.HTTPD_ENABLED) {
+        final BackendMode mode = this.bootstrapConfig.get().backendMode();
+        if (Config.HTTPD_ENABLED && mode != BackendMode.RUST) {
             IntegratedServer.stopServer();
         }
         this.platform.stopCallback();
         this.worldManager.shutdown();
-        if (Config.HTTPD_ENABLED && !Config.FLUSH_JSON_IMMEDIATELY) {
+        if (Config.HTTPD_ENABLED && mode != BackendMode.RUST && !Config.FLUSH_JSON_IMMEDIATELY) {
             this.jsonCache.flush();
         }
-        this.jsonCache.clear();
+        if (mode != BackendMode.RUST) {
+            this.jsonCache.clear();
+        }
     }
 
     public void reload() {
@@ -158,13 +169,12 @@ public final class SquaremapCommon {
         this.playerManager.reload();
         this.start();
     }
-
     public void reloadForBridge() {
         this.backendSupport.abortForRestart();
         this.stop();
         this.configManager.reload();
         this.playerManager.reload();
-        this.start(false);
+        this.start();
     }
 
     public void reload(final Audience audience) {
