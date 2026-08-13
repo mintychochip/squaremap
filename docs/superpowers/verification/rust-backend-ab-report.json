@@ -2,13 +2,16 @@
   "branch": "rust-backend-migration",
   "verdict": "incomplete",
   "verified": {
-    "rust_workspace_tests": true,
+    "rust_workspace_tests": {"passed": true, "tests": 217, "suites": 31},
     "java_common_tests": true,
     "gradle_build": true,
     "web_build": true,
-    "compare_tests": true,
+    "web_lint": {"passed_with_warnings": true, "warnings": 3},
+    "compare_tests": {"passed": true, "tests": 6},
+    "bridge_mode_tests": {"passed": true, "tests": 2},
+    "config_compatibility_tests": {"passed": true, "tests": 2},
     "fixture_comparison": {
-      "command": "cargo run --quiet --manifest-path rust/Cargo.toml -p squaremap-compare -- compare-output --java testdata/bridge/v1/fixtures/java --rust testdata/bridge/v1/fixtures/rust --report testdata/bridge/v1/fixtures/parity-report.json",
+      "command": "cargo run --quiet --manifest-path rust/Cargo.toml -p squaremap-compare -- compare-output --java testdata/bridge/v1/fixtures/java --rust testdata/bridge/v1/fixtures/rust --report /tmp/squaremap-parity-current.json",
       "mismatch_count": 0,
       "provenance": "Both fixture roots currently contain checked-in bridge view documents; this validates comparator semantics, not independent Java/Rust generation."
     },

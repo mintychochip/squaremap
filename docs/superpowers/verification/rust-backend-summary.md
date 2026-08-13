@@ -4,13 +4,15 @@ Current branch: `rust-backend-migration`
 
 ## Verified gates
 
-- `cargo test --manifest-path rust/Cargo.toml --workspace`: 211 tests passed.
+- `cargo test --manifest-path rust/Cargo.toml --workspace`: **217 tests passed across 31 suites**.
 - `./gradlew :squaremap-common:test --no-daemon`: passed.
 - `./gradlew build --no-daemon`: passed.
-- `cd web && bun run lint && bun run build`: build passed; lint reports three warnings in existing web files.
+- `cd web && bun run lint && bun run build`: build passed; lint completed with three warnings in existing web files.
 - `cargo test --manifest-path rust/Cargo.toml -p squaremap-compare`: 6 tests passed.
-- The comparison CLI produced `mismatch_count: 0` for the checked-in bridge view fixture roots. Both roots currently use the checked-in documents, so this validates comparator behavior, not independent backend generation.
-- The benchmark CLI requires explicit iterations and a positive threshold and emits a JSON verdict. It currently measures only a bounded comparison-tool workload.
+- Rust bridge HTTP lifecycle tests: 2 passed.
+- Rust configuration compatibility tests: 2 passed, including atomic rejection retaining the prior active revision.
+- Comparator CLI produced `mismatch_count: 0` for the checked-in bridge view fixture roots. Both roots currently use checked-in documents, so this validates comparator behavior, not independent backend generation.
+- Benchmark CLI requires explicit iterations and a positive threshold and emits a JSON verdict. It currently measures only a bounded comparison-tool workload.
 
 ## Not yet passed
 
