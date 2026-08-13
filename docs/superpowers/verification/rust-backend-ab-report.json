@@ -10,16 +10,28 @@
     "compare_tests": {"passed": true, "tests": 6},
     "bridge_mode_tests": {"passed": true, "tests": 2},
     "config_compatibility_tests": {"passed": true, "tests": 2},
-    "sidecar_disconnect_recovery": {"passed": true, "test": "SidecarSupervisorTest.sidecarDisconnectSignalsFailureAndCleansUp"},
+    "sidecar_disconnect_recovery": {
+      "passed": true,
+      "tests": [
+        "SidecarSupervisorTest.sidecarDisconnectSignalsFailureAndCleansUp",
+        "SidecarSupervisorTest.failedSupervisorIsTerminalAndDoesNotLeakChild"
+      ]
+    },
+    "rust_scheduler_recovery": {
+      "passed": true,
+      "tests": 5,
+      "test": "render_recovery"
+    },
     "java_readiness_wiring": {"passed": true, "scope": "Ready envelopes are routed to the dedicated listener and attached by BridgeBackendController"},
     "epoch_aware_dirty_forwarding": {"passed": true, "scope": "dirty events use the controller epoch resolver; no fabricated epoch"},
     "fixture_comparison": {"mismatch_count": 0, "provenance": "Both fixture roots currently contain checked-in bridge view documents; comparator semantics only."},
-    "benchmark_contract": {"passed": true, "scope": "bounded comparison-tool workload; not backend rendering throughput"}
+    "benchmark_contract": {"passed": true, "scope": "bounded comparison-tool workload; not backend rendering throughput"},
+    "current_commit": "efb076a"
   },
   "blocked": {
     "recorded_parity": "independent Java/Rust output generation is not yet wired",
     "live_shadow": "not exercised",
-    "fault_recovery": "restart and durable state recovery scenarios remain unexercised",
+    "fault_restart": "sidecar disconnect cleanup and Rust scheduler durable recovery pass; process restart/restart-loop evidence remains unexercised",
     "isolated_performance": "real backend workload benchmark not exercised",
     "binary_distribution": "build-generated manifest is not wired",
     "clean_cutover": "legacy Java backend remains"
