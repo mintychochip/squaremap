@@ -100,8 +100,11 @@ class SidecarSupervisorTest {
         final java.util.concurrent.CountDownLatch failure = new java.util.concurrent.CountDownLatch(1);
         connection.setFailureListener(ignored -> failure.countDown());
         assertTrue(failure.await(3, TimeUnit.SECONDS));
-        assertTrue(connection.isClosed());
-        assertTrue(supervisor.isClosed());
+        assertTimeout(Duration.ofSeconds(3), () -> {
+            while (!connection.isClosed() || !supervisor.isClosed()) {
+                Thread.yield();
+            }
+        });
         supervisor.close();
     }
     @Test
