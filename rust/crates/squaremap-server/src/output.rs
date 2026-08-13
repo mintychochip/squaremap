@@ -242,7 +242,7 @@ impl OutputRoot {
         let mut parent = self.root_dir.try_clone()?;
         while let Some(Component::Normal(name)) = components.next() {
             if components.peek().is_some() {
-                parent = match open_windows_directory(&parent, name.as_os_str()) {
+                parent = match open_windows_directory(&parent, name) {
                     Ok(dir) => dir,
                     Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
                     Err(error) => return Err(error),
