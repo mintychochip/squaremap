@@ -11,3 +11,4 @@
 pub mod compare;
 pub mod recording;
 pub mod report;
+pub mod benchmark;
