@@ -30,3 +30,21 @@ fn valid(revision: u64) -> ConfigReplace {
         event_capture_enabled: Some(true),
     }
 }
+
+#[test]
+fn compatible_revision_replaces_active_config_atomically() {
+    let mut store = ConfigStore::default();
+    store.stage_and_swap(valid(1)).unwrap();
+    store.stage_and_swap(valid(2)).unwrap();
+    assert_eq!(store.active().unwrap().revision, 2);
+}
+
+#[test]
+fn invalid_world_settings_leave_previous_config_active() {
+    let mut store = ConfigStore::default();
+    store.stage_and_swap(valid(1)).unwrap();
+    let mut invalid = valid(2);
+    invalid.worlds[0].settings.as_mut().unwrap().zoom_default = 4;
+    assert!(store.stage_and_swap(invalid).is_err());
+    assert_eq!(store.active().unwrap().revision, 1);
+}
