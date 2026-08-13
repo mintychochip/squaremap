@@ -1,0 +1,19 @@
+{
+  "branch": "rust-backend-migration",
+  "verdict": "incomplete",
+  "verified": {
+    "rust_workspace_tests": true,
+    "java_common_tests": true,
+    "gradle_build": true,
+    "web_build": true,
+    "compare_tests": true
+  },
+  "blocked": {
+    "recorded_parity": "missing deterministic Java/Rust output fixture",
+    "live_shadow": "not exercised",
+    "fault_recovery": "not exercised",
+    "isolated_performance": "not exercised",
+    "binary_distribution": "manifest generation is not wired",
+    "clean_cutover": "legacy Java backend remains"
+  }
+}
