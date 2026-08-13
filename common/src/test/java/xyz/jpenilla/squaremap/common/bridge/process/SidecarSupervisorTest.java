@@ -11,12 +11,7 @@ import xyz.jpenilla.squaremap.bridge.v1.Envelope;
 import xyz.jpenilla.squaremap.bridge.v1.PlayersReplace;
 import xyz.jpenilla.squaremap.common.bridge.outbox.BridgeEvent;
 
-import static org.junit.jupiter.api.Assertions.assertTimeout;
-
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 class SidecarSupervisorTest {
     @Test
@@ -95,6 +90,18 @@ class SidecarSupervisorTest {
         connection.setFailureListener(ignored -> failure.countDown());
         assertTrue(failure.await(3, TimeUnit.SECONDS));
         assertTrue(connection.isClosed());
+        supervisor.close();
+    }
+    @Test
+    void failedSupervisorIsTerminalAndDoesNotLeakChild() throws Exception {
+        final SidecarSupervisor supervisor = new SidecarSupervisor();
+        final BridgeConnection connection = supervisor.start(config("disconnect", Duration.ofSeconds(5)))
+            .toCompletableFuture().get(6, TimeUnit.SECONDS);
+        final java.util.concurrent.CountDownLatch failure = new java.util.concurrent.CountDownLatch(1);
+        connection.setFailureListener(ignored -> failure.countDown());
+        assertTrue(failure.await(3, TimeUnit.SECONDS));
+        assertTrue(connection.isClosed());
+        assertTrue(supervisor.isClosed());
         supervisor.close();
     }
     @Test
