@@ -2,10 +2,10 @@
   "branch": "rust-backend-migration",
   "verdict": "incomplete",
   "verified": {
-    "rust_workspace_tests": {"passed": true, "tests": 217, "suites": 31},
-    "java_common_tests": true,
-    "gradle_build": true,
-    "web_build": true,
+    "rust_workspace_tests": {"passed": true, "tests": 217, "suites": 31, "command": "cargo test --manifest-path rust/Cargo.toml --workspace"},
+    "java_common_tests": {"passed": true, "command": "./gradlew :squaremap-common:test --no-daemon"},
+    "gradle_build": {"passed": true, "command": "./gradlew build --no-daemon"},
+    "web_build": {"passed": true, "command": "bun run lint && bun run build"},
     "web_lint": {"passed_with_warnings": true, "warnings": 3},
     "compare_tests": {"passed": true, "tests": 6},
     "bridge_mode_tests": {"passed": true, "tests": 2},
@@ -26,7 +26,7 @@
     "epoch_aware_dirty_forwarding": {"passed": true, "scope": "dirty events use the controller epoch resolver; no fabricated epoch"},
     "fixture_comparison": {"mismatch_count": 0, "provenance": "Both fixture roots currently contain checked-in bridge view documents; comparator semantics only."},
     "benchmark_contract": {"passed": true, "scope": "bounded comparison-tool workload; not backend rendering throughput"},
-    "current_commit": "efb076a"
+    "current_commit": "f4a6982e630acf2243352197c93d1f5586a0ac21"
   },
   "blocked": {
     "recorded_parity": "independent Java/Rust output generation is not yet wired",
