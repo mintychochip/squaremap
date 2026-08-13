@@ -16,7 +16,8 @@ import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.file.Files;
-import java.nio.file.Paths;
+import java.nio.file.Path;
+import org.checkerframework.checker.nullness.qual.Nullable;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.concurrent.TimeUnit;
 import xyz.jpenilla.squaremap.common.Logging;
@@ -29,6 +30,7 @@ public final class IntegratedServer {
     private static final boolean DEV_FRONTEND = Boolean.getBoolean("squaremap.devFrontend");
     private static final String FRONTEND_PATH = System.getProperty("squaremap.frontendPath");
     private static ViteRunner VITE_RUNNER;
+    private static @Nullable ResourceHandler RUST_RESOURCE_HANDLER;
     private static Undertow SERVER;
     private static JsonCache CACHE;
 
@@ -36,28 +38,41 @@ public final class IntegratedServer {
     }
 
     public static void startServer(final DirectoryProvider directoryProvider, final JsonCache jsonCache) {
+        startServer(directoryProvider, jsonCache, null);
+    }
+
+    public static void startServer(
+        final DirectoryProvider directoryProvider,
+        final JsonCache jsonCache,
+        final @Nullable Path rustOutputRoot
+    ) {
         if (DEV_FRONTEND && FRONTEND_PATH != null) {
             VITE_RUNNER = new ViteRunner(FRONTEND_PATH);
             VITE_RUNNER.start();
         }
 
         CACHE = jsonCache;
+        RUST_RESOURCE_HANDLER = rustOutputRoot == null ? null : createResourceHandler(rustOutputRoot);
         try {
-            SERVER = buildUndertow(createResourceHandler(directoryProvider));
+            SERVER = buildUndertow(createResourceHandler(directoryProvider), RUST_RESOURCE_HANDLER);
             SERVER.start();
 
             Logging.info(Messages.LOG_INTERNAL_WEB_STARTED, "bind", Config.HTTPD_BIND, "port", Config.HTTPD_PORT);
         } catch (Exception e) {
             SERVER = null;
+            RUST_RESOURCE_HANDLER = null;
             Logging.logger().error(Messages.LOG_INTERNAL_WEB_START_ERROR, e);
         }
     }
 
-    private static Undertow buildUndertow(final ResourceHandler resourceHandler) {
+    private static Undertow buildUndertow(
+        final ResourceHandler resourceHandler,
+        final @Nullable ResourceHandler rustResourceHandler
+    ) {
         return Undertow.builder()
             .setServerOption(UndertowOptions.ENABLE_HTTP2, true)
             .addHttpListener(Config.HTTPD_PORT, Config.HTTPD_BIND)
-            .setHandler(createHttpHandler(resourceHandler))
+            .setHandler(createHttpHandler(resourceHandler, rustResourceHandler))
             .build();
     }
 
@@ -73,7 +88,10 @@ public final class IntegratedServer {
         return null;
     }
 
-    private static HttpHandler createHttpHandler(final ResourceHandler resourceHandler) {
+    private static HttpHandler createHttpHandler(
+        final ResourceHandler resourceHandler,
+        final @Nullable ResourceHandler rustResourceHandler
+    ) {
         ProxyHandler devProxyHandler = null;
         if (VITE_RUNNER != null) {
             final String viteUrl = getViteUrl();
@@ -94,20 +112,24 @@ public final class IntegratedServer {
         final ProxyHandler finalProxyHandler = devProxyHandler;
 
         return exchange -> {
-            if (CACHE.handle(exchange)) {
+            final String relativePath = exchange.getRelativePath();
+            final boolean rustAsset = rustResourceHandler != null && isRustAsset(relativePath);
+            if (!rustAsset && CACHE.handle(exchange)) {
                 return;
             }
 
-            if (exchange.getRelativePath().startsWith("/tiles")) {
+            if (relativePath.startsWith("/tiles")) {
                 exchange.getResponseHeaders().put(
                     Headers.CACHE_CONTROL,
                     "max-age=0, must-revalidate, no-cache"
                 );
             }
 
-            if (finalProxyHandler != null
-                && !exchange.getRelativePath().startsWith("/tiles")
-                && !exchange.getRelativePath().startsWith("/images/icon/registered")) {
+            if (rustAsset) {
+                rustResourceHandler.handleRequest(exchange);
+            } else if (finalProxyHandler != null
+                && !relativePath.startsWith("/tiles")
+                && !relativePath.startsWith("/images/icon/registered")) {
                 finalProxyHandler.handleRequest(exchange);
             } else {
                 resourceHandler.handleRequest(exchange);
@@ -115,9 +137,18 @@ public final class IntegratedServer {
         };
     }
 
+    private static boolean isRustAsset(final String relativePath) {
+        return relativePath.startsWith("/tiles")
+            || relativePath.startsWith("/images/icon/registered");
+    }
+
     private static ResourceHandler createResourceHandler(final DirectoryProvider directoryProvider) {
+        return createResourceHandler(directoryProvider.webDirectory());
+    }
+
+    private static ResourceHandler createResourceHandler(final Path baseDirectory) {
         final ResourceManager resourceManager = PathResourceManager.builder()
-            .setBase(Paths.get(directoryProvider.webDirectory().toFile().getAbsolutePath()))
+            .setBase(baseDirectory.toAbsolutePath().normalize())
             .setETagFunction((path) -> {
                 final BasicFileAttributes attr;
                 try {
@@ -155,6 +186,7 @@ public final class IntegratedServer {
 
         SERVER.stop();
         SERVER = null;
+        RUST_RESOURCE_HANDLER = null;
         if (VITE_RUNNER != null) {
             VITE_RUNNER.shutdown();
             VITE_RUNNER = null;

@@ -76,4 +76,8 @@ final class ProductionBridgeWiringTest {
             Config.BRIDGE_RUST_OUTPUT_ROOT = oldRoot;
         }
     }
+    @Test
+    void javaDefaultRemainsSafeUntilObservationReleaseGate() {
+        assertEquals("JAVA", Config.BRIDGE_BACKEND_MODE);
+    }
 }

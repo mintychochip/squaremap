@@ -126,6 +126,13 @@ impl OutputRoot {
         Ok(files)
     }
 
+    /// Removes all files below a confined relative directory without following symlinks.
+    pub fn remove_tree<P: AsRef<Path>>(&self, relative_dir: P) -> io::Result<()> {
+        let _guard = self.writes.lock().map_err(|_| io::Error::other("output lock poisoned"))?;
+        let relative_dir = validate_relative(relative_dir.as_ref())?;
+        remove_tree_confined(&self.root.join(&relative_dir))
+    }
+
     fn remember_latest(&self, relative: &Path, bytes: &[u8]) {
         if let Ok(mut latest) = self.latest.lock() { latest.insert(relative.to_owned(), bytes.to_vec()); }
     }
@@ -374,6 +381,35 @@ fn collect_existing_files(base: &Path, relative: &Path, files: &mut Vec<PathBuf>
             collect_existing_files(&entry.path(), &path, files)?;
         } else if metadata.is_file() {
             files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn remove_tree_confined(path: &Path) -> io::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "output traversal encountered symlink"));
+    }
+    if !metadata.is_dir() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "output tree root is not a directory"));
+    }
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let entry_path = entry.path();
+        let entry_metadata = fs::symlink_metadata(&entry_path)?;
+        if entry_metadata.file_type().is_symlink() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "output traversal encountered symlink"));
+        }
+        if entry_metadata.is_dir() {
+            remove_tree_confined(&entry_path)?;
+            fs::remove_dir(&entry_path)?;
+        } else if entry_metadata.is_file() {
+            fs::remove_file(&entry_path)?;
         }
     }
     Ok(())

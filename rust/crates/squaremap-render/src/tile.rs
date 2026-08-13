@@ -227,6 +227,9 @@ impl MemoryTileStore {
             .warn_directory_sync
             .insert(path);
     }
+    pub fn file_count(&self) -> usize {
+        lock_unpoisoned(&self.state).files.len()
+    }
 }
 
 #[async_trait]

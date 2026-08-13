@@ -54,8 +54,10 @@ pub fn validate_and_stage(candidate: ConfigReplace) -> Result<(ActiveConfig, Bri
     if global.http_port == 0 || global.http_port > 65_535 { return Err(ConfigError::InvalidBounds("http_port")); }
     if !global.compression_ratio.is_finite() || !(0.0..=1.0).contains(&global.compression_ratio) { return Err(ConfigError::InvalidBounds("compression_ratio")); }
     validate_world_settings(default_world)?;
-    if render.progress_logging_interval_seconds == 0 || render.background_interval_seconds == 0 { return Err(ConfigError::InvalidBounds("render interval")); }
-    if render.background_max_chunks_per_interval == 0 || render.background_max_threads < -1 { return Err(ConfigError::InvalidBounds("render background")); }
+    if render.progress_logging_interval_seconds == 0 { return Err(ConfigError::InvalidBounds("render progress interval")); }
+    if render.background_interval_seconds == 0 { return Err(ConfigError::InvalidBounds("render background interval")); }
+    if render.background_max_chunks_per_interval == 0 { return Err(ConfigError::InvalidBounds("render background chunk page")); }
+    if render.background_max_threads < -1 { return Err(ConfigError::InvalidBounds("render background threads")); }
     if ui.sidebar_pinned.is_empty() { return Err(ConfigError::InvalidValue("sidebar_pinned")); }
     let mut identities = HashSet::new();
     for world in &candidate.worlds {
@@ -70,7 +72,7 @@ pub fn validate_and_stage(candidate: ConfigReplace) -> Result<(ActiveConfig, Bri
         max_snapshot_frame_bytes: 16 << 20,
         max_uncompressed_snapshot_bytes: 64 << 20,
         max_pending_dirty_chunks: 65_536,
-        snapshot_credits: 64,
+        snapshot_credits: 96,
         player_privacy_enabled,
         event_capture_enabled,
     };
@@ -88,7 +90,10 @@ fn validate_world_settings(settings: &WorldSettings) -> Result<(), ConfigError> 
     if settings.map_biomes_blend > 15 { return Err(ConfigError::InvalidBounds("map_biomes_blend")); }
     if settings.zoom_max < 0 || settings.zoom_default < 0 || settings.zoom_extra < 0 || settings.zoom_default > settings.zoom_max { return Err(ConfigError::InvalidBounds("zoom")); }
     if settings.max_render_threads < -1 || settings.background_render_max_threads < -1 { return Err(ConfigError::InvalidBounds("render threads")); }
-    if settings.background_render_interval_seconds == 0 || settings.background_render_max_chunks_per_interval == 0 || settings.player_tracker_update_interval == 0 || settings.marker_api_update_interval_seconds == 0 { return Err(ConfigError::InvalidBounds("interval")); }
+    if settings.background_render_interval_seconds == 0 { return Err(ConfigError::InvalidBounds("background interval")); }
+    if settings.background_render_max_chunks_per_interval == 0 { return Err(ConfigError::InvalidBounds("background chunk page")); }
+    if settings.player_tracker_update_interval == 0 { return Err(ConfigError::InvalidBounds("player tracker interval")); }
+    if settings.marker_api_update_interval_seconds == 0 { return Err(ConfigError::InvalidBounds("marker interval")); }
     for visibility in &settings.visibility_limits { validate_visibility(visibility)?; }
     Ok(())
 }
@@ -149,6 +154,7 @@ mod tests {
         let policy = store.stage_and_swap(candidate).unwrap();
         assert_eq!(policy.revision, 1);
         assert!(!policy.player_privacy_enabled);
+        assert_eq!(policy.snapshot_credits, 96);
         assert!(store.active().unwrap().config.worlds.len() == 2);
     }
 

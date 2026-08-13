@@ -43,6 +43,7 @@ import org.bukkit.event.world.StructureGrowEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.checkerframework.checker.nullness.qual.NonNull;
 import xyz.jpenilla.squaremap.common.data.ChunkCoordinate;
+import xyz.jpenilla.squaremap.common.bridge.state.DirtyChunkPublisher;
 import xyz.jpenilla.squaremap.common.util.Numbers;
 import xyz.jpenilla.squaremap.paper.PaperWorldManager;
 import xyz.jpenilla.squaremap.paper.config.PaperAdvanced;
@@ -50,15 +51,18 @@ import xyz.jpenilla.squaremap.paper.config.PaperAdvanced;
 public final class MapUpdateListeners {
     private final JavaPlugin plugin;
     private final PaperWorldManager worldManager;
+    private final DirtyChunkPublisher dirtyChunks;
     private final List<Listener> registeredListeners = new ArrayList<>();
 
     @Inject
     private MapUpdateListeners(
         final @NonNull JavaPlugin plugin,
-        final @NonNull PaperWorldManager worldManager
+        final @NonNull PaperWorldManager worldManager,
+        final @NonNull DirtyChunkPublisher dirtyChunks
     ) {
         this.plugin = plugin;
         this.worldManager = worldManager;
+        this.dirtyChunks = dirtyChunks;
     }
 
     public void register() {
@@ -132,7 +136,8 @@ public final class MapUpdateListeners {
     private void markChunk(final @NonNull Location loc, final boolean skipVisibilityCheck) {
         this.worldManager.getWorldIfEnabled(loc.getWorld()).ifPresent(mapWorld -> {
             if (skipVisibilityCheck || locationVisible(loc)) {
-                mapWorld.chunkModified(
+                this.dirtyChunks.publish(
+                    mapWorld,
                     new ChunkCoordinate(
                         Numbers.blockToChunk(loc.getBlockX()),
                         Numbers.blockToChunk(loc.getBlockZ())
@@ -150,7 +155,7 @@ public final class MapUpdateListeners {
                 Numbers.blockToChunk(loc.getBlockZ())
             ))
             .distinct()
-            .forEach(mapWorld::chunkModified));
+            .forEach(coord -> this.dirtyChunks.publish(mapWorld, coord)));
     }
 
     private void markChunksFromBlocks(final @NonNull World world, final @NonNull List<BlockState> blockStates) {
@@ -163,7 +168,7 @@ public final class MapUpdateListeners {
                     Numbers.blockToChunk(loc.getBlockZ())
                 ))
                 .distinct()
-                .forEach(mapWorld::chunkModified));
+                .forEach(coord -> this.dirtyChunks.publish(mapWorld, coord)));
     }
 
     private static boolean locationVisible(final @NonNull Location loc) {

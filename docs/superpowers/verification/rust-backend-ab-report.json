@@ -2,21 +2,27 @@
   "branch": "rust-backend-migration",
   "verdict": "incomplete",
   "verified": {
-    "rust_workspace_tests": {"passed": true, "tests": 217, "suites": 31, "command": "cargo test --manifest-path rust/Cargo.toml --workspace"},
-    "java_common_tests": {"passed": true, "command": "./gradlew :squaremap-common:test --no-daemon"},
-    "gradle_build": {"passed": true, "command": "./gradlew build --no-daemon"},
+    "rust_workspace_tests": {"passed": true, "tests": 222, "suites": 32, "command": "cargo test --manifest-path rust/Cargo.toml --workspace"},
+    "java_common_tests": {"passed": true, "historical_passed": true, "command": "./gradlew :squaremap-common:test --no-daemon"},
+    "gradle_build": {
+      "passed": false,
+      "historical_passed": true,
+      "command": "./gradlew build --no-daemon",
+      "failure": "squaremap-common:generateBackendManifest rejects duplicate SHA-256 digests among local placeholder artifacts"
+    },
     "web_build": {"passed": true, "command": "bun run lint && bun run build", "working_directory": "web"},
     "web_lint": {"passed_with_warnings": true, "warnings": 3},
-    "compare_tests": {"passed": true, "tests": 6},
+    "compare_tests": {"passed": true, "tests": 11},
     "bridge_mode_tests": {"passed": true, "tests": 2},
     "config_compatibility_tests": {"passed": true, "tests": 2},
     "sidecar_disconnect_recovery": {
       "passed": true,
       "tests": [
-        "SidecarSupervisorTest.sidecarDisconnectSignalsFailureAndCleansUp",
-        "SidecarSupervisorTest.failedSupervisorIsTerminalAndDoesNotLeakChild"
+        "SidecarSupervisorTest.sidecarDisconnectSchedulesBoundedRecovery",
+        "RustSidecarSmokeTest.realSidecarRestartProducesReplacementAndRetainsState"
       ],
-      "command": "./gradlew :squaremap-common:test --tests '*SidecarSupervisorTest' --tests '*ProductionBridgeWiringTest' --no-daemon"
+      "command": "./gradlew :squaremap-common:test --tests '*RustSidecarSmokeTest' --tests '*SidecarSupervisorTest' --no-daemon",
+      "scope": "Supervisor-owned child process termination, bounded reconnect, replacement connection, and persisted SQLite state"
     },
     "rust_scheduler_recovery": {"passed": true, "tests": 5, "test": "render_recovery"},
     "java_readiness_wiring": {"passed": true, "scope": "Ready envelopes are routed to the dedicated listener and attached by BridgeBackendController"},
@@ -29,14 +35,36 @@
       "mismatch_count": 0,
       "report": "docs/superpowers/verification/rust-backend-parity-report.json"
     },
-    "fixture_comparison": {"mismatch_count": 0, "provenance": "independently generated Java render fixture and Rust render oracle; bridge-view fixture comparison remains semantic-only."},
-    "benchmark_contract": {"passed": true, "scope": "bounded comparison-tool workload; not backend rendering throughput"}
+    "renderer_workload_benchmark": {
+      "passed": true,
+      "corpus_cases": 26,
+      "throughput_items_per_second": 188.01649940236786,
+      "threshold_items_per_second": 100.0,
+      "published_paths": 4,
+      "command": "cargo bench --manifest-path rust/Cargo.toml -p squaremap-server --bench backend_workload -- --noplot",
+      "scope": "RenderTileInstaller with MemoryTileStore; excludes Scheduler, bridge, repository, and HTTP"
+    },
+    "rust_process_shadow_smoke": {
+      "passed": true,
+      "command": "./gradlew :squaremap-common:test --tests '*RustSidecarSmokeTest' --no-daemon",
+      "scope": "real squaremap-server process accepts ConfigReplace, emits acknowledgement and Ready, and creates SQLite state; not a Minecraft lifecycle"
+    },
+    "benchmark_contract": {"passed": true, "scope": "bounded comparison-tool workload; not backend rendering throughput"},
+    "binary_manifest": {
+      "passed": false,
+      "targets": 5,
+      "asset_naming": "target-qualified release assets",
+      "packaged_jar_json": false,
+      "command": "./gradlew :squaremap-common:generateBackendManifest --no-daemon --no-configuration-cache --rerun-tasks",
+      "failure": "local placeholder artifacts share one SHA-256 digest; release manifest generation now rejects duplicate content"
+    }
   },
   "blocked": {
-    "live_shadow": "not exercised; no production-equivalent Minecraft lifecycle harness",
-    "fault_restart": "sidecar disconnect cleanup and Rust scheduler durable recovery pass; process restart/restart-loop evidence remains unexercised",
-    "isolated_performance": "real backend workload benchmark not exercised",
-    "binary_distribution": "manifest generation still depends on a prebuilt local binary and embeds a machine-local file URL",
-    "clean_cutover": "legacy Java backend remains; Rust default cannot be enabled until sidecar resolution and remaining gates are complete"
+    "live_shadow": "Paper 26.2 Java-primary/Rust-shadow boot and sidecar output-root creation were observed, but no independent Java-vs-Rust comparison across churn/reload/quiescence was captured",
+    "fault_restart": "focused real sidecar restart smoke passed; Paper production sidecar-only kill/reconnect/replay evidence remains incomplete",
+    "isolated_performance": "isolated end-to-end performance gate remains unverified; the current 188.0165 items/s benchmark covers RenderTileInstaller with MemoryTileStore only and excludes Scheduler, bridge, repository, and HTTP",
+    "release_publication": "CI release upload is configured but no actual GitHub release execution or URL resolution was exercised",
+    "clean_cutover": "legacy Java backend remains; Rust default cannot be enabled until live-shadow comparison, release evidence, and a valid binary manifest are complete",
+    "binary_manifest": "current local target artifacts are duplicate placeholder content; distinct target binaries must be supplied before packaging"
   }
 }

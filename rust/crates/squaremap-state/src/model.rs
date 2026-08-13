@@ -66,6 +66,7 @@ pub struct DirtyChunk {
 pub enum JobKind {
     Full = 1,
     Resume = 2,
+    Radius = 3,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +77,7 @@ pub enum JobState {
     Resumable = 2,
     Completed = 3,
     Failed = 4,
+    Cancelled = 5,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

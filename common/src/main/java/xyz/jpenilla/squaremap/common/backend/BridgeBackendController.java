@@ -107,6 +107,9 @@ public final class BridgeBackendController implements AutoCloseable {
         this.mode = Objects.requireNonNull(mode, "mode");
         this.configExporter = configExporter;
         this.common = common;
+        if (this.supervisor != null) {
+            this.supervisor.setReconnectListener(this::attach);
+        }
         this.epochs = Objects.requireNonNull(epochs, "epochs");
     }
 

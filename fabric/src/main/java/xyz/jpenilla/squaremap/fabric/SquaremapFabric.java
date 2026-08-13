@@ -26,6 +26,7 @@ import xyz.jpenilla.squaremap.common.data.MapWorldInternal;
 import xyz.jpenilla.squaremap.common.inject.SquaremapModulesBuilder;
 import xyz.jpenilla.squaremap.common.bridge.state.BridgeStatePublisher;
 import xyz.jpenilla.squaremap.fabric.data.FabricMapWorld;
+import xyz.jpenilla.squaremap.common.config.Config;
 import xyz.jpenilla.squaremap.fabric.inject.module.FabricModule;
 import xyz.jpenilla.squaremap.fabric.listener.FabricMapUpdates;
 import xyz.jpenilla.squaremap.fabric.network.FabricNetworking;
@@ -38,8 +39,8 @@ public final class SquaremapFabric implements SquaremapPlatform {
     private final WorldManagerImpl worldManager;
     private final ModContainer modContainer;
     private @Nullable BridgeStatePublisher statePublisher;
-
     SquaremapFabric() {
+        Config.reload(FabricLoader.getInstance().getGameDir().resolve("squaremap"));
         this.injector = Guice.createInjector(
             SquaremapModulesBuilder.forPlatform(this)
                 .mapWorld(FabricMapWorld.class)

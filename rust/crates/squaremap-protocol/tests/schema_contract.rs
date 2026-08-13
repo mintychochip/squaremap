@@ -8,14 +8,16 @@ use squaremap_protocol::wire::{
 fn assert_i32(_: i32) {}
 
 #[test]
-fn block_descriptor_air_field_round_trips_true_and_false() {
+fn block_descriptor_air_and_iterate_base_fields_round_trip_true_and_false() {
     for expected in [false, true] {
         let descriptor = BlockStateDescriptor {
             air: expected,
+            iterate_up_base: expected,
             ..Default::default()
         };
         let decoded = BlockStateDescriptor::decode(descriptor.encode_to_vec().as_slice()).unwrap();
         assert_eq!(decoded.air, expected);
+        assert_eq!(decoded.iterate_up_base, expected);
     }
 }
 #[test]

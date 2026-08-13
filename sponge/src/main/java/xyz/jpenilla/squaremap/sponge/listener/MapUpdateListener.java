@@ -27,6 +27,7 @@ import org.spongepowered.api.world.server.ServerWorld;
 import org.spongepowered.math.vector.Vector3i;
 import org.spongepowered.plugin.PluginContainer;
 import xyz.jpenilla.squaremap.common.WorldManager;
+import xyz.jpenilla.squaremap.common.bridge.state.DirtyChunkPublisher;
 import xyz.jpenilla.squaremap.common.data.ChunkCoordinate;
 import xyz.jpenilla.squaremap.sponge.config.SpongeAdvanced;
 import xyz.jpenilla.squaremap.sponge.util.SpongeVectors;
@@ -35,6 +36,7 @@ import xyz.jpenilla.squaremap.sponge.util.SpongeVectors;
 public final class MapUpdateListener {
     private final Set<Object> registrations = new HashSet<>();
     private final WorldManager worldManager;
+    private final DirtyChunkPublisher dirtyChunks;
     private final PluginContainer pluginContainer;
     private final Game game;
 
@@ -42,11 +44,13 @@ public final class MapUpdateListener {
     private MapUpdateListener(
         final WorldManager worldManager,
         final PluginContainer pluginContainer,
-        final Game game
+        final Game game,
+        final DirtyChunkPublisher dirtyChunks
     ) {
         this.worldManager = worldManager;
         this.pluginContainer = pluginContainer;
         this.game = game;
+        this.dirtyChunks = dirtyChunks;
     }
 
     public void register() {
@@ -114,13 +118,13 @@ public final class MapUpdateListener {
     private void mark(final ServerWorld level, final Collection<ChunkCoordinate> chunks) {
         this.worldManager.getWorldIfEnabled((ServerLevel) level).ifPresent(world -> {
             for (final ChunkCoordinate chunk : chunks) {
-                world.chunkModified(chunk);
+                this.dirtyChunks.publish(world, chunk);
             }
         });
     }
 
     private void mark(final ServerLevel level, final ChunkCoordinate chunk) {
-        this.worldManager.getWorldIfEnabled(level).ifPresent(world -> world.chunkModified(chunk));
+        this.worldManager.getWorldIfEnabled(level).ifPresent(world -> this.dirtyChunks.publish(world, chunk));
     }
 
     public final class BlockTriggers {

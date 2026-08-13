@@ -53,7 +53,6 @@ public final class SquaremapCommon {
     private final Provider<BridgeBootstrapConfig> bootstrapConfig;
     private final SidecarSupervisor sidecarSupervisor;
     private BridgeConnection bridgeConnection;
-    private boolean sidecarLaunchAttempted;
 
     @Inject
     private SquaremapCommon(
@@ -99,13 +98,13 @@ public final class SquaremapCommon {
         LevelBiomeColorData.loadImages(this.directoryProvider);
         this.worldManager.start();
         this.platform.startCallback();
-        if (Config.HTTPD_ENABLED && BackendLifecyclePolicy.javaHttpOwner(this.bootstrapConfig.get().backendMode())) {
+        final BackendMode mode = this.bootstrapConfig.get().backendMode();
+        if (Config.HTTPD_ENABLED && BackendLifecyclePolicy.javaHttpOwner(mode)) {
             IntegratedServer.startServer(this.directoryProvider, this.jsonCache, null);
         } else if (!Config.HTTPD_ENABLED) {
             Logging.logger().info(Messages.LOG_INTERNAL_WEB_DISABLED);
         }
     }
-
     private void startSidecarIfNeeded() {
         final BridgeBootstrapConfig bootstrapConfig = this.bootstrapConfig.get();
         Logging.logger().info(
@@ -114,11 +113,8 @@ public final class SquaremapCommon {
             bootstrapConfig.sidecarCommand() == null ? List.of() : bootstrapConfig.sidecarCommand().command(),
             bootstrapConfig.rustOutputRoot()
         );
-        if (bootstrapConfig.backendMode() == BackendMode.JAVA || this.sidecarLaunchAttempted) {
+        if (bootstrapConfig.backendMode() == BackendMode.JAVA) {
             return;
-        }
-        if (bootstrapConfig.rustOutputRoot() == null) {
-            throw new IllegalArgumentException("Rust backend requires an isolated output root distinct from Java web output");
         }
         BridgeBootstrapConfig.validateIsolatedRoots(this.directoryProvider.webDirectory(), bootstrapConfig.rustOutputRoot());
         try {

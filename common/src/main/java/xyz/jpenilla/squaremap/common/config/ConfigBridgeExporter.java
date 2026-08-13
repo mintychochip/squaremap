@@ -11,6 +11,7 @@ import java.util.TreeMap;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.biome.BiomeManager;
 import xyz.jpenilla.squaremap.api.WorldIdentifier;
 import xyz.jpenilla.squaremap.bridge.v1.AdvancedSettings;
 import xyz.jpenilla.squaremap.bridge.v1.ColorOverride;
@@ -68,10 +69,10 @@ public final class ConfigBridgeExporter {
                 .setSidebarWorldListLabel(Messages.UI_SIDEBAR_WORLD_LIST_LABEL).setSpawnMarkerLabel(Messages.UI_SPAWN_MARKER_ICON_LABEL)
                 .setWorldBorderMarkerLabel(Messages.UI_WORLDBORDER_MARKER_LABEL).build())
             .setRender(RenderSettings.newBuilder().setProgressLoggingEnabled(Config.PROGRESS_LOGGING)
-                .setProgressLoggingIntervalSeconds(Config.PROGRESS_LOGGING_INTERVAL)
-                .setBackgroundEnabled(defaultConfig != null && defaultConfig.BACKGROUND_RENDER_ENABLED)
-                .setBackgroundMaxChunksPerInterval(defaultConfig == null ? 0 : defaultConfig.BACKGROUND_RENDER_MAX_CHUNKS_PER_INTERVAL)
-                .setBackgroundIntervalSeconds(defaultConfig == null ? 0 : defaultConfig.BACKGROUND_RENDER_INTERVAL_SECONDS)
+                .setProgressLoggingIntervalSeconds(Math.max(1, Config.PROGRESS_LOGGING_INTERVAL))
+                .setBackgroundEnabled(defaultConfig == null || defaultConfig.BACKGROUND_RENDER_ENABLED)
+                .setBackgroundMaxChunksPerInterval(defaultConfig == null ? 1024 : Math.max(1, defaultConfig.BACKGROUND_RENDER_MAX_CHUNKS_PER_INTERVAL))
+                .setBackgroundIntervalSeconds(defaultConfig == null ? 15 : Math.max(1, defaultConfig.BACKGROUND_RENDER_INTERVAL_SECONDS))
                 .setBackgroundMaxThreads(defaultConfig == null ? -1 : defaultConfig.BACKGROUND_RENDER_MAX_THREADS).build())
             .setUi(UiSettings.newBuilder().setCoordinatesEnabled(Config.UI_COORDINATES_ENABLED)
                 .setLinkEnabled(Config.UI_LINK_ENABLED).setSidebarPinned(Config.UI_SIDEBAR_PINNED)
@@ -84,7 +85,10 @@ public final class ConfigBridgeExporter {
             result.addWorlds(xyz.jpenilla.squaremap.bridge.v1.WorldConfig.newBuilder()
                 .setIdentity(WorldIdentity.newBuilder().setNamespace(id.namespace()).setValue(id.value())
                     .setEpoch(this.epochs.epoch(id, level)))
-                .setSettings(worldSettings(this.configManager.worldConfig(level))).build());
+                .setSettings(worldSettings(
+                    this.configManager.worldConfig(level),
+                    BiomeManager.obfuscateSeed(level.getSeed())
+                )).build());
         }
         return result.build();
     }
@@ -124,6 +128,10 @@ public final class ConfigBridgeExporter {
     private static String key(final Identifier id) { return id == null ? "" : id.toString(); }
 
     private static WorldSettings worldSettings(final WorldConfig config) {
+        return worldSettings(config, 0L);
+    }
+
+    private static WorldSettings worldSettings(final WorldConfig config, final long biomeZoomSeed) {
         return WorldSettings.newBuilder()
             .setMapEnabled(config.MAP_ENABLED).setMapDisplayName(config.MAP_DISPLAY_NAME).setMapOrder(config.MAP_ORDER)
             .setMapIcon(config.MAP_ICON).setMaxRenderThreads(config.MAX_RENDER_THREADS).setMapIterateUp(config.MAP_ITERATE_UP)
@@ -155,6 +163,7 @@ public final class ConfigBridgeExporter {
             .setWorldborderMarkerDefaultHidden(config.WORLDBORDER_MARKER_DEFAULT_HIDDEN)
             .setWorldborderMarkerLayerPriority(config.WORLDBORDER_MARKER_LAYER_PRIORITY).setWorldborderMarkerZIndex(config.WORLDBORDER_MARKER_Z_INDEX)
             .addAllVisibilityLimits(VisibilityLimitProtocol.serialize(config.VISIBILITY_LIMITS))
+            .setBiomeZoomSeed(biomeZoomSeed)
             .build();
     }
 }

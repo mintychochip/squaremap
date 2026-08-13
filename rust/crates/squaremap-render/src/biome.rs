@@ -139,6 +139,9 @@ impl SnapshotBiomeSource {
         self.grass.insert((x, y, z, biome), color);
         self
     }
+    pub fn snapshots(&self) -> Vec<Arc<Snapshot>> {
+        self.snapshots.values().cloned().collect()
+    }
 }
 impl QuartBiomeSource for SnapshotBiomeSource {
     fn sample_quart(

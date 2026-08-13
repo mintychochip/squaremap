@@ -15,6 +15,7 @@ import org.spongepowered.api.network.channel.raw.RawDataChannel;
 import org.spongepowered.plugin.builtin.jvm.Plugin;
 import xyz.jpenilla.squaremap.common.inject.SquaremapModulesBuilder;
 import xyz.jpenilla.squaremap.common.network.NetworkingHandler;
+import xyz.jpenilla.squaremap.common.config.Config;
 import xyz.jpenilla.squaremap.sponge.data.SpongeMapWorld;
 import xyz.jpenilla.squaremap.sponge.inject.module.SpongeModule;
 
@@ -35,6 +36,7 @@ public final class SquaremapSpongeBootstrap {
     }
 
     public void init() {
+        Config.reload(this.spongeModule.dataDirectory());
         final Injector injector = Guice.createInjector(
             SquaremapModulesBuilder.forPlatform(SquaremapSponge.class)
                 .mapWorld(SpongeMapWorld.class)

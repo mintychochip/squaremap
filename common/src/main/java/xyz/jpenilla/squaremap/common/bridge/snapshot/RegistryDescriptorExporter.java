@@ -54,7 +54,7 @@ public final class RegistryDescriptorExporter {
                 final int alpha = glass ? (block == Blocks.GLASS ? 25 : 50) : 0;
                 final BlockTransparency transparency = world.advanced().invisibleBlocks.contains(block) ? BlockTransparency.BLOCK_TRANSPARENCY_INVISIBLE
                     : (glass || color == Colors.clearMapColor() ? BlockTransparency.BLOCK_TRANSPARENCY_TRANSLUCENT : BlockTransparency.BLOCK_TRANSPARENCY_OPAQUE);
-                states.add(new StateInput(state, new BlockDescriptor(registryId, properties, color, transparency, glass, alpha, fluid(state.getFluidState()), state.isAir(), BiomeColors.tintIndex(block))));
+                states.add(new StateInput(state, new BlockDescriptor(registryId, properties, color, transparency, glass, alpha, fluid(state.getFluidState()), state.isAir(), world.advanced().iterateUpBaseBlocks.contains(block), BiomeColors.tintIndex(block))));
             }
         }
         final List<BiomeInput> biomes = new ArrayList<>();
@@ -172,7 +172,7 @@ public final class RegistryDescriptorExporter {
         final BlockStateDescriptor descriptor = this.exported.getBlockStates(id - 1);
         return new BlockDescriptor(BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString(), List.of(state.toString()),
             descriptor.getMapColor(), descriptor.getTransparency(), descriptor.getGlass(), descriptor.getGlassAlphaPercent(),
-            descriptor.getFluid(), descriptor.getAir(), descriptor.getTintIndex());
+            descriptor.getFluid(), descriptor.getAir(), descriptor.getIterateUpBase(), descriptor.getTintIndex());
     }
     public BiomeDescriptorInput biomeDescriptor(final Holder<Biome> biome) {
         final int id = this.biomeId(biome);
@@ -211,12 +211,16 @@ public final class RegistryDescriptorExporter {
     private record BiomeInput(Biome biome, BiomeDescriptorInput descriptor) {}
 
     public record BlockDescriptor(String registryId, List<String> properties, int mapColor, BlockTransparency transparency,
-                                  boolean glass, int glassAlphaPercent, FluidClass fluid, boolean air, int tintIndex) {
+                                  boolean glass, int glassAlphaPercent, FluidClass fluid, boolean air, boolean iterateUpBase, int tintIndex) {
         public BlockDescriptor { Objects.requireNonNull(registryId); properties = List.copyOf(properties); Objects.requireNonNull(transparency); Objects.requireNonNull(fluid); }
-        public BlockDescriptor(final String registryId, final String propertyString, final int mapColor, final BlockTransparency transparency, final boolean glass, final FluidClass fluid, final int tintIndex) {
-            this(registryId, List.of(propertyString), mapColor, transparency, glass, glass ? (propertyString.contains("stained") ? 50 : 25) : 0, fluid, false, tintIndex);
+        public BlockDescriptor(final String registryId, final List<String> properties, final int mapColor, final BlockTransparency transparency,
+                               final boolean glass, final int glassAlphaPercent, final FluidClass fluid, final boolean air, final int tintIndex) {
+            this(registryId, properties, mapColor, transparency, glass, glassAlphaPercent, fluid, air, false, tintIndex);
         }
-        BlockStateDescriptor toProto(final int id) { return BlockStateDescriptor.newBuilder().setId(id).setMapColor(mapColor).setTransparency(transparency).setGlass(glass).setGlassAlphaPercent(glassAlphaPercent).setFluid(fluid).setAir(air).setTintIndex(tintIndex).build(); }
+        public BlockDescriptor(final String registryId, final String propertyString, final int mapColor, final BlockTransparency transparency, final boolean glass, final FluidClass fluid, final int tintIndex) {
+            this(registryId, List.of(propertyString), mapColor, transparency, glass, glass ? (propertyString.contains("stained") ? 50 : 25) : 0, fluid, false, false, tintIndex);
+        }
+        BlockStateDescriptor toProto(final int id) { return BlockStateDescriptor.newBuilder().setId(id).setMapColor(mapColor).setTransparency(transparency).setGlass(glass).setGlassAlphaPercent(glassAlphaPercent).setFluid(fluid).setAir(air).setIterateUpBase(iterateUpBase).setTintIndex(tintIndex).build(); }
     }
     public record BiomeDescriptorInput(String registryId, int grassColor, int foliageColor, int waterColor, int tintIndex) {
         public BiomeDescriptorInput { Objects.requireNonNull(registryId); }

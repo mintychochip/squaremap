@@ -15,16 +15,19 @@ import org.checkerframework.checker.nullness.qual.NonNull;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.checkerframework.framework.qual.DefaultQualifier;
 import xyz.jpenilla.squaremap.common.WorldManager;
+import xyz.jpenilla.squaremap.common.bridge.state.DirtyChunkPublisher;
 import xyz.jpenilla.squaremap.common.data.ChunkCoordinate;
 import xyz.jpenilla.squaremap.fabric.event.MapUpdateEvents;
 
 @DefaultQualifier(NonNull.class)
 public final class FabricMapUpdates {
     private final WorldManager worldManager;
+    private final DirtyChunkPublisher dirtyChunks;
 
     @Inject
-    private FabricMapUpdates(final WorldManager worldManager) {
+    private FabricMapUpdates(final WorldManager worldManager, final DirtyChunkPublisher dirtyChunks) {
         this.worldManager = worldManager;
+        this.dirtyChunks = dirtyChunks;
     }
 
     public void register() {
@@ -76,6 +79,6 @@ public final class FabricMapUpdates {
     }
 
     private void markChunk(final ServerLevel level, final ChunkCoordinate chunk) {
-        this.worldManager.getWorldIfEnabled(level).ifPresent(world -> world.chunkModified(chunk));
+        this.worldManager.getWorldIfEnabled(level).ifPresent(world -> this.dirtyChunks.publish(world, chunk));
     }
 }

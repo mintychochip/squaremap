@@ -144,6 +144,7 @@ fn replacement_views_preserve_ui_world_names_marker_shapes_timestamps_and_icon_p
     squaremap_server::views::apply_replacement(&root, &icon_envelope).unwrap();
     let png = root.latest_bytes("images/icon/registered/pixel.png").unwrap();
     assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+    assert!(!temp.path().join("tiles/icons.json").exists());
     assert_eq!(root.canonical_state().unwrap().icons_revision, 1);
     assert!(squaremap_server::views::apply_replacement(&root, &icon_envelope).is_err());
     let empty_icons = Envelope {
@@ -184,7 +185,8 @@ fn checked_in_legacy_fixtures_are_consumed() {
         ..Default::default()
     };
     squaremap_server::views::apply_replacement(&root, &production_icons).unwrap();
-    let actual_icons: serde_json::Value = serde_json::from_slice(&root.latest_bytes("tiles/icons.json").unwrap()).unwrap();
+    assert!(!temp.path().join("tiles/icons.json").exists());
+    let actual_icons: serde_json::Value = serde_json::from_slice(&root.canonical_state().unwrap().icons).unwrap();
     assert_eq!(icons, actual_icons);
     let png = root.latest_bytes("images/icon/registered/spawn.png").unwrap();
     assert_eq!(decode_rgba_png(&png), (2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]));
@@ -292,8 +294,9 @@ fn replacement_views_sort_worlds_players_markers_and_icons() {
         ..Default::default()
     };
     squaremap_server::views::apply_replacement(&root, &icons).unwrap();
-    let icon_json = String::from_utf8(root.latest_bytes("tiles/icons.json").unwrap()).unwrap();
+    let icon_json = String::from_utf8(root.canonical_state().unwrap().icons.clone()).unwrap();
     assert!(icon_json.find("\"id\":\"a\"").unwrap() < icon_json.find("\"id\":\"z\"").unwrap());
+    assert!(!temp.path().join("tiles/icons.json").exists());
 
     let players = Envelope {
         payload: Some(envelope::Payload::PlayersReplace(PlayersReplace {

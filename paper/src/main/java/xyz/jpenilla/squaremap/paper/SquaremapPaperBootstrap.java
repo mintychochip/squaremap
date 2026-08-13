@@ -11,6 +11,7 @@ import org.checkerframework.checker.nullness.qual.NonNull;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.checkerframework.framework.qual.DefaultQualifier;
 import xyz.jpenilla.squaremap.common.inject.SquaremapModulesBuilder;
+import xyz.jpenilla.squaremap.common.config.Config;
 import xyz.jpenilla.squaremap.common.util.Util;
 import xyz.jpenilla.squaremap.paper.data.PaperMapWorld;
 import xyz.jpenilla.squaremap.paper.inject.module.PaperModule;
@@ -35,6 +36,7 @@ public final class SquaremapPaperBootstrap extends JavaPlugin {
         if (!this.checkCompatibility()) {
             return;
         }
+        Config.reload(this.getDataFolder().toPath());
         final Injector injector = Guice.createInjector(
             SquaremapModulesBuilder.forPlatform(SquaremapPaper.class)
                 .mapWorld(PaperMapWorld.class)

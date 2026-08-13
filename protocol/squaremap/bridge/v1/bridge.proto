@@ -205,6 +205,8 @@ message WorldSettings {
   sint32 worldborder_marker_layer_priority = 45;
   sint32 worldborder_marker_z_index = 46;
   repeated VisibilityLimit visibility_limits = 47;
+  // BiomeManager.obfuscateSeed(level.getSeed()), carried as two's-complement bits.
+  fixed64 biome_zoom_seed = 48;
 }
 
 message LocaleSettings {
@@ -290,6 +292,8 @@ message BlockStateDescriptor {
   uint32 glass_alpha_percent = 7;
   // True for the actual block state represented by this descriptor.
   bool air = 8;
+  // True when this block is an iterate-up base block for this world.
+  bool iterate_up_base = 9;
 }
 
 message BiomeDescriptor {
@@ -611,6 +615,7 @@ message ControlRequest {
   sint32 center_x = 3;
   sint32 center_z = 4;
   uint32 radius = 5;
+  repeated ChunkCoordinate coordinates = 6;
 }
 
 enum BackendResultCode {

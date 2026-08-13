@@ -40,6 +40,9 @@ public final class SpongeModule extends AbstractModule {
         this.game = game;
         this.channelManager = channelManager;
     }
+    public Path dataDirectory() {
+        return this.dataDirectory;
+    }
 
     @Override
     protected void configure() {

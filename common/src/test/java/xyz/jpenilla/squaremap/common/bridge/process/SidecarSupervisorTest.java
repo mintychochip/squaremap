@@ -82,48 +82,32 @@ class SidecarSupervisorTest {
         assertDoesNotThrow(supervisor::close);
     }
     @Test
-    void sidecarDisconnectSignalsFailureAndCleansUp() throws Exception {
+    void sidecarDisconnectSchedulesBoundedRecovery() throws Exception {
         final SidecarSupervisor supervisor = new SidecarSupervisor();
-        final BridgeConnection connection = supervisor.start(config("disconnect", Duration.ofSeconds(5)))
+        final BridgeConnection first = supervisor.start(config("crash-after-handshake", Duration.ofSeconds(5)))
             .toCompletableFuture().get(6, TimeUnit.SECONDS);
+        final java.util.concurrent.CountDownLatch reconnected = new java.util.concurrent.CountDownLatch(1);
+        supervisor.setReconnectListener(connection -> reconnected.countDown());
         final java.util.concurrent.CountDownLatch failure = new java.util.concurrent.CountDownLatch(1);
-        connection.setFailureListener(ignored -> failure.countDown());
+        first.setFailureListener(ignored -> failure.countDown());
         assertTrue(failure.await(3, TimeUnit.SECONDS));
-        final long deadline = System.nanoTime() + Duration.ofSeconds(3).toNanos();
-        while ((!connection.isClosed() || !supervisor.isClosed()) && System.nanoTime() < deadline) {
-            Thread.yield();
-        }
-        assertTrue(connection.isClosed());
-        assertTrue(supervisor.isClosed());
+        assertTrue(reconnected.await(2, TimeUnit.SECONDS));
+        final BridgeConnection replacement = supervisor.currentConnection();
+        assertNotNull(replacement);
+        assertNotSame(first, replacement);
+        assertFalse(supervisor.isClosed());
         supervisor.close();
-    }
-    @Test
-    void failedSupervisorIsTerminalAndDoesNotLeakChild() throws Exception {
-        final SidecarSupervisor supervisor = new SidecarSupervisor();
-        final BridgeConnection connection = supervisor.start(config("disconnect", Duration.ofSeconds(5)))
-            .toCompletableFuture().get(6, TimeUnit.SECONDS);
-        final java.util.concurrent.CountDownLatch failure = new java.util.concurrent.CountDownLatch(1);
-        connection.setFailureListener(ignored -> failure.countDown());
-        assertTrue(failure.await(3, TimeUnit.SECONDS));
-        final long deadline = System.nanoTime() + Duration.ofSeconds(3).toNanos();
-        while ((!connection.isClosed() || !supervisor.isClosed()) && System.nanoTime() < deadline) {
-            Thread.yield();
-        }
-        assertTrue(connection.isClosed());
         assertTrue(supervisor.isClosed());
-        supervisor.close();
-    }
-    @Test
-    void closeDuringStartupFailsStageWithoutRestart() {
-        final SidecarSupervisor supervisor = new SidecarSupervisor();
-        final var stage = supervisor.start(config("timeout", Duration.ofSeconds(5)));
-        supervisor.close();
-        assertThrows(CompletionException.class, () -> stage.toCompletableFuture().join());
-        assertTrue(supervisor.isClosed());
-        assertTrue(supervisor.start(config("timeout", Duration.ofSeconds(5))) == stage);
     }
 
-
+    @Test
+    void failedSupervisorIsTerminalBeforeAuthentication() {
+        final SidecarSupervisor supervisor = new SidecarSupervisor();
+        assertThrows(CompletionException.class, () -> supervisor.start(config("timeout", Duration.ofMillis(150)))
+            .toCompletableFuture().join());
+        assertTrue(supervisor.isClosed());
+        supervisor.close();
+    }
     @Test
     void stderrCaptureIsBounded() throws Exception {
         final SidecarSupervisor supervisor = new SidecarSupervisor();

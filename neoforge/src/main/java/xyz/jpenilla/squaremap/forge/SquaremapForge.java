@@ -29,6 +29,7 @@ import xyz.jpenilla.squaremap.common.data.MapWorldInternal;
 import xyz.jpenilla.squaremap.common.inject.SquaremapModulesBuilder;
 import xyz.jpenilla.squaremap.common.bridge.state.BridgeStatePublisher;
 import xyz.jpenilla.squaremap.forge.data.ForgeMapWorld;
+import xyz.jpenilla.squaremap.common.config.Config;
 import xyz.jpenilla.squaremap.forge.event.ForgeMapUpdates;
 import xyz.jpenilla.squaremap.forge.inject.module.ForgeModule;
 import xyz.jpenilla.squaremap.forge.network.ForgeNetworking;
@@ -44,6 +45,7 @@ public final class SquaremapForge implements SquaremapPlatform {
     private @Nullable BridgeStatePublisher statePublisher;
 
     public SquaremapForge(final IEventBus modEventBus, final ModContainer modContainer) {
+        Config.reload(new java.io.File("squaremap").toPath());
         this.injector = Guice.createInjector(
             SquaremapModulesBuilder.forPlatform(this)
                 .mapWorld(ForgeMapWorld.class)

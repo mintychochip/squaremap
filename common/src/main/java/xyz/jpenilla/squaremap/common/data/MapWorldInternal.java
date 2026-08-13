@@ -175,14 +175,15 @@ public abstract class MapWorldInternal implements MapWorld {
         this.imageIOExecutor.saveImage(image);
     }
 
+    public boolean shouldRenderDirtyChunk(final ChunkCoordinate coord) {
+        return this.config().BACKGROUND_RENDER_ENABLED
+            && this.visibilityLimit().shouldRenderChunk(coord);
+    }
+
     public void chunkModified(final ChunkCoordinate coord) {
-        if (!this.config().BACKGROUND_RENDER_ENABLED) {
-            return;
+        if (this.shouldRenderDirtyChunk(coord)) {
+            this.modifiedChunks.add(coord);
         }
-        if (!this.visibilityLimit().shouldRenderChunk(coord)) {
-            return;
-        }
-        this.modifiedChunks.add(coord);
     }
 
     public boolean hasModifiedChunks() {

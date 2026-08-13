@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/squaremap-protocol", "crates/squaremap-render", "crates/squaremap-server", "crates/squaremap-state"]
+members = ["crates/squaremap-protocol", "crates/squaremap-render", "crates/squaremap-server", "crates/squaremap-state", "crates/squaremap-compare"]
 
 [workspace.package]
 edition = "2024"

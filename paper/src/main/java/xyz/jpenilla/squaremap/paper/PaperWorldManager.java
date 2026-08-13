@@ -1,6 +1,7 @@
 package xyz.jpenilla.squaremap.paper;
 
 import com.google.inject.Inject;
+import com.google.inject.Provider;
 import com.google.inject.Singleton;
 import java.util.Optional;
 import net.minecraft.server.level.ServerLevel;
@@ -11,6 +12,7 @@ import xyz.jpenilla.squaremap.common.ServerAccess;
 import xyz.jpenilla.squaremap.common.WorldManagerImpl;
 import xyz.jpenilla.squaremap.common.config.ConfigManager;
 import xyz.jpenilla.squaremap.common.data.DirectoryProvider;
+import xyz.jpenilla.squaremap.common.backend.BackendControllerSupport;
 import xyz.jpenilla.squaremap.common.data.MapWorldInternal;
 import xyz.jpenilla.squaremap.paper.util.CraftBukkitHelper;
 import xyz.jpenilla.squaremap.paper.util.WorldNameToKeyMigration;
@@ -25,9 +27,11 @@ public final class PaperWorldManager extends WorldManagerImpl {
         final MapWorldInternal.Factory factory,
         final ServerAccess serverAccess,
         final DirectoryProvider directoryProvider,
-        final ConfigManager configManager
+        final ConfigManager configManager,
+        final Provider<BackendControllerSupport> backendSupport,
+        final Provider<xyz.jpenilla.squaremap.common.bridge.snapshot.SnapshotRequestHandler> snapshotHandler
     ) {
-        super(factory, serverAccess, configManager);
+        super(factory, serverAccess, configManager, backendSupport, snapshotHandler);
         this.directoryProvider = directoryProvider;
     }
 

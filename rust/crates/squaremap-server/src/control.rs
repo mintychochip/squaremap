@@ -40,7 +40,7 @@ fn result(code: BackendResultCode, identity: Option<&WorldIdentity>) -> ControlR
 mod tests {
     use super::*;
     fn world(namespace: &str, value: &str, epoch: u64) -> WorldIdentity { WorldIdentity { namespace: namespace.into(), value: value.into(), epoch } }
-    fn request(kind: ControlKind, identity: Option<WorldIdentity>) -> ControlRequest { ControlRequest { kind: kind as i32, world: identity, center_x: 0, center_z: 0, radius: 4 } }
+    fn request(kind: ControlKind, identity: Option<WorldIdentity>) -> ControlRequest { ControlRequest { kind: kind as i32, world: identity, center_x: 0, center_z: 0, radius: 4, coordinates: Vec::new() } }
 
     #[test]
     fn controls_are_unavailable_without_fake_state_mutation() {

@@ -69,7 +69,20 @@ public final class SidecarSupervisor implements AutoCloseable {
     private LifecycleState lifecycleState = LifecycleState.NEW;
     private volatile boolean closed;
     private ScheduledFuture<?> timeoutTask;
+    private ScheduledFuture<?> restartTask;
+    private BridgeBootstrapConfig restartConfig;
+    private final java.util.concurrent.CopyOnWriteArrayList<Consumer<BridgeConnection>> reconnectListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private int restartStarts;
+    private long restartWindowStartNanos;
+    private long healthySinceNanos;
 
+    static final Duration[] RESTART_DELAYS = {
+        Duration.ofSeconds(1), Duration.ofSeconds(2), Duration.ofSeconds(4),
+        Duration.ofSeconds(8), Duration.ofSeconds(16)
+    };
+    static final int MAX_RESTARTS_PER_WINDOW = 5;
+    static final Duration RESTART_WINDOW = Duration.ofMinutes(10);
+    static final Duration HEALTHY_RESET = Duration.ofMinutes(10);
     public SidecarSupervisor() {
         this(new SecureRandom());
     }
@@ -85,7 +98,7 @@ public final class SidecarSupervisor implements AutoCloseable {
         this.scheduler = Executors.newSingleThreadScheduledExecutor(factory);
     }
 
-    /** Starts exactly one sidecar; subsequent calls return the same stage. */
+    /** Starts one sidecar and recovers boundedly after an authenticated failure. */
     public CompletionStage<BridgeConnection> start(final BridgeBootstrapConfig config) {
         Objects.requireNonNull(config, "config");
         synchronized (this.lock) {
@@ -104,10 +117,14 @@ public final class SidecarSupervisor implements AutoCloseable {
                 this.startFuture.complete(this.connection);
                 return this.startFuture;
             }
+            this.restartConfig = config;
             this.lifecycleState = LifecycleState.STARTING;
             this.executor.execute(() -> this.launch(config));
             return this.startFuture;
         }
+    }
+    public void setReconnectListener(final Consumer<BridgeConnection> listener) {
+        this.reconnectListeners.add(Objects.requireNonNull(listener, "listener"));
     }
     public BridgePublisher.PublishResult publish(final BridgeEvent event) {
         synchronized (this.lock) {
@@ -146,6 +163,12 @@ public final class SidecarSupervisor implements AutoCloseable {
         }
     }
 
+    long currentProcessPidForTests() {
+        synchronized (this.lock) {
+            return this.process == null ? -1L : this.process.pid();
+        }
+    }
+
     @Override
     public void close() {
         final ManagedConnection active;
@@ -155,6 +178,11 @@ public final class SidecarSupervisor implements AutoCloseable {
             }
             this.lifecycleState = LifecycleState.CLOSED;
             this.closed = true;
+            final ScheduledFuture<?> restart = this.restartTask;
+            if (restart != null) {
+                restart.cancel(false);
+                this.restartTask = null;
+            }
             active = this.connection;
         }
         if (active != null) {
@@ -245,14 +273,20 @@ public final class SidecarSupervisor implements AutoCloseable {
                 hello.getSequence() + 2L
             );
             synchronized (this.lock) {
+                this.healthySinceNanos = System.nanoTime();
+            }
+            synchronized (this.lock) {
                 if (this.lifecycleState != LifecycleState.STARTING || this.closed) {
                     closeQuietly(accepted);
                     throw new IOException("supervisor closed");
                 }
                 this.connection = managed;
                 this.lifecycleState = LifecycleState.READY;
-                this.startFuture.complete(managed);
+                if (this.startFuture != null && !this.startFuture.isDone()) {
+                    this.startFuture.complete(managed);
+                }
             }
+            this.reconnectListeners.forEach(listener -> listener.accept(managed));
             this.executor.execute(managed::readFrames);
             final ScheduledFuture<?> timeout = this.timeoutTask;
             if (timeout != null) {
@@ -309,39 +343,65 @@ public final class SidecarSupervisor implements AutoCloseable {
 
     private void failStart(final Throwable failure) {
         final ManagedConnection active;
+        final boolean authenticatedFailure;
+        final boolean terminal;
         synchronized (this.lock) {
-            if (this.lifecycleState != LifecycleState.STARTING && this.lifecycleState != LifecycleState.READY) {
-                return;
-            }
-            this.lifecycleState = LifecycleState.FAILED;
-            this.closed = true;
+            if (this.lifecycleState != LifecycleState.STARTING && this.lifecycleState != LifecycleState.READY) return;
+            authenticatedFailure = this.connection != null && this.healthySinceNanos != 0L;
             active = this.connection;
             this.connection = null;
+            terminal = !authenticatedFailure || this.closed || this.restartConfig == null || !this.scheduleRestartLocked();
+            if (terminal) {
+                this.lifecycleState = LifecycleState.FAILED;
+                this.closed = true;
+            } else {
+                this.lifecycleState = LifecycleState.STARTING;
+            }
             if (active != null) active.closed.set(true);
         }
         final ScheduledFuture<?> timeout = this.timeoutTask;
-        if (timeout != null) {
-            timeout.cancel(false);
-        }
+        if (timeout != null) timeout.cancel(false);
+        if (active != null) active.publisher.close();
         this.cleanup(false, Duration.ZERO);
-        if (active != null) {
-            active.publisher.close();
-        }
-        final CompletableFuture<BridgeConnection> future = this.startFuture;
-        if (future != null && !future.isDone()) {
-            future.completeExceptionally(failure);
+        if (terminal) {
+            final CompletableFuture<BridgeConnection> future = this.startFuture;
+            if (future != null && !future.isDone()) future.completeExceptionally(failure);
         }
     }
 
-    private void cleanup(final boolean graceful, final Duration grace) {
-        if (!this.cleaned.compareAndSet(false, true)) {
-            return;
+    private boolean scheduleRestartLocked() {
+        final long now = System.nanoTime();
+        if (this.restartWindowStartNanos == 0L || now - this.restartWindowStartNanos >= RESTART_WINDOW.toNanos()) {
+            this.restartWindowStartNanos = now;
+            this.restartStarts = 0;
         }
+        if (this.healthySinceNanos != 0L && now - this.healthySinceNanos >= HEALTHY_RESET.toNanos()) {
+            this.restartStarts = 0;
+            this.restartWindowStartNanos = now;
+        }
+        if (this.restartStarts >= MAX_RESTARTS_PER_WINDOW) return false;
+        final int attempt = this.restartStarts++;
+        final Duration delay = RESTART_DELAYS[Math.min(attempt, RESTART_DELAYS.length - 1)];
+        final BridgeBootstrapConfig config = this.restartConfig;
+        this.restartTask = this.scheduler.schedule(() -> {
+            synchronized (this.lock) {
+                if (this.closed || this.lifecycleState != LifecycleState.STARTING) return;
+                this.cleaned.set(false);
+            }
+            this.executor.execute(() -> this.launch(config));
+        }, delay.toNanos(), TimeUnit.NANOSECONDS);
+        return true;
+    }
+    private void cleanup(final boolean graceful, final Duration grace) {
+        if (!this.cleaned.compareAndSet(false, true)) return;
         closeQuietly(this.listener);
         closeQuietly(this.socket);
         final Process child;
         synchronized (this.lock) {
             child = this.process;
+            this.listener = null;
+            this.socket = null;
+            this.process = null;
         }
         if (child != null) {
             closeQuietly(child.getOutputStream());
@@ -358,15 +418,14 @@ public final class SidecarSupervisor implements AutoCloseable {
             closeQuietly(child.getInputStream());
             closeQuietly(child.getErrorStream());
         }
-        this.scheduler.shutdownNow();
-        this.executor.shutdownNow();
+        if (this.lifecycleState == LifecycleState.CLOSED || this.lifecycleState == LifecycleState.FAILED) {
+            this.scheduler.shutdownNow();
+            this.executor.shutdownNow();
+        }
     }
-
     private void closeAccepted(final ManagedConnection accepted) {
         synchronized (this.lock) {
-            if (!accepted.closed.compareAndSet(false, true)) {
-                return;
-            }
+            if (!accepted.closed.compareAndSet(false, true)) return;
             this.lifecycleState = LifecycleState.CLOSED;
             this.closed = true;
         }
@@ -378,11 +437,8 @@ public final class SidecarSupervisor implements AutoCloseable {
                 .setSequence(2)
                 .setShutdown(Shutdown.newBuilder().setReason(ShutdownReason.SHUTDOWN_REASON_REQUESTED))
                 .build();
-            if (accepted.socket != null && accepted.socket.isOpen()) {
-                FrameCodec.write(accepted.socket, shutdown);
-            }
+            if (accepted.socket != null && accepted.socket.isOpen()) FrameCodec.write(accepted.socket, shutdown);
         } catch (final IOException ignored) {
-            // Forced process termination below is the fallback when the bridge is unavailable.
         } finally {
             closeQuietly(accepted.socket);
             this.cleanup(true, accepted.shutdownGrace);

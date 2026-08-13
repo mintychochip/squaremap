@@ -7,13 +7,81 @@ on:
   release:
     types: [ released ]
 jobs:
+  rust-backend:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+          - target: x86_64-apple-darwin
+            runner: macos-13
+          - target: aarch64-apple-darwin
+            runner: macos-14
+    steps:
+      - name: "checkout git repository"
+        uses: actions/checkout@v7
+      - name: "setup rust"
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: "build Rust backend"
+        run: cargo build --manifest-path rust/Cargo.toml -p squaremap-server --release --target ${{ matrix.target }}
+      - name: "stage Rust backend"
+        shell: bash
+        run: |
+          mkdir -p "rust/backend/${{ matrix.target }}"
+          binary="squaremap-server${{ endsWith(matrix.target, '-windows-msvc') && '.exe' || '' }}"
+          cp "rust/target/${{ matrix.target }}/release/$binary" \
+            "rust/backend/${{ matrix.target }}/squaremap-server-${{ matrix.target }}${{ endsWith(matrix.target, '-windows-msvc') && '.exe' || '' }}"
+      - name: "upload Rust backend"
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-backend-${{ matrix.target }}
+          path: rust/backend/${{ matrix.target }}/
+  publish-rust-backends:
+    if: ${{ github.event_name == 'release' }}
+    needs: rust-backend
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: "download Rust backend artifacts"
+        uses: actions/download-artifact@v8
+        with:
+          pattern: rust-backend-*
+          path: rust/backend
+          merge-multiple: false
+      - name: "publish Rust backend release assets"
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: rust/backend/**/squaremap-server*
+          fail_on_unmatched_files: true
   build:
-    # Only run on PRs if the source branch is on someone else's repo
+    needs: rust-backend
     if: ${{ github.event_name != 'pull_request' || github.repository != github.event.pull_request.head.repo.full_name }}
     runs-on: ubuntu-latest
     steps:
       - name: "checkout git repository"
         uses: actions/checkout@v7
+      - name: "download Rust backend artifacts"
+        uses: actions/download-artifact@v8
+        with:
+          pattern: rust-backend-x86_64-unknown-linux-gnu
+          path: rust/backend
+          merge-multiple: false
+      - name: "stage host Rust backend"
+        shell: bash
+        run: |
+          mkdir -p rust/target/release
+          cp rust/backend/rust-backend-x86_64-unknown-linux-gnu/squaremap-server-x86_64-unknown-linux-gnu \
+            rust/target/release/squaremap-server
       - name: "setup bun"
         uses: oven-sh/setup-bun@v2
       - name: "install bun dependencies"
@@ -88,5 +156,5 @@ jobs:
       - name: "upload artifacts"
         uses: actions/upload-artifact@v7
         with:
-            name: artifacts
-            path: "build/libs/*.jar"
+          name: artifacts
+          path: "build/libs/*.jar"

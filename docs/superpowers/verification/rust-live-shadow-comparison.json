@@ -1,0 +1,13 @@
+{
+  "paper_version": "26.2-112",
+  "mode": "JAVA_PRIMARY_RUST_SHADOW",
+  "java_http": "http://127.0.0.1:8080",
+  "rust_output_root": "paper/run/rust-output",
+  "lifecycle_steps": ["startup", "HTTP capture", "shadow-churn commands", "post-churn HTTP capture", "quiescence", "clean shutdown"],
+  "compared_paths": 2,
+  "mismatch_count": 0,
+  "mismatches": [],
+  "comparison_command": "cargo run --manifest-path rust/Cargo.toml -p squaremap-compare -- compare-output --java /tmp/live-java-root --rust /tmp/live-rust-root --report /tmp/live-report.json",
+  "scope": "captured settings.json and overworld markers.json snapshots before/after the exercised lifecycle; not a full block/player/reload/fault parity run",
+  "passed": true
+}

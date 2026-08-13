@@ -14,6 +14,8 @@ png.workspace = true
 squaremap-protocol = { path = "../squaremap-protocol" }
 zstd.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 hex.workspace = true

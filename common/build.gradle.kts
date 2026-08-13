@@ -126,41 +126,84 @@ val buildFrontend = tasks.register<BuildFrontend>("buildFrontend") {
     listOf("bash", "-c", "bun run build")
   }
 }
-val generateBackendManifest = tasks.register("generateBackendManifest") {
-  val output = layout.buildDirectory.file("generated-resources/squaremap-backends.json")
-  val backendBinary = rootProject.layout.projectDirectory.file("rust/target/release/squaremap-server")
-  val pluginVersion = project.version.toString()
-  inputs.file(backendBinary)
-  outputs.file(output)
-  doLast {
-    check(backendBinary.asFile.isFile) {
-      "Build the Rust backend first: ${backendBinary.asFile}"
+val backendArtifactDirectory = layout.buildDirectory.dir("backend")
+val backendTargets = listOf(
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-pc-windows-msvc",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+)
+val backendBinary = backendArtifactDirectory.map { it }
+abstract class StageBackendBinary : DefaultTask() {
+  @get:InputDirectory abstract val sourceDirectory: DirectoryProperty
+  @get:OutputDirectory abstract val destinationDirectory: DirectoryProperty
+  @get:Input abstract val targets: ListProperty<String>
+  @TaskAction fun stage() {
+    val source = sourceDirectory.get().asFile
+    check(source.isDirectory) { "Download Rust backend artifacts before packaging: $source" }
+    val destination = destinationDirectory.get().asFile
+    destination.mkdirs()
+    targets.get().forEach { target ->
+      val sourceName = "squaremap-server-$target${if (target.contains("windows")) ".exe" else ""}"
+      val artifact = source.resolve("rust-backend-$target").resolve(sourceName)
+      check(artifact.isFile) { "Missing Rust backend artifact for $target: $artifact" }
+      val targetDirectory = destination.resolve(target)
+      targetDirectory.mkdirs()
+      artifact.copyTo(targetDirectory.resolve(sourceName), overwrite = true)
     }
-    val bytes = backendBinary.asFile.readBytes()
-    val digest = MessageDigest.getInstance("SHA-256")
-      .digest(bytes)
-      .joinToString("") { byte: Byte -> "%02x".format(byte.toInt() and 0xff) }
-    val target = when {
-      System.getProperty("os.name").startsWith("Windows") -> "x86_64-pc-windows-msvc"
-      System.getProperty("os.name").startsWith("Mac") && System.getProperty("os.arch") == "aarch64" -> "aarch64-apple-darwin"
-      System.getProperty("os.name").startsWith("Mac") -> "x86_64-apple-darwin"
-      System.getProperty("os.arch") == "aarch64" -> "aarch64-unknown-linux-gnu"
-      else -> "x86_64-unknown-linux-gnu"
-    }
-    val root = output.get().asFile
+  }
+}
+val stageBackendBinary = tasks.register<StageBackendBinary>("stageBackendBinary") {
+  sourceDirectory = rootProject.layout.projectDirectory.dir("rust/backend")
+  destinationDirectory = backendArtifactDirectory
+  targets = backendTargets
+}
+abstract class GenerateBackendManifest : DefaultTask() {
+  @get:InputDirectory abstract val binariesDirectory: DirectoryProperty
+  @get:OutputFile abstract val manifestFile: RegularFileProperty
+  @get:Input abstract val targets: ListProperty<String>
+  @get:Input abstract val artifactBaseUrl: Property<String>
+  @get:Input abstract val pluginVersion: Property<String>
+  @TaskAction fun generate() {
+    val root = manifestFile.get().asFile
     root.parentFile.mkdirs()
-    root.writeText("""{
-  "pluginVersion": "$pluginVersion",
-  "targets": {
-    "$target": {
-      "url": "file://${backendBinary.asFile.absolutePath.replace("\\", "/")}",
+    val binaries = targets.get().map { target ->
+      val binary = binariesDirectory.get().asFile.resolve(target).resolve("squaremap-server-$target${if (target.contains("windows")) ".exe" else ""}")
+      check(binary.isFile) { "Missing Rust backend artifact for $target: $binary" }
+      target to binary
+    }
+    val digests = binaries.map { (_, binary) ->
+      MessageDigest.getInstance("SHA-256").digest(binary.readBytes()).joinToString("") { byte: Byte -> "%02x".format(byte.toInt() and 0xff) }
+    }
+    check(digests.distinct().size == digests.size) {
+      "Rust backend artifacts must have distinct SHA-256 digests; placeholder copies cannot form a release manifest"
+    }
+    val entries = binaries.joinToString(",\n") { (target, binary) ->
+      val bytes = binary.readBytes()
+      val digest = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { byte: Byte -> "%02x".format(byte.toInt() and 0xff) }
+      """    "$target": {
+      "url": "${artifactBaseUrl.get()}${binary.name}",
       "length": "${bytes.size}",
       "sha256": "$digest"
+    }"""
     }
+    root.writeText("""{
+  "pluginVersion": "${pluginVersion.get()}",
+  "targets": {
+$entries
   }
 }
 """)
   }
+}
+val generateBackendManifest = tasks.register<GenerateBackendManifest>("generateBackendManifest") {
+  manifestFile = layout.buildDirectory.file("generated-resources/squaremap-backends.json")
+  binariesDirectory = backendArtifactDirectory
+  targets = backendTargets
+  artifactBaseUrl = providers.gradleProperty("squaremap.backendArtifactBaseUrl").orElse(providers.provider { "https://github.com/jpenilla/squaremap/releases/download/v${project.version}/" })
+  pluginVersion = project.version.toString()
+  dependsOn(stageBackendBinary)
 }
 tasks.processResources {
   duplicatesStrategy = DuplicatesStrategy.FAIL

@@ -115,6 +115,25 @@ impl Repository {
             Ok(true)
         }).await
     }
+    /// Clears durable dirty work and render jobs while retaining the configured world epoch.
+    pub async fn reset_world(&self, world: &WorldId) -> Result<(), RepositoryError> {
+        world.validate()?;
+        let world = world.clone();
+        self.blocking(move |connection| {
+            let transaction = connection.transaction()?;
+            ensure_current_world(&transaction, &world)?;
+            transaction.execute(
+                "DELETE FROM dirty_chunks WHERE namespace=?1 AND value=?2 AND epoch=?3",
+                params![world.namespace, world.value, world.epoch as i64],
+            )?;
+            transaction.execute(
+                "DELETE FROM render_jobs WHERE namespace=?1 AND value=?2 AND epoch=?3",
+                params![world.namespace, world.value, world.epoch as i64],
+            )?;
+            transaction.commit()?;
+            Ok(())
+        }).await
+    }
 
     pub async fn mark_dirty(&self, world: &WorldId, coordinate: ChunkCoordinate, revision: u64, session_id: &[u8], sequence: u64) -> Result<bool, RepositoryError> {
         world.validate()?;
@@ -133,8 +152,59 @@ impl Repository {
         }).await
     }
 
-    pub async fn complete_dirty(&self, world: &WorldId, coordinate: ChunkCoordinate, revision: u64) -> Result<bool, RepositoryError> {
+    /// Returns at most `limit` current dirty rows, interleaved by per-world ordinal.
+    pub async fn dirty_page(&self, limit: usize) -> Result<Vec<DirtyChunk>, RepositoryError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.blocking(move |connection| {
+            let mut statement = connection.prepare(
+                "SELECT length(CAST(namespace AS BLOB)),COALESCE(substr(CAST(namespace AS BLOB),1,4097),zeroblob(0)),\
+                        length(CAST(value AS BLOB)),COALESCE(substr(CAST(value AS BLOB),1,4097),zeroblob(0)),\
+                        epoch,x,z,revision \
+                 FROM (\
+                    SELECT dirty_chunks.namespace AS namespace,dirty_chunks.value AS value,\
+                           dirty_chunks.epoch AS epoch,dirty_chunks.x AS x,dirty_chunks.z AS z,\
+                           dirty_chunks.revision AS revision,\
+                           ROW_NUMBER() OVER (PARTITION BY dirty_chunks.namespace,dirty_chunks.value,dirty_chunks.epoch \
+                                              ORDER BY dirty_chunks.x,dirty_chunks.z) AS ordinal \
+                    FROM dirty_chunks INNER JOIN worlds USING(namespace,value) \
+                    WHERE worlds.epoch >= 0 AND dirty_chunks.epoch=worlds.epoch\
+                 ) ORDER BY ordinal,namespace,value,epoch,x,z LIMIT ?1",
+            )?;
+            let rows = statement.query_map(params![limit], |row| {
+                let world = WorldId::new(
+                    bounded_text(row.get(0)?, row.get(1)?, MAX_TEXT_BYTES)?,
+                    bounded_text(row.get(2)?, row.get(3)?, MAX_TEXT_BYTES)?,
+                    checked_u64(row.get(4)?, "dirty epoch").map_err(|_| rusqlite::Error::InvalidQuery)?,
+                );
+                world.validate().map_err(|_| rusqlite::Error::InvalidQuery)?;
+                Ok(DirtyChunk {
+                    world,
+                    coordinate: ChunkCoordinate { x: row.get(5)?, z: row.get(6)? },
+                    revision: checked_u64(row.get(7)?, "dirty revision")
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                })
+            })?.collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        }).await
+    }
+
+    pub async fn world_is_current(&self, world: &WorldId) -> Result<bool, RepositoryError> {
         world.validate()?;
+        let world = world.clone();
+        self.blocking(move |connection| {
+            let current: Option<i64> = connection.query_row(
+                "SELECT epoch FROM worlds WHERE namespace=?1 AND value=?2",
+                params![world.namespace, world.value],
+                |row| row.get(0),
+            ).optional()?;
+            Ok(current == Some(checked_i64(world.epoch, "world epoch")?))
+        }).await
+    }
+
+    pub async fn complete_dirty(&self, world: &WorldId, coordinate: ChunkCoordinate, revision: u64) -> Result<bool, RepositoryError> {
         let revision = checked_i64(revision, "dirty revision")?;
         let world = world.clone();
         self.blocking(move |connection| {
@@ -186,7 +256,13 @@ impl Repository {
             if decode_kind(kind).is_err() || kind != job.kind as i64 { return Err(RepositoryError::Schema("render job kind does not match ID".into())); }
             if decode_state(state).is_err() || progress < 0 || payload.len() > MAX_PAYLOAD_BYTES { return Err(RepositoryError::Schema("existing render job row is malformed".into())); }
             let exact = state == job.state as i64 && progress == job.completed_chunks as i64 && payload == job.payload;
-            if (state == JobState::Completed as i64 || state == JobState::Failed as i64) && !exact { return Err(RepositoryError::Schema("terminal render job cannot be changed".into())); }
+            if (state == JobState::Completed as i64
+                || state == JobState::Failed as i64
+                || state == JobState::Cancelled as i64)
+                && !exact
+            {
+                return Err(RepositoryError::Schema("terminal render job cannot be changed".into()));
+            }
             if (job.completed_chunks as i64) < progress { return Err(RepositoryError::Schema("render job progress cannot decrease".into())); }
             if exact { transaction.commit()?; return Ok(()); }
             if job.kind == JobKind::Resume && job.id == deterministic_job_id(&job.world, JobKind::Resume) {
@@ -195,6 +271,41 @@ impl Repository {
             transaction.execute("UPDATE render_jobs SET state=?1,payload=?2,completed_chunks=?3 WHERE id=?4 AND namespace=?5 AND value=?6 AND epoch=?7", params![job.state as i64, job.payload, job.completed_chunks as i64, job.id, job.world.namespace, job.world.value, job.world.epoch as i64])?;
             transaction.commit()?;
             Ok(())
+        }).await
+    }
+
+    pub async fn load_render_job(&self, id: &[u8]) -> Result<Option<RenderJob>, RepositoryError> {
+        if id.is_empty() || id.len() > MAX_JOB_ID_BYTES {
+            return Err(ModelError::Bounds("render job ID").into());
+        }
+        let id = id.to_vec();
+        self.blocking(move |connection| {
+            let row = connection.query_row(
+                "SELECT length(CAST(id AS BLOB)),COALESCE(substr(CAST(id AS BLOB),1,33),zeroblob(0)),\
+                        length(CAST(namespace AS BLOB)),COALESCE(substr(CAST(namespace AS BLOB),1,4097),zeroblob(0)),\
+                        length(CAST(value AS BLOB)),COALESCE(substr(CAST(value AS BLOB),1,4097),zeroblob(0)),\
+                        epoch,kind,state,length(payload),COALESCE(substr(payload,1,16777217),zeroblob(0)),completed_chunks \
+                 FROM render_jobs WHERE id=?1",
+                params![id],
+                |row| {
+                    let job = RenderJob {
+                        id: bounded_blob(row.get(0)?, row.get(1)?, MAX_JOB_ID_BYTES)?,
+                        world: WorldId::new(
+                            bounded_text(row.get(2)?, row.get(3)?, MAX_TEXT_BYTES)?,
+                            bounded_text(row.get(4)?, row.get(5)?, MAX_TEXT_BYTES)?,
+                            checked_u64(row.get(6)?, "job epoch").map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        ),
+                        kind: decode_kind(row.get(7)?).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        state: decode_state(row.get(8)?).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        payload: bounded_blob(row.get(9)?, row.get(10)?, MAX_PAYLOAD_BYTES)?,
+                        completed_chunks: checked_u64(row.get(11)?, "completed chunks")
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    };
+                    job.validate().map_err(|_| rusqlite::Error::InvalidQuery)?;
+                    Ok(job)
+                },
+            ).optional()?;
+            Ok(row)
         }).await
     }
 
@@ -322,7 +433,7 @@ fn recover_connection(connection: &mut Connection) -> Result<Recovery, Repositor
         })?.collect::<Result<Vec<_>, _>>()?
     };
     let jobs = {
-        let mut statement = connection.prepare("SELECT length(CAST(render_jobs.id AS BLOB)),COALESCE(substr(CAST(render_jobs.id AS BLOB),1,33),zeroblob(0)),length(CAST(render_jobs.namespace AS BLOB)),COALESCE(substr(CAST(render_jobs.namespace AS BLOB),1,4097),zeroblob(0)),length(CAST(render_jobs.value AS BLOB)),COALESCE(substr(CAST(render_jobs.value AS BLOB),1,4097),zeroblob(0)),render_jobs.epoch,render_jobs.kind,render_jobs.state,length(render_jobs.payload),COALESCE(substr(render_jobs.payload,1,16777217),zeroblob(0)),render_jobs.completed_chunks FROM render_jobs INNER JOIN worlds USING(namespace,value) WHERE worlds.epoch >= 0 AND render_jobs.epoch=worlds.epoch AND render_jobs.state IN (1,2) ORDER BY render_jobs.id")?;
+        let mut statement = connection.prepare("SELECT length(CAST(render_jobs.id AS BLOB)),COALESCE(substr(CAST(render_jobs.id AS BLOB),1,33),zeroblob(0)),length(CAST(render_jobs.namespace AS BLOB)),COALESCE(substr(CAST(render_jobs.namespace AS BLOB),1,4097),zeroblob(0)),length(CAST(render_jobs.value AS BLOB)),COALESCE(substr(CAST(render_jobs.value AS BLOB),1,4097),zeroblob(0)),render_jobs.epoch,render_jobs.kind,render_jobs.state,length(render_jobs.payload),COALESCE(substr(render_jobs.payload,1,16777217),zeroblob(0)),render_jobs.completed_chunks FROM render_jobs INNER JOIN worlds USING(namespace,value) WHERE worlds.epoch >= 0 AND render_jobs.epoch=worlds.epoch AND render_jobs.state IN (0,1,2) ORDER BY render_jobs.id")?;
         statement.query_map([], |row| {
             let state = row.get::<_, i64>(8)?;
             let job = RenderJob { id: bounded_blob(row.get(0)?, row.get(1)?, MAX_JOB_ID_BYTES)?, world: WorldId::new(bounded_text(row.get(2)?, row.get(3)?, MAX_TEXT_BYTES)?, bounded_text(row.get(4)?, row.get(5)?, MAX_TEXT_BYTES)?, checked_u64(row.get(6)?, "job epoch").map_err(|_| rusqlite::Error::InvalidQuery)?), kind: decode_kind(row.get(7)?).map_err(|_| rusqlite::Error::InvalidQuery)?, state: if state == JobState::Running as i64 { JobState::Resumable } else { decode_state(state).map_err(|_| rusqlite::Error::InvalidQuery)? }, payload: bounded_blob(row.get(9)?, row.get(10)?, MAX_PAYLOAD_BYTES)?, completed_chunks: checked_u64(row.get(11)?, "completed chunks").map_err(|_| rusqlite::Error::InvalidQuery)? };
@@ -339,8 +450,8 @@ fn recover_connection(connection: &mut Connection) -> Result<Recovery, Repositor
     };
     Ok(Recovery { worlds, dirty, jobs, checkpoints })
 }
-fn decode_kind(value: i64) -> Result<JobKind, ()> { match value { 1 => Ok(JobKind::Full), 2 => Ok(JobKind::Resume), _ => Err(()) } }
-fn decode_state(value: i64) -> Result<JobState, ()> { match value { 0 => Ok(JobState::Queued), 1 => Ok(JobState::Running), 2 => Ok(JobState::Resumable), 3 => Ok(JobState::Completed), 4 => Ok(JobState::Failed), _ => Err(()) } }
+fn decode_kind(value: i64) -> Result<JobKind, ()> { match value { 1 => Ok(JobKind::Full), 2 => Ok(JobKind::Resume), 3 => Ok(JobKind::Radius), _ => Err(()) } }
+fn decode_state(value: i64) -> Result<JobState, ()> { match value { 0 => Ok(JobState::Queued), 1 => Ok(JobState::Running), 2 => Ok(JobState::Resumable), 3 => Ok(JobState::Completed), 4 => Ok(JobState::Failed), 5 => Ok(JobState::Cancelled), _ => Err(()) } }
 
 pub(crate) fn deterministic_job_id(world: &WorldId, kind: JobKind) -> Vec<u8> {
     let mut hash = Sha256::new();

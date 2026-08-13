@@ -90,14 +90,55 @@ public final class BridgeBootstrapConfig {
             throw new IllegalArgumentException("could not canonicalize output root", error);
         }
     }
-    public static BridgeBootstrapConfig configured() {
-        final BackendMode mode = BackendMode.valueOf(Config.BRIDGE_BACKEND_MODE.toUpperCase(java.util.Locale.ROOT));
-        if (mode == BackendMode.JAVA) return java("unknown");
-        if (Config.BRIDGE_SIDECAR_COMMAND.isEmpty() || Config.BRIDGE_RUST_OUTPUT_ROOT.isBlank()) {
-            throw new IllegalStateException("non-Java backend requires settings.bridge.sidecar-command and settings.bridge.rust-output-root");
+    static String targetTriple(final String operatingSystem, final String architecture) {
+        final String os = Objects.requireNonNull(operatingSystem, "operatingSystem").toLowerCase(java.util.Locale.ROOT);
+        final String arch = Objects.requireNonNull(architecture, "architecture").toLowerCase(java.util.Locale.ROOT);
+        if (os.contains("windows")) {
+            if (arch.equals("amd64") || arch.equals("x86_64")) return "x86_64-pc-windows-msvc";
+            throw new IllegalArgumentException("unsupported Windows architecture: " + architecture);
         }
-        return new BridgeBootstrapConfig(mode, "unknown", new SidecarCommand(Config.BRIDGE_SIDECAR_COMMAND),
-            Duration.ofSeconds(Config.BRIDGE_STARTUP_TIMEOUT_SECONDS), DEFAULT_SHUTDOWN_GRACE, Path.of(Config.BRIDGE_RUST_OUTPUT_ROOT));
+        if (os.contains("mac") || os.contains("darwin")) {
+            if (arch.equals("aarch64") || arch.equals("arm64")) return "aarch64-apple-darwin";
+            if (arch.equals("amd64") || arch.equals("x86_64")) return "x86_64-apple-darwin";
+            throw new IllegalArgumentException("unsupported macOS architecture: " + architecture);
+        }
+        if (os.contains("linux")) {
+            if (arch.equals("aarch64") || arch.equals("arm64")) return "aarch64-unknown-linux-gnu";
+            if (arch.equals("amd64") || arch.equals("x86_64")) return "x86_64-unknown-linux-gnu";
+            throw new IllegalArgumentException("unsupported Linux architecture: " + architecture);
+        }
+        throw new IllegalArgumentException("unsupported operating system: " + operatingSystem);
+    }
+    public static BridgeBootstrapConfig configured(final String pluginVersion) {
+        final BackendMode mode = BackendMode.valueOf(Config.BRIDGE_BACKEND_MODE.toUpperCase(java.util.Locale.ROOT));
+        if (mode == BackendMode.JAVA) return java(pluginVersion);
+        if (!Config.BRIDGE_SIDECAR_COMMAND.isEmpty() && !Config.BRIDGE_RUST_OUTPUT_ROOT.isBlank()) {
+            return new BridgeBootstrapConfig(mode, pluginVersion, new SidecarCommand(Config.BRIDGE_SIDECAR_COMMAND),
+                Duration.ofSeconds(Config.BRIDGE_STARTUP_TIMEOUT_SECONDS), DEFAULT_SHUTDOWN_GRACE, Path.of(Config.BRIDGE_RUST_OUTPUT_ROOT));
+        }
+        final Path configuredBinary = Path.of(System.getProperty("squaremap.backendBinary", ""));
+        if (!Files.isRegularFile(configuredBinary)) {
+            throw new IllegalStateException("non-Java backend requires settings.bridge.sidecar-command and settings.bridge.rust-output-root, or squaremap.backendBinary");
+        }
+        try {
+            final BackendManifest manifest = BackendManifest.load().requireVersion(pluginVersion);
+            final String triple = targetTriple(
+                System.getProperty("os.name", ""),
+                System.getProperty("os.arch", "")
+            );
+            final BackendManifest.BackendBinary expected = manifest.forTarget(triple);
+            if (expected == null) throw new IllegalStateException("native backend manifest has no target " + triple);
+            final Path verified = BinaryResolver.verifyConfiguredPath(configuredBinary, expected);
+            return new BridgeBootstrapConfig(mode, pluginVersion, new SidecarCommand(verified),
+                Duration.ofSeconds(Config.BRIDGE_STARTUP_TIMEOUT_SECONDS), DEFAULT_SHUTDOWN_GRACE,
+                Path.of(System.getProperty("squaremap.backendOutputRoot", Path.of("rust-backend").toAbsolutePath().toString())));
+        } catch (final IOException error) {
+            throw new IllegalStateException("could not resolve configured Rust backend", error);
+        }
+    }
+
+    public static BridgeBootstrapConfig configured() {
+        return configured("unknown");
     }
 
     public static BridgeBootstrapConfig java(final String pluginVersion) {

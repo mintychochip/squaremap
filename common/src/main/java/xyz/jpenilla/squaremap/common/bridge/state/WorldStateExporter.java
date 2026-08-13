@@ -7,6 +7,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.biome.BiomeManager;
 import xyz.jpenilla.squaremap.api.WorldIdentifier;
 import xyz.jpenilla.squaremap.bridge.v1.PlayerTrackerSettings;
 import xyz.jpenilla.squaremap.bridge.v1.Spawn;
@@ -96,12 +97,23 @@ public final class WorldStateExporter {
             .setMapDisplayName(config.MAP_DISPLAY_NAME)
             .setMapOrder(config.MAP_ORDER)
             .setMapIcon(config.MAP_ICON)
+            .setMaxRenderThreads(config.MAX_RENDER_THREADS)
+            .setMapIterateUp(config.MAP_ITERATE_UP)
+            .setMapMaxHeight(config.MAP_MAX_HEIGHT)
+            .setMapBiomesEnabled(config.MAP_BIOMES)
+            .setMapBiomesBlend(config.MAP_BIOMES_BLEND)
+            .setMapGlassClear(config.MAP_GLASS_CLEAR)
+            .setMapLavaCheckerboard(config.MAP_LAVA_CHECKERBOARD)
+            .setMapWaterClear(config.MAP_WATER_CLEAR)
+            .setMapWaterCheckerboard(config.MAP_WATER_CHECKERBOARD)
             .setZoomMax(config.ZOOM_MAX)
             .setZoomDefault(config.ZOOM_DEFAULT)
             .setZoomExtra(config.ZOOM_EXTRA)
             .setBackgroundRenderEnabled(config.BACKGROUND_RENDER_ENABLED)
             .setBackgroundRenderMaxChunksPerInterval(config.BACKGROUND_RENDER_MAX_CHUNKS_PER_INTERVAL)
             .setBackgroundRenderIntervalSeconds(config.BACKGROUND_RENDER_INTERVAL_SECONDS)
+            .setBackgroundRenderMaxThreads(config.BACKGROUND_RENDER_MAX_THREADS)
+            .setBiomeZoomSeed(BiomeManager.obfuscateSeed(level.getSeed()))
             .setPlayerTrackerEnabled(config.PLAYER_TRACKER_ENABLED)
             .setPlayerTrackerUpdateInterval(config.PLAYER_TRACKER_UPDATE_INTERVAL)
             .setPlayerTrackerShowControls(config.PLAYER_TRACKER_SHOW_CONTROLS)

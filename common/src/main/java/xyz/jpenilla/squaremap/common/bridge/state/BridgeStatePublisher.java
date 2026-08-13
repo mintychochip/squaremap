@@ -83,6 +83,12 @@ public final class BridgeStatePublisher {
             payload -> supervisor.publish(new BridgeEvent.ReplaceState("markers:" + payload.getWorld().getNamespace() + ":" + payload.getWorld().getValue(),
                 Envelope.newBuilder().setMarkerLayersReplace(payload).build())));
         this.bridgeIcons = payload -> supervisor.publish(new BridgeEvent.ReplaceState("icons", Envelope.newBuilder().setIconsReplace(payload).build()));
+        supervisor.setReconnectListener(connection -> {
+            this.bridgeWorlds.accept(this.publishedWorlds == null ? this.worlds.get() : this.publishedWorlds);
+            this.bridgePlayers.accept(this.publishedPlayers == null ? this.players.get() : this.publishedPlayers);
+            this.publishedMarkers.values().forEach(this.bridgeMarkers);
+            if (this.publishedIcons != null) this.bridgeIcons.accept(this.publishedIcons);
+        });
     }
 
     private static MarkerRouter markerExporter(final WorldEpochRegistry epochs, final BridgeRevisionClock revisions) {

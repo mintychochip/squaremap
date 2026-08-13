@@ -31,6 +31,20 @@ fn compares_json_semantics_preserves_array_order_and_reports_missing_extra_paths
 }
 
 #[test]
+fn live_normalization_removes_only_volatile_timestamps() {
+    let root = tempfile::tempdir().unwrap();
+    let left = root.path().join("left");
+    let right = root.path().join("right");
+    fs::create_dir_all(&left).unwrap();
+    fs::create_dir_all(&right).unwrap();
+    fs::write(left.join("markers.json"), br#"[{"id":"layer","timestamp":1,"markers":[{"type":"polyline","points":[{"x":1,"z":2},{"x":3,"z":4}]}]}]"#).unwrap();
+    fs::write(right.join("markers.json"), br#"[{"id":"layer","timestamp":2,"markers":[{"type":"polyline","points":[{"x":1,"z":2},{"x":3,"z":4}]}]}]"#).unwrap();
+
+    let report = squaremap_compare::compare::compare_output_normalized(&left, &right).unwrap();
+    assert_eq!(report.mismatch_count, 0);
+}
+
+#[test]
 fn compares_png_pixels_after_decode() {
     let root = tempfile::tempdir().unwrap();
     let left = root.path().join("left"); let right = root.path().join("right");

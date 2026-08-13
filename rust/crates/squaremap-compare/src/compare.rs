@@ -8,15 +8,28 @@ pub struct Mismatch { pub path: String, pub detail: String }
 pub struct ComparisonReport { pub compared_paths: usize, pub mismatch_count: usize, pub mismatches: Vec<Mismatch> }
 
 pub fn compare_output(java: impl AsRef<Path>, rust: impl AsRef<Path>) -> std::io::Result<ComparisonReport> {
-    let left = collect_files(java.as_ref())?;
-    let right = collect_files(rust.as_ref())?;
+    compare_roots(java.as_ref(), rust.as_ref(), false)
+}
+
+/// Compares live snapshots while ignoring only marker timestamps, which are wall-clock values.
+pub fn compare_output_normalized(java: impl AsRef<Path>, rust: impl AsRef<Path>) -> std::io::Result<ComparisonReport> {
+    compare_roots(java.as_ref(), rust.as_ref(), true)
+}
+
+fn compare_roots(java: &Path, rust: &Path, normalize_timestamps: bool) -> std::io::Result<ComparisonReport> {
+    let left = collect_files(java)?;
+    let right = collect_files(rust)?;
     let paths: BTreeSet<_> = left.keys().chain(right.keys()).cloned().collect();
     let mut mismatches = Vec::new();
     for path in &paths {
         match (left.get(path), right.get(path)) {
             (Some(a), Some(b)) if path.ends_with(".json") => {
-                let av: Value = serde_json::from_slice(a).map_err(invalid_json)?;
-                let bv: Value = serde_json::from_slice(b).map_err(invalid_json)?;
+                let mut av: Value = serde_json::from_slice(a).map_err(invalid_json)?;
+                let mut bv: Value = serde_json::from_slice(b).map_err(invalid_json)?;
+                if normalize_timestamps && (path == "markers.json" || path.ends_with("/markers.json")) {
+                    strip_marker_timestamps(&mut av);
+                    strip_marker_timestamps(&mut bv);
+                }
                 if av != bv { mismatches.push(Mismatch { path: path.clone(), detail: "JSON values differ".into() }); }
             }
             (Some(a), Some(b)) if path.ends_with(".png") => {
@@ -29,6 +42,17 @@ pub fn compare_output(java: impl AsRef<Path>, rust: impl AsRef<Path>) -> std::io
         }
     }
     Ok(ComparisonReport { compared_paths: paths.len(), mismatch_count: mismatches.len(), mismatches })
+}
+
+fn strip_marker_timestamps(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            object.remove("timestamp");
+            object.values_mut().for_each(strip_marker_timestamps);
+        }
+        Value::Array(values) => values.iter_mut().for_each(strip_marker_timestamps),
+        _ => {}
+    }
 }
 fn invalid_json(e: serde_json::Error) -> std::io::Error { std::io::Error::new(std::io::ErrorKind::InvalidData, e) }
 fn collect_files(root: &Path) -> std::io::Result<std::collections::BTreeMap<String, Vec<u8>>> {

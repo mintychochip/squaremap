@@ -12,7 +12,10 @@ public final class VisibilityLimitProtocol {
     private VisibilityLimitProtocol() {}
 
     public static List<VisibilityLimit> serialize(final List<VisibilityShape> shapes) {
-        return shapes.stream().map(VisibilityLimitProtocol::serializeOne)
+        return shapes.stream()
+            .filter(shape -> shape instanceof WorldBorderShape || shape instanceof CircleShape
+                || shape instanceof RectangleShape || shape instanceof PolygonShape)
+            .map(VisibilityLimitProtocol::serializeOne)
             .sorted(Comparator.comparing(VisibilityLimitProtocol::sortKey))
             .collect(Collectors.toUnmodifiableList());
     }

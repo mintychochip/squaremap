@@ -71,7 +71,8 @@ pub fn apply_replacement(root: &OutputRoot, envelope: &Envelope) -> io::Result<O
                 root.atomic_write(path, bytes)?;
             }
             let icons = encoded.iter().map(|(_, _, view)| view.clone()).collect::<Vec<_>>();
-            let bytes = write_json(root, "tiles/icons.json", &IconsView { icons })?;
+            let bytes = serialize_json(&IconsView { icons })
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             let current: BTreeMap<String, Vec<u8>> = encoded.iter()
                 .map(|(path, bytes, _)| (path.clone(), bytes.clone())).collect();
             for path in existing_icons.iter().filter(|path| path.extension().is_some_and(|extension| extension == "png") && !current.contains_key(path.to_str().unwrap_or_default())) {

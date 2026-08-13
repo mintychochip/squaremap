@@ -35,7 +35,13 @@ public final class PlatformModule extends AbstractModule {
 
     @Override
     protected void configure() {
-        this.bind(BridgeBootstrapConfig.class).toProvider(() -> BridgeBootstrapConfig.configured()).in(Singleton.class);
+        if (this.platformClass != null) {
+            this.bind(BridgeBootstrapConfig.class).toProvider(PlatformBootstrapConfigProvider.class).in(Singleton.class);
+        } else if (this.platform != null) {
+            this.bind(BridgeBootstrapConfig.class).toProvider(() -> BridgeBootstrapConfig.configured(this.platform.version())).in(Singleton.class);
+        } else {
+            throw new IllegalArgumentException("platform or platformClass is required");
+        }
         if (this.platformClass != null) {
             this.bind(SquaremapPlatform.class).to(this.platformClass);
         } else if (this.platform != null) {

@@ -5,7 +5,7 @@ use squaremap_render::{GenerationToken, Limits, Registry, RegistryError, Snapsho
 use std::collections::HashMap;
 use std::fmt;
 
-const MAX_IN_FLIGHT: usize = 96;
+pub const MAX_IN_FLIGHT: usize = 96;
 
 #[derive(Debug)]
 pub enum SnapshotClientError {
@@ -238,6 +238,16 @@ impl SnapshotClient {
     }
     pub fn in_flight(&self) -> usize {
         self.pending.len()
+    }
+
+    /// Drops every request bound to a disconnected transport.
+    ///
+    /// Registry generations remain cached for the authenticated session; callers must construct a
+    /// new client when the session ID changes.
+    pub fn abort_pending(&mut self) -> usize {
+        let count = self.pending.len();
+        self.pending.clear();
+        count
     }
 }
 

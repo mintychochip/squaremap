@@ -23,15 +23,18 @@ import net.neoforged.neoforge.event.level.block.CropGrowEvent;
 import org.checkerframework.checker.nullness.qual.NonNull;
 import org.checkerframework.framework.qual.DefaultQualifier;
 import xyz.jpenilla.squaremap.common.WorldManagerImpl;
+import xyz.jpenilla.squaremap.common.bridge.state.DirtyChunkPublisher;
 import xyz.jpenilla.squaremap.common.data.ChunkCoordinate;
 
 @DefaultQualifier(NonNull.class)
 public final class ForgeMapUpdates {
     private final WorldManagerImpl worldManager;
+    private final DirtyChunkPublisher dirtyChunks;
 
     @Inject
-    private ForgeMapUpdates(final WorldManagerImpl worldManager) {
+    private ForgeMapUpdates(final WorldManagerImpl worldManager, final DirtyChunkPublisher dirtyChunks) {
         this.worldManager = worldManager;
+        this.dirtyChunks = dirtyChunks;
     }
 
     public void register() {
@@ -113,6 +116,6 @@ public final class ForgeMapUpdates {
     }
 
     private void markChunk(final ServerLevel level, final ChunkCoordinate chunk) {
-        this.worldManager.getWorldIfEnabled(level).ifPresent(world -> world.chunkModified(chunk));
+        this.worldManager.getWorldIfEnabled(level).ifPresent(world -> this.dirtyChunks.publish(world, chunk));
     }
 }
