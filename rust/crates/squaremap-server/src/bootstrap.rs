@@ -484,7 +484,7 @@ pub async fn run_bridge(
 
     let configured_root = std::env::var("SQUAREMAP_OUTPUT_ROOT")
         .map_err(|_| BootstrapError::Rejected("SQUAREMAP_OUTPUT_ROOT is required for bridge mode".to_string()))?;
-    let mut http_server = None;
+    let mut http_server: Option<HttpServer> = None;
     let root = squaremap_server::output::OutputRoot::new(configured_root)?;
     let repository = Arc::new(
         Repository::open(root.path().join(".squaremap-state.sqlite"))
@@ -673,7 +673,7 @@ pub async fn run_bridge(
                                             )
                                             .map_err(|error| error.to_string())?;
                                             let next_http = match config.global.as_ref() {
-                                                Some(global) if global.http_enabled && http_server.is_none() => {
+                                                Some(global) if global.http_enabled => {
                                                     let bind = format!("{}:{}", global.http_bind, global.http_port)
                                                         .parse()
                                                         .map_err(|error| format!("invalid HTTP bind address: {error}"))?;
@@ -695,9 +695,28 @@ pub async fn run_bridge(
                                         }
                                         .await;
                                         match configured {
-                                            Ok((policy, next_scheduler, background_enabled, next_http)) => {
+                                            Ok((policy, next_scheduler, background_enabled, mut next_http)) => {
                                                 if let Some(task) = background_task.take() {
                                                     task.abort();
+                                                }
+                                                let previous = http_server.take();
+                                                if let Some(mut previous) = previous {
+                                                    if next_http.is_none() {
+                                                        if let Err(error) = previous.shutdown().await {
+                                                            config_error = Some(format!("could not stop previous HTTP server: {error}"));
+                                                        }
+                                                    } else if let Err(error) = previous.shutdown().await {
+                                                        if let Some(mut next) = next_http.take() {
+                                                            let _ = next.shutdown().await;
+                                                        }
+                                                        config_error = Some(format!("could not stop previous HTTP server: {error}"));
+                                                    }
+                                                }
+                                                if config_error.is_some() {
+                                                    if let Some(mut next) = next_http {
+                                                        let _ = next.shutdown().await;
+                                                    }
+                                                    break;
                                                 }
                                                 background_task =
                                                     spawn_background_scheduler(next_scheduler.clone(), background_enabled);
@@ -710,11 +729,27 @@ pub async fn run_bridge(
                                                         .collect(),
                                                 );
                                                 policy_result = Some(policy);
-                                                if let Some(server) = next_http {
-                                                    http_server = Some(server);
-                                                    if let Some(address) = http_server.as_ref().and_then(HttpServer::local_addr) {
+                                                http_server = next_http;
+                                                let (http_port, http_is_enabled) = http_server
+                                                    .as_ref()
+                                                    .and_then(HttpServer::local_addr)
+                                                    .map(|address| {
                                                         tracing::info!(http_addr = %address, "Rust HTTP server ready");
-                                                    }
+                                                        (address.port() as u32, true)
+                                                    })
+                                                    .unwrap_or((0, false));
+                                                let ready = make_outbound(
+                                                    &session_id,
+                                                    envelope.correlation_id,
+                                                    envelope::Payload::Ready(squaremap_protocol::wire::Ready {
+                                                        state_revision: config.revision,
+                                                        http_port,
+                                                        http_enabled: http_is_enabled,
+                                                    }),
+                                                );
+                                                if let Err(error) = queue_outbound(&outbound, ready).await {
+                                                    loop_error = Some(error);
+                                                    break;
                                                 }
                                             }
                                             Err(error) => config_error = Some(error),
