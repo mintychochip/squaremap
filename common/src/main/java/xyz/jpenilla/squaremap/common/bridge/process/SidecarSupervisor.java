@@ -9,6 +9,7 @@ import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.channels.ServerSocketChannel;
+import java.nio.file.Path;
 import java.nio.channels.SocketChannel;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
@@ -182,6 +183,15 @@ public final class SidecarSupervisor implements AutoCloseable {
             final InetSocketAddress address = (InetSocketAddress) openedListener.getLocalAddress();
 
             final List<String> command = new ArrayList<>(config.sidecarCommand().command());
+            final Path executable = config.sidecarCommand().executable();
+            if (executable.isAbsolute()) {
+                final BackendManifest manifest = BackendManifest.load().requireVersion(config.pluginVersion());
+                final BackendManifest.BackendBinary binary = manifest.forTarget(currentTargetTriple());
+                if (binary == null) {
+                    throw new IllegalArgumentException("no Rust backend binary is published for " + currentTargetTriple());
+                }
+                BinaryResolver.verifyConfiguredPath(executable, binary);
+            }
             command.add("bridge");
             command.add("--connect");
             command.add(connectAddress(address));
@@ -272,6 +282,19 @@ public final class SidecarSupervisor implements AutoCloseable {
         }
     }
 
+    private static String currentTargetTriple() {
+        final String os = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT);
+        final String arch = System.getProperty("os.arch", "").toLowerCase(java.util.Locale.ROOT);
+        final String normalizedArch = switch (arch) {
+            case "amd64", "x86_64" -> "x86_64";
+            case "aarch64", "arm64" -> "aarch64";
+            default -> throw new IllegalArgumentException("unsupported Rust backend architecture: " + arch);
+        };
+        if (os.contains("win")) return normalizedArch + "-pc-windows-msvc";
+        if (os.contains("mac") || os.contains("darwin")) return normalizedArch + "-apple-darwin";
+        if (os.contains("linux")) return normalizedArch + "-unknown-linux-gnu";
+        throw new IllegalArgumentException("unsupported Rust backend operating system: " + os);
+    }
     private void writeHelloAck(
         final SocketChannel channel,
         final byte[] sessionId,

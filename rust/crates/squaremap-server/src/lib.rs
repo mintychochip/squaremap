@@ -4,3 +4,5 @@ pub mod http;
 pub mod output;
 pub mod views;
 pub mod snapshot_client;
+pub mod scheduler;
+pub mod metrics;
