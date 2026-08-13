@@ -476,10 +476,10 @@ public final class SidecarSupervisor implements AutoCloseable {
         private final BridgePublisher publisher;
         private final InboundSequenceTracker inboundSequences;
         private volatile FrameLimits frameLimits = FrameLimits.DEFAULT;
+        private volatile Consumer<Envelope> readyListener = ignored -> {};
         private volatile Consumer<Envelope> responseListener = ignored -> {};
         private volatile Consumer<Envelope> snapshotRequestListener = ignored -> {};
         private volatile Consumer<Throwable> failureListener = ignored -> {};
-
         private ManagedConnection(final SocketChannel socket, final Process process, final byte[] sessionId,
                                   final Duration shutdownGrace, final boolean noProcess, final long inboundSequence) {
             this.socket = socket;
@@ -505,6 +505,9 @@ public final class SidecarSupervisor implements AutoCloseable {
             this.frameLimits = new FrameLimits(policy.getMaxControlFrameBytes(), policy.getMaxSnapshotFrameBytes(), policy.getMaxUncompressedSnapshotBytes());
             this.publisher.applyPolicy(policy);
         }
+        @Override public void setReadyListener(final Consumer<Envelope> listener) {
+            this.readyListener = java.util.Objects.requireNonNull(listener, "listener");
+        }
         @Override public void setResponseListener(final Consumer<Envelope> listener) {
             this.responseListener = java.util.Objects.requireNonNull(listener, "listener");
         }
@@ -526,7 +529,8 @@ public final class SidecarSupervisor implements AutoCloseable {
                     if (!java.security.MessageDigest.isEqual(this.sessionId, envelope.getSessionId().toByteArray())) {
                         throw new SecurityException("bridge envelope session mismatch");
                     }
-                    if (envelope.hasAck()) this.publisher.acknowledge(envelope);
+                    if (envelope.hasReady()) this.readyListener.accept(envelope);
+                    else if (envelope.hasAck()) this.publisher.acknowledge(envelope);
                     else if (envelope.hasProtocolError() && envelope.getProtocolError().getFatal()) throw new IOException("fatal bridge protocol error");
                     else if (envelope.hasChunkSnapshotRequest()) this.snapshotRequestListener.accept(envelope);
                     else this.responseListener.accept(envelope);

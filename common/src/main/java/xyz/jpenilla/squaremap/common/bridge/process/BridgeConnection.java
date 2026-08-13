@@ -21,6 +21,9 @@ public interface BridgeConnection extends AutoCloseable {
         return BridgePublisher.ControlDisposition.RECALLED;
     }
     default void applyPolicy(final BridgePolicyReplace policy) {}
+    default void setReadyListener(final Consumer<Envelope> listener) {
+        Objects.requireNonNull(listener, "listener");
+    }
 
     default void setResponseListener(final Consumer<Envelope> listener) {
         Objects.requireNonNull(listener, "listener");

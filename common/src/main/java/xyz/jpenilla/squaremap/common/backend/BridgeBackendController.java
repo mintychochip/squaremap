@@ -26,6 +26,7 @@ import xyz.jpenilla.squaremap.bridge.v1.ControlRequest;
 import xyz.jpenilla.squaremap.bridge.v1.ControlResult;
 import xyz.jpenilla.squaremap.bridge.v1.Envelope;
 import xyz.jpenilla.squaremap.bridge.v1.WorldIdentity;
+import xyz.jpenilla.squaremap.common.Logging;
 import xyz.jpenilla.squaremap.common.ServerAccess;
 import xyz.jpenilla.squaremap.common.SquaremapCommon;
 import xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher;
@@ -55,6 +56,8 @@ public final class BridgeBackendController implements AutoCloseable {
     private final ConcurrentMap<Long, ScheduledFuture<?>> timeouts = new ConcurrentHashMap<>();
     private final AtomicLong nextCorrelation = new AtomicLong(0L);
     private final AtomicReference<BridgePolicyReplace> policy = new AtomicReference<>();
+    private volatile int readyHttpPort;
+    private volatile boolean readyHttpEnabled;
     private volatile CompletableFuture<BackendResult> configPending;
     private volatile ScheduledFuture<?> configTimeout;
     private volatile long configPendingRevision;
@@ -109,6 +112,23 @@ public final class BridgeBackendController implements AutoCloseable {
 
     @FunctionalInterface
     interface EpochResolver { long epoch(WorldIdentifier world); }
+    public BridgePublisher.PublishResult publishDirty(
+        final xyz.jpenilla.squaremap.common.data.MapWorldInternal world,
+        final xyz.jpenilla.squaremap.common.data.ChunkCoordinate coordinate,
+        final long revision
+    ) {
+        final BridgeConnection connection = this.connection();
+        if (connection == null || connection.isClosed()) return BridgePublisher.PublishResult.COALESCED;
+        final WorldIdentifier identifier = world.identifier();
+        final long epoch = this.epochs.epoch(identifier);
+        return connection.publish(new xyz.jpenilla.squaremap.common.bridge.outbox.BridgeEvent.DirtyChunk(
+            new xyz.jpenilla.squaremap.common.bridge.outbox.BridgeEvent.WorldKey(identifier.namespace(), identifier.value()),
+            epoch,
+            coordinate.x(),
+            coordinate.z(),
+            revision
+        ));
+    }
 
     CompletionStage<BackendResult> execute(final BackendController.BackendRequest request) {
         if (request instanceof BackendController.ConfigSync sync) return this.publishConfig(sync.config());
@@ -249,8 +269,20 @@ public final class BridgeBackendController implements AutoCloseable {
         return connection;
     }
 
+    private void ready(final xyz.jpenilla.squaremap.bridge.v1.Envelope envelope) {
+        if (!envelope.hasReady()) return;
+        this.readyHttpEnabled = envelope.getReady().getHttpEnabled();
+        this.readyHttpPort = envelope.getReady().getHttpPort();
+        Logging.logger().info(
+            "Rust backend ready (HTTP enabled={}, port={}, state revision={})",
+            this.readyHttpEnabled,
+            this.readyHttpPort,
+            envelope.getReady().getStateRevision()
+        );
+    }
     private void attach(final BridgeConnection connection) {
         this.listeningConnection = Objects.requireNonNull(connection, "connection");
+        connection.setReadyListener(this::ready);
         connection.setResponseListener(this::dispatch);
         if (this.snapshotHandler != null) {
             connection.setSnapshotRequestListener(envelope -> this.snapshotHandler.handle(envelope, connection::publish));
