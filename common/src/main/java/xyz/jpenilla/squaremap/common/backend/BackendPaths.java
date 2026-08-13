@@ -14,7 +14,7 @@ import xyz.jpenilla.squaremap.common.bridge.process.BackendMode;
  *
  * <p>Canonicalization follows the longest existing ancestor through symlinks
  * (the path's {@code toRealPath()} operation) and appends the non-existing suffix verbatim, so
- *
+ * two paths that resolve through different symlinks or relative spellings compare as the same canonical root.
  * <p>This class never promotes one backend or redirects a backend at another
  * backend's root: {@link #resolve} only assigns each backend its own root and
  * {@link #validateDistinctRoots} refuses any overlap.
