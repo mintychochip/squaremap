@@ -18,12 +18,13 @@ import xyz.jpenilla.squaremap.api.Squaremap;
 import xyz.jpenilla.squaremap.api.SquaremapProvider;
 import xyz.jpenilla.squaremap.common.backend.BackendControllerSupport;
 import xyz.jpenilla.squaremap.common.bridge.process.BackendMode;
+import xyz.jpenilla.squaremap.common.bridge.process.SidecarSupervisor;
+import xyz.jpenilla.squaremap.common.bridge.process.BackendLifecyclePolicy;
+import xyz.jpenilla.squaremap.common.config.ConfigBridgeExporter;
 import xyz.jpenilla.squaremap.common.bridge.process.BridgeBootstrapConfig;
 import xyz.jpenilla.squaremap.common.bridge.process.BridgeConnection;
-import xyz.jpenilla.squaremap.common.bridge.process.SidecarSupervisor;
 import xyz.jpenilla.squaremap.common.command.Commands;
 import xyz.jpenilla.squaremap.common.config.Config;
-import xyz.jpenilla.squaremap.common.config.ConfigBridgeExporter;
 import xyz.jpenilla.squaremap.common.config.ConfigManager;
 import xyz.jpenilla.squaremap.common.config.Messages;
 import xyz.jpenilla.squaremap.common.data.DirectoryProvider;
@@ -98,7 +99,7 @@ public final class SquaremapCommon {
         LevelBiomeColorData.loadImages(this.directoryProvider);
         this.worldManager.start();
         this.platform.startCallback();
-        if (Config.HTTPD_ENABLED && this.bootstrapConfig.get().backendMode() != BackendMode.RUST) {
+        if (Config.HTTPD_ENABLED && BackendLifecyclePolicy.javaHttpOwner(this.bootstrapConfig.get().backendMode())) {
             IntegratedServer.startServer(this.directoryProvider, this.jsonCache, null);
         } else if (!Config.HTTPD_ENABLED) {
             Logging.logger().info(Messages.LOG_INTERNAL_WEB_DISABLED);
@@ -149,15 +150,15 @@ public final class SquaremapCommon {
 
     private void stop() {
         final BackendMode mode = this.bootstrapConfig.get().backendMode();
-        if (Config.HTTPD_ENABLED && mode != BackendMode.RUST) {
+        if (Config.HTTPD_ENABLED && BackendLifecyclePolicy.javaHttpOwner(mode)) {
             IntegratedServer.stopServer();
         }
         this.platform.stopCallback();
         this.worldManager.shutdown();
-        if (Config.HTTPD_ENABLED && mode != BackendMode.RUST && !Config.FLUSH_JSON_IMMEDIATELY) {
+        if (Config.HTTPD_ENABLED && BackendLifecyclePolicy.javaHttpOwner(mode) && !Config.FLUSH_JSON_IMMEDIATELY) {
             this.jsonCache.flush();
         }
-        if (mode != BackendMode.RUST) {
+        if (BackendLifecyclePolicy.javaCacheOwner(mode)) {
             this.jsonCache.clear();
         }
     }
