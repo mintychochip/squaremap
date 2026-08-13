@@ -5,7 +5,7 @@
     "rust_workspace_tests": {"passed": true, "tests": 217, "suites": 31, "command": "cargo test --manifest-path rust/Cargo.toml --workspace"},
     "java_common_tests": {"passed": true, "command": "./gradlew :squaremap-common:test --no-daemon"},
     "gradle_build": {"passed": true, "command": "./gradlew build --no-daemon"},
-    "web_build": {"passed": true, "command": "bun run lint && bun run build"},
+    "web_build": {"passed": true, "command": "bun run lint && bun run build", "working_directory": "web"},
     "web_lint": {"passed_with_warnings": true, "warnings": 3},
     "compare_tests": {"passed": true, "tests": 6},
     "bridge_mode_tests": {"passed": true, "tests": 2},
@@ -18,22 +18,25 @@
       ],
       "command": "./gradlew :squaremap-common:test --tests '*SidecarSupervisorTest' --tests '*ProductionBridgeWiringTest' --no-daemon"
     },
-    "rust_scheduler_recovery": {
-      "passed": true,
-      "tests": 5,
-      "test": "render_recovery"
-    },
+    "rust_scheduler_recovery": {"passed": true, "tests": 5, "test": "render_recovery"},
     "java_readiness_wiring": {"passed": true, "scope": "Ready envelopes are routed to the dedicated listener and attached by BridgeBackendController"},
-    "epoch_aware_dirty_forwarding": {"passed": true, "scope": "dirty events use the controller epoch resolver; no fabricated epoch"},
-    "fixture_comparison": {"mismatch_count": 0, "provenance": "Both fixture roots currently contain checked-in bridge view documents; comparator semantics only."},
+    "epoch_aware_dirty_forwarding": {"passed": true, "scope": "dirty events use controller epoch resolver; no fabricated epoch"},
+    "independent_fixture_parity": {
+      "passed": true,
+      "java_tests": 1,
+      "rust_tests": 7,
+      "compared_paths": 6,
+      "mismatch_count": 0,
+      "report": "docs/superpowers/verification/rust-backend-parity-report.json"
+    },
+    "fixture_comparison": {"mismatch_count": 0, "provenance": "independently generated Java render fixture and Rust render oracle; bridge-view fixture comparison remains semantic-only."},
     "benchmark_contract": {"passed": true, "scope": "bounded comparison-tool workload; not backend rendering throughput"}
   },
   "blocked": {
-    "recorded_parity": "independent Java/Rust output generation is not yet wired",
-    "live_shadow": "not exercised",
+    "live_shadow": "not exercised; no production-equivalent Minecraft lifecycle harness",
     "fault_restart": "sidecar disconnect cleanup and Rust scheduler durable recovery pass; process restart/restart-loop evidence remains unexercised",
     "isolated_performance": "real backend workload benchmark not exercised",
-    "binary_distribution": "build-generated manifest is not wired",
-    "clean_cutover": "legacy Java backend remains"
+    "binary_distribution": "manifest generation still depends on a prebuilt local binary and embeds a machine-local file URL",
+    "clean_cutover": "legacy Java backend remains; Rust default cannot be enabled until sidecar resolution and remaining gates are complete"
   }
 }

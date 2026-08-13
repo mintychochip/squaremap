@@ -1,0 +1,11 @@
+{
+  "generator": "independent-fixture-runners",
+  "java_command": "./gradlew :squaremap-common:test --tests '*ChunkRenderFixtureOracleTest' --no-daemon",
+  "java_tests": 1,
+  "rust_command": "cargo test --manifest-path rust/Cargo.toml -p squaremap-render --test chunk_render",
+  "rust_tests": 7,
+  "comparison_command": "cargo run --manifest-path rust/Cargo.toml -p squaremap-compare -- compare-output --java testdata/bridge/v1/fixtures/java --rust testdata/bridge/v1/fixtures/rust",
+  "compared_paths": 6,
+  "mismatch_count": 0,
+  "verdict": "pass"
+}

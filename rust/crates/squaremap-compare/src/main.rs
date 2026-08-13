@@ -32,7 +32,13 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
             if threshold <= 0.0 {
                 return Err("benchmark threshold must be positive".into());
             }
-            let report = squaremap_compare::benchmark::run(iterations, threshold);
+            let report = match optional(&mut args, "--java") {
+                Some(java) => {
+                    let rust = required(&mut args, "--rust")?;
+                    squaremap_compare::benchmark::run_output(java, rust, iterations, threshold)?
+                }
+                None => squaremap_compare::benchmark::run(iterations, threshold),
+            };
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(report.passed)
         }

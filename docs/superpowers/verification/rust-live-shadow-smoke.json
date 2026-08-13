@@ -1,0 +1,6 @@
+{
+  "status": "blocked",
+  "reason": "Production-equivalent SquaremapCommon lifecycle requires a running Minecraft platform and a fully populated ConfigReplace/state snapshot; existing tests only exercise fake sidecars and policy wiring.",
+  "available_entrypoint": "cargo run --manifest-path rust/Cargo.toml -p squaremap-server -- bridge --connect 127.0.0.1:<port> --plugin-version <version>",
+  "required_evidence": ["Java primary HTTP remains bound", "Rust shadow binds isolated root", "Ready received", "state and dirty/control envelopes accepted", "child cleanup verified"]
+}

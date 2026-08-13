@@ -1,5 +1,6 @@
 package xyz.jpenilla.squaremap.common.config;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import org.spongepowered.configurate.NodePath;
@@ -11,7 +12,11 @@ public final class Config extends AbstractConfig {
     private static final int LATEST_VERSION = 2;
 
     Config(final DirectoryProvider directoryProvider) {
-        super(directoryProvider.dataDirectory(), Config.class, "config.yml", LATEST_VERSION);
+        this(directoryProvider.dataDirectory());
+    }
+
+    Config(final Path dataDirectory) {
+        super(dataDirectory, Config.class, "config.yml", LATEST_VERSION);
     }
 
     @Override
@@ -32,7 +37,11 @@ public final class Config extends AbstractConfig {
     static Config config;
 
     public static void reload(final DirectoryProvider directoryProvider) {
-        config = new Config(directoryProvider);
+        reload(directoryProvider.dataDirectory());
+    }
+
+    public static void reload(final Path dataDirectory) {
+        config = new Config(dataDirectory);
         config.readConfig(Config.class, null);
     }
 

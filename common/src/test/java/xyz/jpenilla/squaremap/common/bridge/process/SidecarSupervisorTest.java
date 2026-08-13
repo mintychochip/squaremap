@@ -89,7 +89,12 @@ class SidecarSupervisorTest {
         final java.util.concurrent.CountDownLatch failure = new java.util.concurrent.CountDownLatch(1);
         connection.setFailureListener(ignored -> failure.countDown());
         assertTrue(failure.await(3, TimeUnit.SECONDS));
+        final long deadline = System.nanoTime() + Duration.ofSeconds(3).toNanos();
+        while ((!connection.isClosed() || !supervisor.isClosed()) && System.nanoTime() < deadline) {
+            Thread.yield();
+        }
         assertTrue(connection.isClosed());
+        assertTrue(supervisor.isClosed());
         supervisor.close();
     }
     @Test
