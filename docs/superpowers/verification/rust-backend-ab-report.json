@@ -26,7 +26,7 @@
     "epoch_aware_dirty_forwarding": {"passed": true, "scope": "dirty events use the controller epoch resolver; no fabricated epoch"},
     "fixture_comparison": {"mismatch_count": 0, "provenance": "Both fixture roots currently contain checked-in bridge view documents; comparator semantics only."},
     "benchmark_contract": {"passed": true, "scope": "bounded comparison-tool workload; not backend rendering throughput"},
-    "current_commit": "f53d67901e7d234ea9a5e2057f076999b4a28ea8"
+    "current_commit": "fcf6e5e0607a7634f8cb928094ae358c8263ad8b"
   },
   "blocked": {
     "recorded_parity": "independent Java/Rust output generation is not yet wired",
