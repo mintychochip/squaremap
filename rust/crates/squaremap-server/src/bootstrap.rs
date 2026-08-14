@@ -407,8 +407,13 @@ async fn handle_control_request(
             )
         }
         ControlKind::PauseRenders => {
-            scheduler.pause();
-            control_response(BackendResultCode::RendersPaused, Some(identity))
+            if scheduler.is_paused() {
+                scheduler.resume();
+                control_response(BackendResultCode::RendersResumed, Some(identity))
+            } else {
+                scheduler.pause();
+                control_response(BackendResultCode::RendersPaused, Some(identity))
+            }
         }
         ControlKind::CancelRender => {
             let job = active_jobs.lock().ok().and_then(|active| active.get(&world).cloned());
@@ -1153,6 +1158,33 @@ mod control_tests {
         assert_eq!(result.code, BackendResultCode::FullRenderStarted as i32);
         assert_eq!(repository.recover().await.unwrap().jobs.len(), 1);
         drop(scheduler);
+    }
+    #[tokio::test]
+    async fn pause_renders_toggles_scheduler_state() {
+        let (_directory, _repository, scheduler, root, mut state, active_jobs) = fixture().await;
+        let first = handle_control_request(
+            &mut state,
+            &request(ControlKind::PauseRenders, Vec::new()),
+            Some(scheduler.clone()),
+            active_jobs.clone(),
+            11,
+            &root,
+        )
+        .await;
+        assert_eq!(first.code, BackendResultCode::RendersPaused as i32);
+        assert!(scheduler.is_paused());
+
+        let second = handle_control_request(
+            &mut state,
+            &request(ControlKind::PauseRenders, Vec::new()),
+            Some(scheduler.clone()),
+            active_jobs,
+            11,
+            &root,
+        )
+        .await;
+        assert_eq!(second.code, BackendResultCode::RendersResumed as i32);
+        assert!(!scheduler.is_paused());
     }
 
     #[tokio::test]
