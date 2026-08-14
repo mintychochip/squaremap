@@ -20,7 +20,7 @@ jobs:
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
           - target: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-15-intel
           - target: aarch64-apple-darwin
             runner: macos-14
     steps:
