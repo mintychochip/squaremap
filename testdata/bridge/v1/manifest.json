@@ -1,14 +1,14 @@
 {
   "version": 1,
   "paper_fixture": {
-    "paper": {"version": "paper-1.21.8", "url": "https://fill.invalid/paper-1.21.8.jar", "sha256": "8cdaa308c88a17fe9aa8c12c96a09f7d3200b33c878b5b948c595c46d65c1378"},
-    "minecraft_version": "1.21.8",
-    "plugin": {"version": "squaremap-local", "url": "https://fill.invalid/squaremap.jar", "sha256": "8cdaa308c88a17fe9aa8c12c96a09f7d3200b33c878b5b948c595c46d65c1378"},
-    "sidecar": {"version": "squaremap-rust-local", "url": "https://fill.invalid/squaremap-server", "sha256": "8cdaa308c88a17fe9aa8c12c96a09f7d3200b33c878b5b948c595c46d65c1378"},
+    "paper": {"version": "paper-26.2", "url": "https://fill.invalid/paper-26.2.jar", "sha256": "8cdaa308c88a17fe9aa8c12c96a09f7d3200b33c878b5b948c595c46d65c1378"},
+    "minecraft_version": "26.2",
+    "plugin": {"version": "squaremap-local-26.2", "url": "https://fill.invalid/squaremap-26.2.jar", "sha256": "8cdaa308c88a17fe9aa8c12c96a09f7d3200b33c878b5b948c595c46d65c1378"},
+    "sidecar": {"version": "squaremap-rust-local-26.2", "url": "https://fill.invalid/squaremap-server-26.2", "sha256": "8cdaa308c88a17fe9aa8c12c96a09f7d3200b33c878b5b948c595c46d65c1378"},
     "artifacts": {
-      "paper": {"path": "hello.bin", "sha256": "8cdaa308c88a17fe9aa8c12c96a09f7d3200b33c878b5b948c595c46d65c1378"},
-      "plugin": {"path": "hello.bin", "sha256": "8cdaa308c88a17fe9aa8c12c96a09f7d3200b33c878b5b948c595c46d65c1378"},
-      "sidecar": {"path": "hello.bin", "sha256": "8cdaa308c88a17fe9aa8c12c96a09f7d3200b33c878b5b948c595c46d65c1378"}
+      "paper": {"path": "paper.jar", "sha256": "8cdaa308c88a17fe9aa8c12c96a09f7d3200b33c878b5b948c595c46d65c1378"},
+      "plugin": {"path": "plugin.jar", "sha256": "8cdaa308c88a17fe9aa8c12c96a09f7d3200b33c878b5b948c595c46d65c1378"},
+      "sidecar": {"path": "squaremap-server", "sha256": "8cdaa308c88a17fe9aa8c12c96a09f7d3200b33c878b5b948c595c46d65c1378"}
     },
     "artifact_prerequisites": [
       "provide a real Paper server jar for paper.path",
@@ -16,7 +16,7 @@
       "provide a real squaremap sidecar executable for sidecar.path"
     ],
     "world_fixture": {"path": "world-fixture.json", "sha256": "787f72e6631183fc3e029b9877050d7a87c759cb0f7bc8072a1a72cbbb61ce07"},
-    "runtime": {"java": "25", "jvm": "-Xms1G -Xmx2G -Duser.timezone=UTC -Duser.language=en", "os": "Linux", "arch": "x86_64", "server": "Paper 1.21.8", "command_protocol": "console-or-rcon-v1"},
+    "runtime": {"java": "25", "jvm": "-Xms1G -Xmx2G -Duser.timezone=UTC -Duser.language=en", "os": "Linux", "arch": "x86_64", "server": "Paper 26.2", "command_protocol": "console-or-rcon-v1"},
     "world": {"seed": 8675309, "name": "proof-world", "view_distance": 6, "simulation_distance": 4, "timezone": "UTC", "locale": "en_US"},
     "roots": {"data": "proof-data", "java_output": "proof-java-output", "rust_output": "proof-rust-output", "diagnostics": "proof-diagnostics"},
     "ports": {"paper": 25565, "rcon": 25575, "rust_http": 18080},
