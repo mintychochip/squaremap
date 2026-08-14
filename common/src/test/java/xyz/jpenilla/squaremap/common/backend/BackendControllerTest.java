@@ -30,10 +30,9 @@ final class BackendControllerTest {
         final List<BackendController.BackendRequest> legacy = new ArrayList<>();
         final List<BackendController.BackendRequest> bridge = new ArrayList<>();
         final BackendController controller = controller(BackendMode.JAVA, legacy, bridge);
-        controller.fullRender(world); controller.radiusRender(world, 1, 2, 3); controller.cancelRender(world);
-        controller.pauseRenders(world); controller.resetMap(world); controller.reload(); controller.health();
-        assertEquals(7, legacy.size());
-        assertTrue(bridge.isEmpty());
+        controller.fullRender(world); controller.radiusRender(world, 1, 2, 3); controller.cancelRender(world); controller.pauseRenders(world);
+        controller.resetMap(world); controller.reload(); controller.health(); controller.restartProgressLogging();
+        assertEquals(8, legacy.size()); assertTrue(bridge.isEmpty());
     }
 
     @Test
@@ -41,10 +40,9 @@ final class BackendControllerTest {
         final List<BackendController.BackendRequest> legacy = new ArrayList<>();
         final List<BackendController.BackendRequest> bridge = new ArrayList<>();
         final BackendController controller = controller(BackendMode.RUST, legacy, bridge);
-        final BackendResult result = controller.health().toCompletableFuture().join();
-        assertEquals(BackendResult.Code.HEALTHY, result.code());
-        assertEquals(0, legacy.size());
-        assertEquals(1, bridge.size());
+        assertEquals(BackendResult.Code.HEALTHY, controller.fullRender(world).toCompletableFuture().join().code());
+        assertEquals(BackendResult.Code.HEALTHY, controller.health().toCompletableFuture().join().code());
+        assertTrue(legacy.isEmpty()); assertEquals(2, bridge.size());
     }
 
     @Test
@@ -52,11 +50,8 @@ final class BackendControllerTest {
         final List<BackendController.BackendRequest> legacy = new ArrayList<>();
         final List<BackendController.BackendRequest> bridge = new ArrayList<>();
         final BackendController controller = controller(BackendMode.SHADOW, legacy, bridge);
-        final BackendResult result = controller.radiusRender(world, 4, 5, 6).toCompletableFuture().join();
-        assertEquals(BackendResult.Code.RADIUS_RENDER_STARTED, result.code());
-        assertEquals(1, legacy.size());
-        assertEquals(1, bridge.size());
-        assertSame(legacy.get(0), bridge.get(0));
+        assertEquals(BackendResult.Code.FULL_RENDER_STARTED, controller.fullRender(world).toCompletableFuture().join().code());
+        assertEquals(legacy, bridge);
     }
 
     @Test
@@ -65,17 +60,12 @@ final class BackendControllerTest {
         final BridgeBackendController bridge = new BridgeBackendController(connection, this.scheduler);
         final CompletableFuture<BackendResult> pending = bridge.execute(new BackendController.Health()).toCompletableFuture();
         assertEquals(1, bridge.pendingCount());
-        bridge.dispatch(xyz.jpenilla.squaremap.bridge.v1.Envelope.newBuilder()
-            .setSessionId(com.google.protobuf.ByteString.copyFrom(new byte[16])).setCorrelationId(999)
-            .setControlResult(xyz.jpenilla.squaremap.bridge.v1.ControlResult.newBuilder()
-                .setCode(xyz.jpenilla.squaremap.bridge.v1.BackendResultCode.BACKEND_RESULT_CODE_HEALTHY)).build());
+        bridge.dispatch(xyz.jpenilla.squaremap.bridge.v1.Envelope.newBuilder().setSessionId(com.google.protobuf.ByteString.copyFrom(new byte[16])).setCorrelationId(999)
+            .setControlResult(xyz.jpenilla.squaremap.bridge.v1.ControlResult.newBuilder().setCode(xyz.jpenilla.squaremap.bridge.v1.BackendResultCode.BACKEND_RESULT_CODE_HEALTHY)).build());
         assertTrue(!pending.isDone());
-        connection.listener.accept(xyz.jpenilla.squaremap.bridge.v1.Envelope.newBuilder()
-            .setSessionId(com.google.protobuf.ByteString.copyFrom(connection.sessionId())).setCorrelationId(connection.correlation)
-            .setControlResult(xyz.jpenilla.squaremap.bridge.v1.ControlResult.newBuilder()
-                .setCode(xyz.jpenilla.squaremap.bridge.v1.BackendResultCode.BACKEND_RESULT_CODE_HEALTHY)).build());
-        assertEquals(BackendResult.Code.HEALTHY, pending.join().code());
-        assertEquals(0, bridge.pendingCount());
+        connection.listener.accept(xyz.jpenilla.squaremap.bridge.v1.Envelope.newBuilder().setSessionId(com.google.protobuf.ByteString.copyFrom(connection.sessionId())).setCorrelationId(connection.correlation)
+            .setControlResult(xyz.jpenilla.squaremap.bridge.v1.ControlResult.newBuilder().setCode(xyz.jpenilla.squaremap.bridge.v1.BackendResultCode.BACKEND_RESULT_CODE_HEALTHY)).build());
+        assertEquals(BackendResult.Code.HEALTHY, pending.join().code()); assertEquals(0, bridge.pendingCount());
     }
 
     @Test
@@ -85,133 +75,80 @@ final class BackendControllerTest {
         final CompletionStage<BackendResult> pending = bridge.execute(new BackendController.FullRender(this.world));
         assertEquals(7L, connection.control.getWorld().getEpoch());
         final BackendResult result = assertTimeoutPreemptively(Duration.ofSeconds(2), pending.toCompletableFuture()::join);
-        assertEquals(BackendResult.Code.BACKEND_TIMEOUT, result.code());
-        assertTrue(connection.cancelled);
+        assertEquals(BackendResult.Code.BACKEND_TIMEOUT, result.code()); assertTrue(connection.cancelled);
     }
 
     @Test
     void dispatchedTimeoutTerminatesSessionBeforeTimeoutResult() {
-        final FakeConnection connection = new FakeConnection();
-        connection.cancelDisposition = xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher.ControlDisposition.DISPATCHED;
+        final FakeConnection connection = new FakeConnection(); connection.cancelDisposition = xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher.ControlDisposition.DISPATCHED;
         final BridgeBackendController bridge = new BridgeBackendController(connection, this.scheduler, Duration.ofMillis(25), ignored -> 7L);
         final CompletionStage<BackendResult> timedOut = bridge.execute(new BackendController.FullRender(this.world));
         final BackendResult result = assertTimeoutPreemptively(Duration.ofSeconds(2), timedOut.toCompletableFuture()::join);
-        assertEquals(BackendResult.Code.BACKEND_TIMEOUT, result.code());
-        assertTrue(connection.closed);
+        assertEquals(BackendResult.Code.BACKEND_TIMEOUT, result.code()); assertTrue(connection.closed);
         assertTrue(bridge.execute(new BackendController.Health()).toCompletableFuture().join().code() == BackendResult.Code.BACKEND_UNAVAILABLE);
     }
 
     @Test
     void lateConfigRejectionDoesNotCompleteNewRevision() {
-        final FakeConnection connection = new FakeConnection();
-        final BridgeBackendController bridge = new BridgeBackendController(connection, this.scheduler, Duration.ofMillis(25), ignored -> 0L);
+        final FakeConnection connection = new FakeConnection(); final BridgeBackendController bridge = new BridgeBackendController(connection, this.scheduler, Duration.ofMillis(25), ignored -> 0L);
         final CompletionStage<BackendResult> first = bridge.publishConfig(xyz.jpenilla.squaremap.bridge.v1.ConfigReplace.newBuilder().setRevision(1).build());
         assertEquals(BackendResult.Code.BACKEND_TIMEOUT, first.toCompletableFuture().join().code());
         final CompletionStage<BackendResult> second = bridge.publishConfig(xyz.jpenilla.squaremap.bridge.v1.ConfigReplace.newBuilder().setRevision(2).build());
-        bridge.dispatch(xyz.jpenilla.squaremap.bridge.v1.Envelope.newBuilder().setSessionId(com.google.protobuf.ByteString.copyFrom(connection.sessionId()))
-            .setProtocolError(xyz.jpenilla.squaremap.bridge.v1.ProtocolError.newBuilder().setConfigRevision(1)).build());
+        bridge.dispatch(xyz.jpenilla.squaremap.bridge.v1.Envelope.newBuilder().setSessionId(com.google.protobuf.ByteString.copyFrom(connection.sessionId())).setProtocolError(xyz.jpenilla.squaremap.bridge.v1.ProtocolError.newBuilder().setConfigRevision(1)).build());
         assertFalse(second.toCompletableFuture().isDone());
-        bridge.dispatch(xyz.jpenilla.squaremap.bridge.v1.Envelope.newBuilder().setSessionId(com.google.protobuf.ByteString.copyFrom(connection.sessionId()))
-            .setBridgePolicyReplace(xyz.jpenilla.squaremap.bridge.v1.BridgePolicyReplace.newBuilder().setRevision(2)).build());
+        bridge.dispatch(xyz.jpenilla.squaremap.bridge.v1.Envelope.newBuilder().setSessionId(com.google.protobuf.ByteString.copyFrom(connection.sessionId())).setBridgePolicyReplace(xyz.jpenilla.squaremap.bridge.v1.BridgePolicyReplace.newBuilder().setRevision(2)).build());
         assertEquals(BackendResult.Code.HEALTHY, second.toCompletableFuture().join().code());
     }
 
     @Test
     void mismatchedConfigPolicyRevisionIsDiscarded() {
-        final FakeConnection connection = new FakeConnection();
-        final BridgeBackendController bridge = new BridgeBackendController(connection, this.scheduler);
-        final xyz.jpenilla.squaremap.bridge.v1.ConfigReplace config = xyz.jpenilla.squaremap.bridge.v1.ConfigReplace.newBuilder().setRevision(9).build();
-        final CompletionStage<BackendResult> pending = bridge.publishConfig(config);
-        bridge.dispatch(xyz.jpenilla.squaremap.bridge.v1.Envelope.newBuilder().setSessionId(com.google.protobuf.ByteString.copyFrom(connection.sessionId()))
-            .setBridgePolicyReplace(xyz.jpenilla.squaremap.bridge.v1.BridgePolicyReplace.newBuilder().setRevision(8)).build());
+        final FakeConnection connection = new FakeConnection(); final BridgeBackendController bridge = new BridgeBackendController(connection, this.scheduler);
+        final CompletionStage<BackendResult> pending = bridge.publishConfig(xyz.jpenilla.squaremap.bridge.v1.ConfigReplace.newBuilder().setRevision(9).build());
+        bridge.dispatch(xyz.jpenilla.squaremap.bridge.v1.Envelope.newBuilder().setSessionId(com.google.protobuf.ByteString.copyFrom(connection.sessionId())).setBridgePolicyReplace(xyz.jpenilla.squaremap.bridge.v1.BridgePolicyReplace.newBuilder().setRevision(8)).build());
         assertTrue(!pending.toCompletableFuture().isDone());
-        bridge.dispatch(xyz.jpenilla.squaremap.bridge.v1.Envelope.newBuilder().setSessionId(com.google.protobuf.ByteString.copyFrom(connection.sessionId()))
-            .setBridgePolicyReplace(xyz.jpenilla.squaremap.bridge.v1.BridgePolicyReplace.newBuilder().setRevision(9)).build());
+        bridge.dispatch(xyz.jpenilla.squaremap.bridge.v1.Envelope.newBuilder().setSessionId(com.google.protobuf.ByteString.copyFrom(connection.sessionId())).setBridgePolicyReplace(xyz.jpenilla.squaremap.bridge.v1.BridgePolicyReplace.newBuilder().setRevision(9)).build());
         assertEquals(BackendResult.Code.HEALTHY, pending.toCompletableFuture().join().code());
     }
 
     @Test
     void restartAbortLeavesBridgeControllerReusable() {
-        final FakeConnection connection = new FakeConnection();
-        final BridgeBackendController bridge = new BridgeBackendController(connection, this.scheduler);
-        bridge.abortForRestart();
-        final CompletionStage<BackendResult> pending = bridge.execute(new BackendController.Health());
-        assertTrue(connection.correlation > 0);
-        connection.listener.accept(xyz.jpenilla.squaremap.bridge.v1.Envelope.newBuilder()
-            .setSessionId(com.google.protobuf.ByteString.copyFrom(connection.sessionId())).setCorrelationId(connection.correlation)
-            .setControlResult(xyz.jpenilla.squaremap.bridge.v1.ControlResult.newBuilder()
-                .setCode(xyz.jpenilla.squaremap.bridge.v1.BackendResultCode.BACKEND_RESULT_CODE_HEALTHY)).build());
+        final FakeConnection connection = new FakeConnection(); final BridgeBackendController bridge = new BridgeBackendController(connection, this.scheduler); bridge.abortForRestart();
+        final CompletionStage<BackendResult> pending = bridge.execute(new BackendController.Health()); assertTrue(connection.correlation > 0);
+        connection.listener.accept(xyz.jpenilla.squaremap.bridge.v1.Envelope.newBuilder().setSessionId(com.google.protobuf.ByteString.copyFrom(connection.sessionId())).setCorrelationId(connection.correlation).setControlResult(xyz.jpenilla.squaremap.bridge.v1.ControlResult.newBuilder().setCode(xyz.jpenilla.squaremap.bridge.v1.BackendResultCode.BACKEND_RESULT_CODE_HEALTHY)).build());
         assertEquals(BackendResult.Code.HEALTHY, pending.toCompletableFuture().join().code());
     }
 
     @Test
     void reconnectFailsOldRequestsAndDoesNotRetainConfig() {
-        final FakeConnection first = new FakeConnection();
-        final BridgeBackendController bridge = new BridgeBackendController(first, this.scheduler);
+        final FakeConnection first = new FakeConnection(); final BridgeBackendController bridge = new BridgeBackendController(first, this.scheduler);
         final CompletionStage<BackendResult> request = bridge.execute(new BackendController.Health());
-        final CompletionStage<BackendResult> config = bridge.publishConfig(
-            xyz.jpenilla.squaremap.bridge.v1.ConfigReplace.newBuilder().setRevision(1).build());
-        final FakeConnection second = new FakeConnection();
-        bridge.attachForTest(second);
-        assertEquals(BackendResult.Code.BACKEND_UNAVAILABLE, request.toCompletableFuture().join().code());
-        assertEquals(BackendResult.Code.BACKEND_UNAVAILABLE, config.toCompletableFuture().join().code());
-        final CompletionStage<BackendResult> replacement = bridge.execute(new BackendController.Health());
-        first.failureListener.accept(new IllegalStateException("late failure"));
-        assertTrue(!replacement.toCompletableFuture().isDone());
-        second.listener.accept(xyz.jpenilla.squaremap.bridge.v1.Envelope.newBuilder()
-            .setSessionId(com.google.protobuf.ByteString.copyFrom(second.sessionId())).setCorrelationId(second.correlation)
-            .setControlResult(xyz.jpenilla.squaremap.bridge.v1.ControlResult.newBuilder()
-                .setCode(xyz.jpenilla.squaremap.bridge.v1.BackendResultCode.BACKEND_RESULT_CODE_HEALTHY)).build());
+        final CompletionStage<BackendResult> config = bridge.publishConfig(xyz.jpenilla.squaremap.bridge.v1.ConfigReplace.newBuilder().setRevision(1).build());
+        final FakeConnection second = new FakeConnection(); bridge.attachForTest(second);
+        assertEquals(BackendResult.Code.BACKEND_UNAVAILABLE, request.toCompletableFuture().join().code()); assertEquals(BackendResult.Code.BACKEND_UNAVAILABLE, config.toCompletableFuture().join().code());
+        final CompletionStage<BackendResult> replacement = bridge.execute(new BackendController.Health()); first.failureListener.accept(new IllegalStateException("late failure")); assertTrue(!replacement.toCompletableFuture().isDone());
+        second.listener.accept(xyz.jpenilla.squaremap.bridge.v1.Envelope.newBuilder().setSessionId(com.google.protobuf.ByteString.copyFrom(second.sessionId())).setCorrelationId(second.correlation).setControlResult(xyz.jpenilla.squaremap.bridge.v1.ControlResult.newBuilder().setCode(xyz.jpenilla.squaremap.bridge.v1.BackendResultCode.BACKEND_RESULT_CODE_HEALTHY)).build());
         assertEquals(BackendResult.Code.HEALTHY, replacement.toCompletableFuture().join().code());
     }
 
+    @Test
+    void reconnectAdmissionIsNotClearedByAttachCleanup() {
+        final FakeConnection first = new FakeConnection(); final BridgeBackendController bridge = new BridgeBackendController(first, this.scheduler);
+        final FakeConnection second = new FakeConnection(); second.onControlPublish = () -> bridge.attachForTest(second);
+        final CompletionStage<BackendResult> replacement = bridge.execute(new BackendController.Health());
+        assertEquals(1, bridge.pendingCount()); assertTrue(!replacement.toCompletableFuture().isDone());
+    }
+
     private BackendController controller(final BackendMode mode, final List<BackendController.BackendRequest> legacy, final List<BackendController.BackendRequest> bridge) {
-        return new BackendController(mode, request -> {
-            legacy.add(request);
-            return CompletableFuture.completedFuture(BackendResult.of(code(request)));
-        }, request -> {
-            bridge.add(request);
-            return CompletableFuture.completedFuture(BackendResult.of(BackendResult.Code.HEALTHY));
-        });
+        return new BackendController(mode, request -> { legacy.add(request); return CompletableFuture.completedFuture(BackendResult.of(code(request))); }, request -> { bridge.add(request); return CompletableFuture.completedFuture(BackendResult.of(BackendResult.Code.HEALTHY)); });
     }
-
     private static BackendResult.Code code(final BackendController.BackendRequest request) {
-        return request instanceof BackendController.FullRender ? BackendResult.Code.FULL_RENDER_STARTED
-            : request instanceof BackendController.RadiusRender ? BackendResult.Code.RADIUS_RENDER_STARTED
-            : request instanceof BackendController.CancelRender ? BackendResult.Code.RENDER_CANCELLED
-            : request instanceof BackendController.PauseRenders ? BackendResult.Code.RENDERS_PAUSED
-            : request instanceof BackendController.ResetMap ? BackendResult.Code.MAP_RESET
-            : request instanceof BackendController.Reload ? BackendResult.Code.RELOADED : BackendResult.Code.HEALTHY;
+        return request instanceof BackendController.FullRender ? BackendResult.Code.FULL_RENDER_STARTED : request instanceof BackendController.RadiusRender ? BackendResult.Code.RADIUS_RENDER_STARTED : request instanceof BackendController.CancelRender ? BackendResult.Code.RENDER_CANCELLED : request instanceof BackendController.PauseRenders ? BackendResult.Code.RENDERS_PAUSED : request instanceof BackendController.ResetMap ? BackendResult.Code.MAP_RESET : request instanceof BackendController.Reload ? BackendResult.Code.RELOADED : BackendResult.Code.HEALTHY;
     }
-
     private static final class FakeConnection implements xyz.jpenilla.squaremap.common.bridge.process.BridgeConnection {
-        private final byte[] sessionId = new byte[16];
-        private java.util.function.Consumer<xyz.jpenilla.squaremap.bridge.v1.Envelope> listener = ignored -> {};
-        private java.util.function.Consumer<Throwable> failureListener = ignored -> {};
-        private xyz.jpenilla.squaremap.bridge.v1.ControlRequest control;
-        private long correlation;
-        private boolean cancelled;
-        private boolean closed;
-        private xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher.ControlDisposition cancelDisposition =
-            xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher.ControlDisposition.RECALLED;
-        @Override public byte[] sessionId() { return this.sessionId; }
-        @Override public boolean isClosed() { return this.closed; }
-        @Override public xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher.PublishResult publish(xyz.jpenilla.squaremap.common.bridge.outbox.BridgeEvent event) {
-            if (event instanceof xyz.jpenilla.squaremap.common.bridge.outbox.BridgeEvent.Control controlEvent) {
-                this.correlation = controlEvent.correlationId();
-                this.control = controlEvent.payload().getControlRequest();
-            }
-            return xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher.PublishResult.ACCEPTED;
-        }
-        @Override public xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher.ControlDisposition cancelControl(final long correlationId) {
-            this.cancelled = this.correlation == correlationId;
-            return this.cancelDisposition;
-        }
-        @Override public void setResponseListener(java.util.function.Consumer<xyz.jpenilla.squaremap.bridge.v1.Envelope> listener) { this.listener = listener; }
-        @Override public void setFailureListener(java.util.function.Consumer<Throwable> listener) { this.failureListener = listener; }
-        @Override public void close() {
-            this.closed = true;
-            this.failureListener.accept(new IllegalStateException("fake session terminated"));
-        }
+        private final byte[] sessionId = new byte[16]; private java.util.function.Consumer<xyz.jpenilla.squaremap.bridge.v1.Envelope> listener = ignored -> {}; private java.util.function.Consumer<Throwable> failureListener = ignored -> {}; private xyz.jpenilla.squaremap.bridge.v1.ControlRequest control; private long correlation; private boolean cancelled; private boolean closed; private Runnable onControlPublish; private FakeConnection lastControlConnection; private xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher.ControlDisposition cancelDisposition = xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher.ControlDisposition.RECALLED;
+        @Override public byte[] sessionId() { return this.sessionId; } @Override public boolean isClosed() { return this.closed; }
+        @Override public xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher.PublishResult publish(xyz.jpenilla.squaremap.common.bridge.outbox.BridgeEvent event) { if (event instanceof xyz.jpenilla.squaremap.common.bridge.outbox.BridgeEvent.Control controlEvent) { this.correlation = controlEvent.correlationId(); this.control = controlEvent.payload().getControlRequest(); if (this.onControlPublish != null) { this.lastControlConnection = this; this.onControlPublish.run(); } } return xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher.PublishResult.ACCEPTED; }
+        @Override public xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher.ControlDisposition cancelControl(final long correlationId) { this.cancelled = this.correlation == correlationId; return this.cancelDisposition; }
+        @Override public void setResponseListener(java.util.function.Consumer<xyz.jpenilla.squaremap.bridge.v1.Envelope> listener) { this.listener = listener; } @Override public void setFailureListener(java.util.function.Consumer<Throwable> listener) { this.failureListener = listener; } @Override public void close() { this.closed = true; this.failureListener.accept(new IllegalStateException("fake session terminated")); }
     }
 }
