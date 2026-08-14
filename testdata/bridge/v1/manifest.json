@@ -13,10 +13,11 @@
     "artifact_prerequisites": [
       "provide a real Paper server jar for paper.path",
       "provide a real squaremap plugin jar for plugin.path",
-      "provide a real squaremap sidecar executable for sidecar.path"
+      "provide a real squaremap sidecar executable for sidecar.path",
+      "generate and provide a complete Paper world corpus for world_fixture.path"
     ],
     "world_fixture": {"path": "world-fixture.json", "sha256": "787f72e6631183fc3e029b9877050d7a87c759cb0f7bc8072a1a72cbbb61ce07"},
-    "runtime": {"java": "25", "jvm": "-Xms1G -Xmx2G -Duser.timezone=UTC -Duser.language=en", "os": "Linux", "arch": "x86_64", "server": "Paper 26.2", "command_protocol": "console-or-rcon-v1"},
+    "runtime": {"java": "25", "jvm": "-Xms1G -Xmx2G -Duser.timezone=UTC -Duser.language=en", "os": "Linux", "arch": "x86_64", "server": "Paper 26.2", "command_protocol": "console-or-rcon-v1", "rust_toolchain": "1.88.0"},
     "world": {"seed": 8675309, "name": "proof-world", "view_distance": 6, "simulation_distance": 4, "timezone": "UTC", "locale": "en_US"},
     "roots": {"data": "proof-data", "java_output": "proof-java-output", "rust_output": "proof-rust-output", "diagnostics": "proof-diagnostics"},
     "ports": {"paper": 25565, "rcon": 25575, "rust_http": 18080},
