@@ -15,7 +15,7 @@
       "provide a real squaremap plugin jar for plugin.path",
       "provide a real squaremap sidecar executable for sidecar.path"
     ],
-    "world_fixture": {"path": "world-fixture.json", "sha256": ""},
+    "world_fixture": {"path": "world-fixture.json", "sha256": "787f72e6631183fc3e029b9877050d7a87c759cb0f7bc8072a1a72cbbb61ce07"},
     "runtime": {"java": "25", "jvm": "-Xms1G -Xmx2G -Duser.timezone=UTC -Duser.language=en", "os": "Linux", "arch": "x86_64", "server": "Paper 1.21.8", "command_protocol": "console-or-rcon-v1"},
     "world": {"seed": 8675309, "name": "proof-world", "view_distance": 6, "simulation_distance": 4, "timezone": "UTC", "locale": "en_US"},
     "roots": {"data": "proof-data", "java_output": "proof-java-output", "rust_output": "proof-rust-output", "diagnostics": "proof-diagnostics"},
