@@ -1,117 +1,37 @@
 package xyz.jpenilla.squaremap.common.bridge.verification;
 
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParseException;
-import com.google.gson.JsonParser;
-import java.io.IOException;
-import java.io.Reader;
-import java.nio.file.Files;
-import java.nio.file.LinkOption;
-import java.nio.file.Path;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.ArrayList;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Set;
+import com.google.gson.*;
+import java.io.*;
+import java.nio.file.*;
+import java.security.*;
+import java.util.*;
 import java.util.HexFormat;
 
 /** Immutable, fail-closed metadata for the local Paper production proof. */
-public record ProofFixture(
-    int version,
-    Artifact paper,
-    Artifact plugin,
-    Artifact sidecar,
-    String minecraftVersion,
-    World world,
-    Roots roots,
-    Ports ports,
-    Map<String, Long> timeoutsMs,
-    long quietIntervalMs,
-    long rssIntervalMs,
-    Map<String, Long> thresholds,
-    List<String> scenario,
-    List<String> normalization
-) {
-    private static final List<String> REQUIRED = List.of("readiness", "baseline", "mutation", "churn", "reload", "cancel", "resume", "quiescence", "kill", "restart", "replay", "second_mutation", "shutdown");
-
-    public static ProofFixture load(final Path manifest) throws IOException {
-        Objects.requireNonNull(manifest, "manifest");
-        final JsonObject root;
-        try (Reader reader = Files.newBufferedReader(manifest)) {
-            final JsonElement element = JsonParser.parseReader(reader);
-            if (!element.isJsonObject()) throw invalid("manifest must be an object");
-            root = element.getAsJsonObject();
-        } catch (final JsonParseException e) {
-            throw invalid("manifest is not valid JSON", e);
-        }
-        final int version = integer(root, "version");
-        if (version != 1) throw invalid("unsupported fixture version: " + version);
-        final JsonObject data = object(root, "paper_fixture");
-        final Path base = manifest.toAbsolutePath().normalize().getParent();
-        final Artifact paper = artifact(data, "paper", base);
-        final Artifact plugin = artifact(data, "plugin", base);
-        final Artifact sidecar = artifact(data, "sidecar", base);
-        final JsonObject worldJson = object(data, "world");
-        final World world = new World(longValue(worldJson, "seed"), string(worldJson, "name"), positiveInt(worldJson, "view_distance"), positiveInt(worldJson, "simulation_distance"), string(worldJson, "timezone"), string(worldJson, "locale"));
-        final JsonObject rootsJson = object(data, "roots");
-        final Roots roots = new Roots(path(rootsJson, "data"), path(rootsJson, "java_output"), path(rootsJson, "rust_output"), path(rootsJson, "diagnostics"));
-        validateRoots(roots);
-        final JsonObject portsJson = object(data, "ports");
-        final Ports ports = new Ports(port(portsJson, "paper"), port(portsJson, "rcon"), port(portsJson, "rust_http"));
-        if (Set.of(ports.paper(), ports.rcon(), ports.rustHttp()).size() != 3) throw invalid("ports must not collide");
-        final Map<String, Long> timeouts = positiveMap(object(data, "timeouts_ms"), "timeout");
-        final long quiet = positive(data, "quiet_interval_ms");
-        final long rss = positive(data, "rss_interval_ms");
-        final Map<String, Long> thresholds = nonnegativeMap(object(data, "thresholds"));
-        final List<String> scenario = strings(data, "scenario");
-        if (!new LinkedHashSet<>(scenario).containsAll(REQUIRED)) throw invalid("scenario is missing a required lifecycle step");
-        final List<String> normalization = strings(data, "normalization");
-        for (String rule : normalization) if (!Set.of("volatile_headers", "volatile_timestamps").contains(rule)) throw invalid("undeclared normalization: " + rule);
-        return new ProofFixture(version, paper, plugin, sidecar, string(data, "minecraft_version"), world, roots, ports, timeouts, quiet, rss, thresholds, List.copyOf(scenario), List.copyOf(normalization));
-    }
-
-    private static Artifact artifact(JsonObject data, String key, Path base) throws IOException {
-        final JsonObject named = object(data, key);
-        final String url = string(named, "url");
-        final String version = string(named, "version");
-        final String hash = string(named, "sha256").toLowerCase(Locale.ROOT);
-        final JsonObject artifacts = object(data, "artifacts");
-        final JsonObject file = object(artifacts, key);
-        final Path path = base.resolve(string(file, "path")).normalize();
-        if (!path.startsWith(base) || Files.isSymbolicLink(path) || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) throw invalid("missing or unsafe " + key + " artifact: " + path);
-        final String expected = string(file, "sha256").toLowerCase(Locale.ROOT);
-        if (!hash.equals(expected) || !hash.matches("[0-9a-f]{64}")) throw invalid("invalid " + key + " artifact hash");
-        if (!sha256(path).equals(expected)) throw invalid("SHA-256 mismatch for " + key + " artifact");
-        return new Artifact(version, url, expected, path);
-    }
-
-    private static void validateRoots(Roots roots) {
-        final List<Path> paths = List.of(roots.data(), roots.javaOutput(), roots.rustOutput(), roots.diagnostics());
-        for (int i = 0; i < paths.size(); i++) for (int j = i + 1; j < paths.size(); j++) if (paths.get(i).startsWith(paths.get(j)) || paths.get(j).startsWith(paths.get(i))) throw invalid("fixture roots overlap");
-    }
-    private static String sha256(Path path) throws IOException { try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(path))); } catch (NoSuchAlgorithmException e) { throw new AssertionError(e); } }
-    private static JsonObject object(JsonObject o, String key) { JsonElement e = o.get(key); if (e == null || !e.isJsonObject()) throw invalid("missing object '" + key + "'"); return e.getAsJsonObject(); }
-    private static String string(JsonObject o, String key) { JsonElement e = o.get(key); if (e == null || !e.isJsonPrimitive() || !e.getAsJsonPrimitive().isString() || e.getAsString().isBlank()) throw invalid("missing string '" + key + "'"); return e.getAsString(); }
-    private static int integer(JsonObject o, String key) { try { return o.get(key).getAsInt(); } catch (RuntimeException e) { throw invalid("missing integer '" + key + "'"); } }
-    private static int positiveInt(JsonObject o, String key) { int n = integer(o, key); if (n <= 0) throw invalid(key + " must be positive"); return n; }
-    private static long longValue(JsonObject o, String key) { try { return o.get(key).getAsLong(); } catch (RuntimeException e) { throw invalid("missing number '" + key + "'"); } }
-    private static long positive(JsonObject o, String key) { long n = longValue(o, key); if (n <= 0) throw invalid(key + " must be positive"); return n; }
-    private static Path path(JsonObject o, String key) { String s = string(o, key); if (Path.of(s).isAbsolute() || s.contains("..")) throw invalid("root must be relative: " + key); return Path.of(s).normalize(); }
-    private static int port(JsonObject o, String key) { int n = positiveInt(o, key); if (n > 65535) throw invalid("invalid port"); return n; }
-    private static List<String> strings(JsonObject o, String key) { JsonElement e = o.get(key); if (e == null || !e.isJsonArray()) throw invalid("missing array '" + key + "'"); List<String> result = new ArrayList<>(); e.getAsJsonArray().forEach(x -> { if (!x.isJsonPrimitive() || !x.getAsJsonPrimitive().isString() || x.getAsString().isBlank()) throw invalid("invalid entry in " + key); result.add(x.getAsString()); }); return result; }
-    private static Map<String, Long> positiveMap(JsonObject o, String ignored) { return numberMap(o, true); }
-    private static Map<String, Long> nonnegativeMap(JsonObject o) { return numberMap(o, false); }
-    private static Map<String, Long> numberMap(JsonObject o, boolean positive) { java.util.LinkedHashMap<String, Long> result = new java.util.LinkedHashMap<>(); o.entrySet().forEach(e -> { long n; try { n = e.getValue().getAsLong(); } catch (RuntimeException x) { throw invalid("invalid numeric value"); } if (positive ? n <= 0 : n < 0) throw invalid("invalid timing/threshold value"); result.put(e.getKey(), n); }); return Map.copyOf(result); }
-    private static IllegalArgumentException invalid(String message) { return new IllegalArgumentException(message); }
-    private static IllegalArgumentException invalid(String message, Throwable cause) { return new IllegalArgumentException(message, cause); }
-
-    public record Artifact(String version, String url, String sha256, Path path) {}
-    public record World(long seed, String name, int viewDistance, int simulationDistance, String timezone, String locale) {}
-    public record Roots(Path data, Path javaOutput, Path rustOutput, Path diagnostics) {}
-    public record Ports(int paper, int rcon, int rustHttp) {}
+public record ProofFixture(int version, Artifact paper, Artifact plugin, Artifact sidecar, String minecraftVersion,
+    World world, WorldFixture worldFixture, Runtime runtime, Roots roots, Ports ports, Map<String,Long> timeoutsMs,
+    long quietIntervalMs, long rssIntervalMs, Map<String,Long> thresholds, List<String> scenario,
+    List<String> normalization, List<String> blockedPrerequisites) {
+  private static final List<String> REQUIRED=List.of("readiness","baseline","mutation","churn","reload","cancel","resume","quiescence","kill","restart","replay","second_mutation","shutdown");
+  public static ProofFixture load(Path manifest)throws IOException{
+    JsonObject root; try(Reader r=Files.newBufferedReader(manifest)){root=JsonParser.parseReader(r).getAsJsonObject();}catch(RuntimeException e){throw invalid("manifest is not valid JSON",e);}
+    int version=integer(root,"version"); if(version!=1)throw invalid("unsupported fixture version: "+version);
+    JsonObject data=object(root,"paper_fixture"); Path base=manifest.toAbsolutePath().normalize().getParent();
+    Artifact paper=artifact(data,"paper",base), plugin=artifact(data,"plugin",base), sidecar=artifact(data,"sidecar",base);
+    List<String> blocked=strings(data,"artifact_prerequisites"); if(paper.placeholder()||plugin.placeholder()||sidecar.placeholder())throw new BlockedFixtureArtifactsException(blocked);
+    JsonObject w=object(data,"world"); World world=new World(longValue(w,"seed"),string(w,"name"),positiveInt(w,"view_distance"),positiveInt(w,"simulation_distance"),string(w,"timezone"),string(w,"locale"));
+    WorldFixture wf=worldFixture(data,base); JsonObject r=object(data,"runtime"); Runtime runtime=new Runtime(string(r,"java"),string(r,"jvm"),string(r,"os"),string(r,"arch"),string(r,"server"),string(r,"command_protocol"));
+    JsonObject roots=object(data,"roots"); Roots paths=new Roots(path(roots,"data"),path(roots,"java_output"),path(roots,"rust_output"),path(roots,"diagnostics")); validateRoots(base,paths);
+    JsonObject p=object(data,"ports"); Ports ports=new Ports(port(p,"paper"),port(p,"rcon"),port(p,"rust_http")); if(Set.of(ports.paper(),ports.rcon(),ports.rustHttp()).size()!=3)throw invalid("ports must not collide");
+    Map<String,Long> timeouts=numberMap(object(data,"timeouts_ms"),true); long quiet=positive(data,"quiet_interval_ms"),rss=positive(data,"rss_interval_ms"); Map<String,Long> thresholds=numberMap(object(data,"thresholds"),false);
+    List<String> scenario=strings(data,"scenario"); if(!scenario.equals(REQUIRED))throw invalid("scenario must exactly match the required ordered lifecycle"); List<String> norm=strings(data,"normalization"); for(String n:norm)if(!Set.of("volatile_headers","volatile_timestamps").contains(n))throw invalid("undeclared normalization: "+n);
+    return new ProofFixture(version,paper,plugin,sidecar,string(data,"minecraft_version"),world,wf,runtime,paths,ports,timeouts,quiet,rss,thresholds,List.copyOf(scenario),List.copyOf(norm),List.copyOf(blocked));
+  }
+  private static WorldFixture worldFixture(JsonObject d,Path b)throws IOException{JsonObject f=object(d,"world_fixture");Path p=b.resolve(string(f,"path")).normalize();if(!p.startsWith(b)||!Files.isRegularFile(p,LinkOption.NOFOLLOW_LINKS))throw invalid("missing world fixture");String h=string(f,"sha256");if(!h.isBlank()&&!sha256(p).equals(h))throw invalid("world fixture SHA-256 mismatch");return new WorldFixture(p,h);}
+  private static Artifact artifact(JsonObject d,String k,Path b)throws IOException{JsonObject n=object(d,k),a=object(object(d,"artifacts"),k);String url=string(n,"url"),v=string(n,"version"),h=string(a,"sha256").toLowerCase(Locale.ROOT);Path p=b.resolve(string(a,"path")).normalize();if(!p.startsWith(b)||!Files.isRegularFile(p,LinkOption.NOFOLLOW_LINKS))throw invalid("missing or unsafe "+k+" artifact: "+p);if(!h.matches("[0-9a-f]{64}")||!sha256(p).equals(h))throw invalid("SHA-256 mismatch for "+k+" artifact");return new Artifact(v,url,h,p,url.contains("fill.invalid")||p.getFileName().toString().equals("hello.bin"));}
+  private static void validateRoots(Path b,Roots r){List<Path> ps=List.of(r.data(),r.javaOutput(),r.rustOutput(),r.diagnostics());for(Path p:ps)if(p.isAbsolute()||p.normalize().toString().contains(".."))throw invalid("roots must be relative");for(int i=0;i<ps.size();i++)for(int j=i+1;j<ps.size();j++){Path a=b.resolve(ps.get(i)).normalize(),c=b.resolve(ps.get(j)).normalize();try{a=a.toRealPath();c=c.toRealPath();}catch(IOException ignored){}if(a.startsWith(c)||c.startsWith(a))throw invalid("fixture roots overlap");}}
+  private static String sha256(Path p)throws IOException{try{return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(p)));}catch(NoSuchAlgorithmException e){throw new AssertionError(e);}}
+  private static JsonObject object(JsonObject o,String k){JsonElement e=o.get(k);if(e==null||!e.isJsonObject())throw invalid("missing object '"+k+"'");return e.getAsJsonObject();} private static String string(JsonObject o,String k){JsonElement e=o.get(k);if(e==null||!e.isJsonPrimitive()||!e.getAsJsonPrimitive().isString()||e.getAsString().isBlank())throw invalid("missing string '"+k+"'");return e.getAsString();} private static int integer(JsonObject o,String k){try{return o.get(k).getAsInt();}catch(RuntimeException e){throw invalid("missing integer '"+k+"'");}} private static int positiveInt(JsonObject o,String k){int n=integer(o,k);if(n<=0)throw invalid(k+" must be positive");return n;} private static long longValue(JsonObject o,String k){try{return o.get(k).getAsLong();}catch(RuntimeException e){throw invalid("missing number '"+k+"'");}} private static long positive(JsonObject o,String k){long n=longValue(o,k);if(n<=0)throw invalid(k+" must be positive");return n;} private static Path path(JsonObject o,String k){String s=string(o,k);if(Path.of(s).isAbsolute()||s.contains(".."))throw invalid("root must be relative: "+k);return Path.of(s).normalize();} private static int port(JsonObject o,String k){int n=positiveInt(o,k);if(n>65535)throw invalid("invalid port");return n;} private static List<String> strings(JsonObject o,String k){JsonElement e=o.get(k);if(e==null||!e.isJsonArray())throw invalid("missing array '"+k+"'");List<String> r=new ArrayList<>();e.getAsJsonArray().forEach(x->{if(!x.isJsonPrimitive()||!x.getAsJsonPrimitive().isString()||x.getAsString().isBlank())throw invalid("invalid entry in "+k);r.add(x.getAsString());});return r;} private static Map<String,Long> numberMap(JsonObject o,boolean pos){Map<String,Long> r=new LinkedHashMap<>();o.entrySet().forEach(e->{long n;try{n=e.getValue().getAsLong();}catch(RuntimeException x){throw invalid("invalid numeric value");}if(pos?n<=0:n<0)throw invalid("invalid timing/threshold value");r.put(e.getKey(),n);});return Map.copyOf(r);} private static IllegalArgumentException invalid(String m){return new IllegalArgumentException(m);} private static IllegalArgumentException invalid(String m,Throwable t){return new IllegalArgumentException(m,t);}
+  public record Artifact(String version,String url,String sha256,Path path,boolean placeholder){} public record World(long seed,String name,int viewDistance,int simulationDistance,String timezone,String locale){} public record WorldFixture(Path path,String sha256){} public record Runtime(String java,String jvm,String os,String arch,String server,String commandProtocol){} public record Roots(Path data,Path javaOutput,Path rustOutput,Path diagnostics){} public record Ports(int paper,int rcon,int rustHttp){}
+  public static final class BlockedFixtureArtifactsException extends IllegalStateException{private final List<String> prerequisites; public BlockedFixtureArtifactsException(List<String> p){super("blocked_fixture_artifacts: "+p);prerequisites=List.copyOf(p);}public List<String> prerequisites(){return prerequisites;}}
 }

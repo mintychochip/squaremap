@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "seed": 8675309,
+  "name": "proof-world",
+  "generator": "minecraft:normal",
+  "coordinates": [
+    {"x": 0, "y": 64, "z": 0, "block": "minecraft:stone"},
+    {"x": -16, "y": 64, "z": 0, "block": "minecraft:oak_log"},
+    {"x": 15, "y": 64, "z": 15, "block": "minecraft:glass"}
+  ],
+  "timezone": "UTC",
+  "locale": "en_US"
+}
