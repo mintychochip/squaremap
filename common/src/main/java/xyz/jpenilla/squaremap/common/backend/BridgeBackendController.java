@@ -260,7 +260,8 @@ public final class BridgeBackendController implements AutoCloseable {
         if (future != null) future.complete(result);
     }
 
-    private void failed(final Throwable ignored) {
+    private void failed(final BridgeConnection connection, final Throwable ignored) {
+        if (this.listeningConnection != connection) return;
         this.clearPending(BackendResult.Code.BACKEND_UNAVAILABLE);
         this.completeConfig(BackendResult.of(BackendResult.Code.BACKEND_UNAVAILABLE));
         if (this.snapshotHandler != null) this.snapshotHandler.abortAll();
@@ -283,15 +284,23 @@ public final class BridgeBackendController implements AutoCloseable {
             envelope.getReady().getStateRevision()
         );
     }
+    void attachForTest(final BridgeConnection connection) {
+        this.attach(connection);
+    }
     private void attach(final BridgeConnection connection) {
+        final BridgeConnection previous = this.listeningConnection;
         this.listeningConnection = Objects.requireNonNull(connection, "connection");
+        if (previous != null && previous != connection) {
+            this.clearPending(BackendResult.Code.BACKEND_UNAVAILABLE);
+            this.completeConfig(BackendResult.of(BackendResult.Code.BACKEND_UNAVAILABLE));
+        }
         connection.setReadyListener(this::ready);
         connection.setResponseListener(this::dispatch);
         if (this.snapshotHandler != null) {
             connection.setSnapshotRequestListener(envelope -> this.snapshotHandler.handle(envelope, connection::publish));
             connection.setAcknowledgementListener(this.snapshotHandler::acknowledge);
         }
-        connection.setFailureListener(this::failed);
+        connection.setFailureListener(failure -> this.failed(connection, failure));
     }
 
     private long allocateCorrelationId() {

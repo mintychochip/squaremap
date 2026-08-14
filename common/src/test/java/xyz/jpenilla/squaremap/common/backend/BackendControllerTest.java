@@ -144,6 +144,27 @@ final class BackendControllerTest {
         assertEquals(BackendResult.Code.HEALTHY, pending.toCompletableFuture().join().code());
     }
 
+    @Test
+    void reconnectFailsOldRequestsAndDoesNotRetainConfig() {
+        final FakeConnection first = new FakeConnection();
+        final BridgeBackendController bridge = new BridgeBackendController(first, this.scheduler);
+        final CompletionStage<BackendResult> request = bridge.execute(new BackendController.Health());
+        final CompletionStage<BackendResult> config = bridge.publishConfig(
+            xyz.jpenilla.squaremap.bridge.v1.ConfigReplace.newBuilder().setRevision(1).build());
+        final FakeConnection second = new FakeConnection();
+        bridge.attachForTest(second);
+        assertEquals(BackendResult.Code.BACKEND_UNAVAILABLE, request.toCompletableFuture().join().code());
+        assertEquals(BackendResult.Code.BACKEND_UNAVAILABLE, config.toCompletableFuture().join().code());
+        final CompletionStage<BackendResult> replacement = bridge.execute(new BackendController.Health());
+        first.failureListener.accept(new IllegalStateException("late failure"));
+        assertTrue(!replacement.toCompletableFuture().isDone());
+        second.listener.accept(xyz.jpenilla.squaremap.bridge.v1.Envelope.newBuilder()
+            .setSessionId(com.google.protobuf.ByteString.copyFrom(second.sessionId())).setCorrelationId(second.correlation)
+            .setControlResult(xyz.jpenilla.squaremap.bridge.v1.ControlResult.newBuilder()
+                .setCode(xyz.jpenilla.squaremap.bridge.v1.BackendResultCode.BACKEND_RESULT_CODE_HEALTHY)).build());
+        assertEquals(BackendResult.Code.HEALTHY, replacement.toCompletableFuture().join().code());
+    }
+
     private BackendController controller(final BackendMode mode, final List<BackendController.BackendRequest> legacy, final List<BackendController.BackendRequest> bridge) {
         return new BackendController(mode, request -> {
             legacy.add(request);
