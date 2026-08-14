@@ -56,6 +56,14 @@ public final class BridgeBackendController implements AutoCloseable {
     @FunctionalInterface interface EpochResolver { long epoch(WorldIdentifier world); }
     public BridgePublisher.PublishResult publishDirty(final xyz.jpenilla.squaremap.common.data.MapWorldInternal world, final xyz.jpenilla.squaremap.common.data.ChunkCoordinate coordinate, final long revision) { final BridgeConnection connection=this.connection(); if(connection==null||connection.isClosed())return BridgePublisher.PublishResult.COALESCED; final WorldIdentifier identifier=world.identifier(); return connection.publish(new xyz.jpenilla.squaremap.common.bridge.outbox.BridgeEvent.DirtyChunk(new xyz.jpenilla.squaremap.common.bridge.outbox.BridgeEvent.WorldKey(identifier.namespace(),identifier.value()),this.epochs.epoch(identifier),coordinate.x(),coordinate.z(),revision)); }
     CompletionStage<BackendResult> execute(final BackendController.BackendRequest request) {
+        if (request instanceof BackendController.Reload) {
+            if (this.common == null) return CompletableFuture.completedFuture(BackendResult.of(BackendResult.Code.INVALID_REQUEST));
+            this.common.get().reload();
+            return CompletableFuture.completedFuture(new BackendResult(
+                BackendResult.Code.RELOADED,
+                java.util.List.of(new BackendResult.Substitution("version", new BackendResult.Text(this.common.get().version())))
+            ));
+        }
         if (request instanceof BackendController.ConfigSync sync) return this.publishConfig(sync.config());
         if (request instanceof BackendController.RestartProgressLogging) return CompletableFuture.completedFuture(BackendResult.of(BackendResult.Code.INVALID_REQUEST));
         final ConnectionAdmission admission;

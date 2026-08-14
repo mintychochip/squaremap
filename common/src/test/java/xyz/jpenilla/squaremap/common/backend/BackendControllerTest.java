@@ -117,6 +117,13 @@ final class BackendControllerTest {
         connection.listener.accept(xyz.jpenilla.squaremap.bridge.v1.Envelope.newBuilder().setSessionId(com.google.protobuf.ByteString.copyFrom(connection.sessionId())).setCorrelationId(connection.correlation).setControlResult(xyz.jpenilla.squaremap.bridge.v1.ControlResult.newBuilder().setCode(xyz.jpenilla.squaremap.bridge.v1.BackendResultCode.BACKEND_RESULT_CODE_HEALTHY)).build());
         assertEquals(BackendResult.Code.HEALTHY, pending.toCompletableFuture().join().code());
     }
+    @Test
+    void bridgeReloadUsesJavaReloadPath() {
+        final FakeConnection connection = new FakeConnection();
+        final BridgeBackendController bridge = new BridgeBackendController(connection, this.scheduler);
+        assertEquals(BackendResult.Code.INVALID_REQUEST, bridge.execute(new BackendController.Reload()).toCompletableFuture().join().code());
+        assertEquals(0, connection.correlation);
+    }
 
     @Test
     void reconnectFailsOldRequestsAndDoesNotRetainConfig() {
