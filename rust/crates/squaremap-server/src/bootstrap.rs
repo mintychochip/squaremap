@@ -407,11 +407,11 @@ async fn handle_control_request(
             )
         }
         ControlKind::PauseRenders => {
-            if scheduler.is_paused() {
-                scheduler.resume();
+            if scheduler.is_paused(&world) {
+                scheduler.resume(&world);
                 control_response(BackendResultCode::RendersResumed, Some(identity))
             } else {
-                scheduler.pause();
+                scheduler.pause(&world);
                 control_response(BackendResultCode::RendersPaused, Some(identity))
             }
         }
@@ -1082,18 +1082,22 @@ mod control_tests {
         }
     }
 
-    fn identity() -> WorldIdentity {
+    fn identity(value: &str) -> WorldIdentity {
         WorldIdentity {
             namespace: "minecraft".to_string(),
-            value: "overworld".to_string(),
+            value: value.to_string(),
             epoch: 7,
         }
     }
 
-    fn request(kind: ControlKind, coordinates: Vec<ChunkCoordinate>) -> ControlRequest {
+    fn world(value: &str) -> WorldId {
+        WorldId::new("minecraft", value, 7)
+    }
+
+    fn request_for(kind: ControlKind, identity: WorldIdentity, coordinates: Vec<ChunkCoordinate>) -> ControlRequest {
         ControlRequest {
             kind: kind as i32,
-            world: Some(identity()),
+            world: Some(identity),
             center_x: 0,
             center_z: 0,
             radius: 2,
@@ -1106,6 +1110,11 @@ mod control_tests {
                 .collect(),
         }
     }
+
+    fn request(kind: ControlKind, coordinates: Vec<ChunkCoordinate>) -> ControlRequest {
+        request_for(kind, identity("overworld"), coordinates)
+    }
+
 
     async fn fixture() -> (
         tempfile::TempDir,
@@ -1132,7 +1141,7 @@ mod control_tests {
         );
         let root = OutputRoot::new(directory.path().join("output")).unwrap();
         let mut state = ControlState::default();
-        state.replace_worlds(vec![identity()]);
+        state.replace_worlds(vec![identity("overworld")]);
         (
             directory,
             repository,
@@ -1153,12 +1162,43 @@ mod control_tests {
             active_jobs.clone(),
             11,
             &root,
-        )
-        .await;
+        ).await;
         assert_eq!(result.code, BackendResultCode::FullRenderStarted as i32);
         assert_eq!(repository.recover().await.unwrap().jobs.len(), 1);
         drop(scheduler);
     }
+
+    #[tokio::test]
+    async fn pause_renders_only_toggles_requested_world() {
+        let (_directory, repository, scheduler, root, mut state, active_jobs) = fixture().await;
+        repository.apply_world(World::new("minecraft", "nether", 7, Vec::new())).await.unwrap();
+        state.replace_worlds(vec![identity("overworld"), identity("nether")]);
+
+        let first = handle_control_request(
+            &mut state,
+            &request_for(ControlKind::PauseRenders, identity("overworld"), Vec::new()),
+            Some(scheduler.clone()),
+            active_jobs.clone(),
+            11,
+            &root,
+        ).await;
+        assert_eq!(first.code, BackendResultCode::RendersPaused as i32);
+        assert!(scheduler.is_paused(&world("overworld")));
+        assert!(!scheduler.is_paused(&world("nether")));
+
+        let second = handle_control_request(
+            &mut state,
+            &request_for(ControlKind::PauseRenders, identity("nether"), Vec::new()),
+            Some(scheduler.clone()),
+            active_jobs,
+            11,
+            &root,
+        ).await;
+        assert_eq!(second.code, BackendResultCode::RendersPaused as i32);
+        assert!(scheduler.is_paused(&world("overworld")));
+        assert!(scheduler.is_paused(&world("nether")));
+    }
+
     #[tokio::test]
     async fn pause_renders_toggles_scheduler_state() {
         let (_directory, _repository, scheduler, root, mut state, active_jobs) = fixture().await;
@@ -1172,7 +1212,7 @@ mod control_tests {
         )
         .await;
         assert_eq!(first.code, BackendResultCode::RendersPaused as i32);
-        assert!(scheduler.is_paused());
+        assert!(scheduler.is_paused(&world("overworld")));
 
         let second = handle_control_request(
             &mut state,
@@ -1184,7 +1224,7 @@ mod control_tests {
         )
         .await;
         assert_eq!(second.code, BackendResultCode::RendersResumed as i32);
-        assert!(!scheduler.is_paused());
+        assert!(!scheduler.is_paused(&world("overworld")));
     }
 
     #[tokio::test]

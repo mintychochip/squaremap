@@ -97,7 +97,7 @@ pub(super) async fn run(
     scheduler.repository.update_render_job(job.clone()).await?;
     let mut report = RunReport::default();
     while cursor.next < cursor.coordinates.len() && report.selected < max_steps {
-        scheduler.wait_unpaused().await;
+        scheduler.wait_unpaused(&job.world).await;
         if scheduler.is_cancelled(id) {
             report.cancelled = true;
             break;

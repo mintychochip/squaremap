@@ -215,11 +215,11 @@ async fn pause_blocks_progress_and_cancel_fences_late_snapshot() {
     let installer = Arc::new(FakeInstaller::default());
     let first_scheduler = Arc::new(scheduler(repository.clone(), bridge.clone(), installer.clone(), 8));
     let job = first_scheduler.start_job(overworld.id(), JobKind::Full, vec![coordinate(1, 1)]).await.unwrap();
-    first_scheduler.pause();
+    first_scheduler.pause(&overworld.id);
     let running = { let scheduler = first_scheduler.clone(); let id = job.id.clone(); tokio::spawn(async move { scheduler.run_job(&id).await }) };
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(installer.installed.lock().unwrap().is_empty());
-    first_scheduler.resume();
+    first_scheduler.resume(&overworld.id);
     running.await.unwrap().unwrap();
     assert_eq!(installer.installed.lock().unwrap().len(), 1);
 

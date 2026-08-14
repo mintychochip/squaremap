@@ -8,9 +8,9 @@ pub use renderer::{PrefixedTileStore, RenderTileInstaller, WorldRenderConfig};
 use async_trait::async_trait;
 use squaremap_render::Snapshot;
 use squaremap_state::{ChunkCoordinate, JobKind, RenderJob, Repository, RepositoryError, WorldId};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{Notify, Semaphore};
@@ -124,14 +124,18 @@ pub struct RunReport {
     pub cancelled: bool,
 }
 
+#[derive(Default)]
+struct WorldPause {
+    paused: std::sync::atomic::AtomicBool,
+    notify: Notify,
+}
 pub struct Scheduler {
     repository: Arc<Repository>,
     bridge: Arc<dyn SnapshotBridge>,
     installer: Arc<dyn TileInstaller>,
     snapshot_credits: Arc<Semaphore>,
     config: SchedulerConfig,
-    paused: AtomicBool,
-    pause_notify: Notify,
+    pause_states: Mutex<HashMap<WorldId, Arc<WorldPause>>>,
     cancelled_jobs: Mutex<HashSet<Vec<u8>>>,
     next_job_nonce: AtomicU64,
 }
@@ -157,24 +161,33 @@ impl Scheduler {
             installer,
             snapshot_credits: Arc::new(Semaphore::new(config.max_active_snapshots)),
             config,
-            paused: AtomicBool::new(false),
-            pause_notify: Notify::new(),
+            pause_states: Mutex::new(HashMap::new()),
             cancelled_jobs: Mutex::new(HashSet::new()),
             next_job_nonce: AtomicU64::new(1),
         })
     }
-
     pub fn config(&self) -> &SchedulerConfig { &self.config }
-    pub fn pause(&self) { self.paused.store(true, Ordering::Release); }
-    pub fn resume(&self) {
-        self.paused.store(false, Ordering::Release);
-        self.pause_notify.notify_waiters();
+
+    fn pause_state(&self, world: &WorldId) -> Arc<WorldPause> {
+        let mut states = self.pause_states.lock().expect("pause state lock poisoned");
+        states.entry(world.clone()).or_insert_with(|| Arc::new(WorldPause::default())).clone()
     }
-    pub fn is_paused(&self) -> bool { self.paused.load(Ordering::Acquire) }
-    async fn wait_unpaused(&self) {
-        while self.paused.load(Ordering::Acquire) {
-            let notified = self.pause_notify.notified();
-            if !self.paused.load(Ordering::Acquire) { break; }
+    pub fn pause(&self, world: &WorldId) {
+        self.pause_state(world).paused.store(true, Ordering::Release);
+    }
+    pub fn resume(&self, world: &WorldId) {
+        let state = self.pause_state(world);
+        state.paused.store(false, Ordering::Release);
+        state.notify.notify_waiters();
+    }
+    pub fn is_paused(&self, world: &WorldId) -> bool {
+        self.pause_state(world).paused.load(Ordering::Acquire)
+    }
+    pub(crate) async fn wait_unpaused(&self, world: &WorldId) {
+        let state = self.pause_state(world);
+        while state.paused.load(Ordering::Acquire) {
+            let notified = state.notify.notified();
+            if !state.paused.load(Ordering::Acquire) { break; }
             notified.await;
         }
     }
@@ -229,7 +242,7 @@ impl Scheduler {
         revision: u64,
         job_id: Option<&[u8]>,
     ) -> Result<RenderDisposition, SchedulerError> {
-        self.wait_unpaused().await;
+        self.wait_unpaused(world).await;
         if job_id.is_some_and(|id| self.is_cancelled(id)) {
             return Ok(RenderDisposition::Cancelled);
         }
