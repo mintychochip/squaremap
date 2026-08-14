@@ -75,12 +75,13 @@ jobs:
         with:
           pattern: rust-backend-x86_64-unknown-linux-gnu
           path: rust/backend
-          merge-multiple: false
+          merge-multiple: true
       - name: "stage host Rust backend"
         shell: bash
         run: |
           mkdir -p rust/target/release
-          cp rust/backend/rust-backend-x86_64-unknown-linux-gnu/squaremap-server-x86_64-unknown-linux-gnu \
+          test -f rust/backend/squaremap-server-x86_64-unknown-linux-gnu
+          cp rust/backend/squaremap-server-x86_64-unknown-linux-gnu \
             rust/target/release/squaremap-server
       - name: "setup bun"
         uses: oven-sh/setup-bun@v2
