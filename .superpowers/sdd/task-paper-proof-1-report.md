@@ -29,3 +29,22 @@ Concerns:
 - Real Paper/plugin/sidecar binaries are still unavailable in this worktree, so the checked-in manifest intentionally remains blocked and cannot launch Paper.
 - The focused test suite uses the checked-in blocked manifest to assert fail-closed behavior; temporary valid executable bytes should be supplied by future tests when exercising a non-blocked load path.
 - The prior `squaremap-compare` baseline was not modified.
+## Follow-up review fix
+
+- Checked-in world fixture now has a real SHA-256 and is parsed and cross-checked for version, seed, name, timezone, locale, and nonempty mutation coordinates.
+- Artifact metadata cross-checks the top-level named SHA when present against the canonical `artifacts` entry; blocked placeholder artifacts remain fail-closed.
+- Artifact/world paths resolve the real existing ancestor, rejecting symlink-parent escapes even when the requested child is absent. Root overlap checks independently resolve each existing ancestor, including symlink aliases.
+- Exact runtime metadata remains recorded in the manifest; executable artifact bytes remain intentionally blocked.
+
+Verification:
+
+```bash
+./gradlew :squaremap-common:test --tests '*ProofFixtureTest'
+```
+
+```text
+BUILD SUCCESSFUL in 3s
+16 actionable tasks: 2 executed, 14 up-to-date
+```
+
+Fix commit: `c55a187 Harden Paper proof fixture validation`
