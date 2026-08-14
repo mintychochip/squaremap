@@ -14,14 +14,14 @@ pub(super) async fn run_page(scheduler: &Scheduler) -> Result<RunReport, Schedul
                 None,
             ).await?;
             match disposition {
-                RenderDisposition::Installed | RenderDisposition::Missing => {
+                RenderDisposition::Installed => {
                     scheduler.repository.complete_dirty(
                         &dirty.world,
                         dirty.coordinate,
                         dirty.revision,
                     ).await?;
                 }
-                RenderDisposition::Stale | RenderDisposition::Cancelled => {}
+                RenderDisposition::Missing | RenderDisposition::Stale | RenderDisposition::Cancelled => {}
             }
             Ok::<_, SchedulerError>(disposition)
         })
@@ -31,7 +31,8 @@ pub(super) async fn run_page(scheduler: &Scheduler) -> Result<RunReport, Schedul
     let mut report = RunReport { selected, ..RunReport::default() };
     for result in results {
         match result? {
-            RenderDisposition::Installed | RenderDisposition::Missing => report.completed += 1,
+            RenderDisposition::Installed => report.completed += 1,
+            RenderDisposition::Missing => {}
             RenderDisposition::Stale => report.stale += 1,
             RenderDisposition::Cancelled => report.cancelled = true,
         }

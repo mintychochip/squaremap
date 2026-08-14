@@ -166,8 +166,11 @@ async fn dirty_coalesces_retries_missing_and_requests_both_shading_neighbors() {
 
     repository.mark_dirty(&overworld.id(), coordinate(9, 9), 3, &[1; 16], 3).await.unwrap();
     bridge.missing("overworld", 9, 9);
-    scheduler.run_dirty_page().await.unwrap();
-    assert!(repository.recover().await.unwrap().dirty.is_empty());
+    let report = scheduler.run_dirty_page().await.unwrap();
+    assert_eq!(report.completed, 0);
+    assert_eq!(report.stale, 0);
+    assert!(!report.cancelled);
+    assert_eq!(repository.recover().await.unwrap().dirty.len(), 1);
     assert_eq!(installer.installed.lock().unwrap().len(), 1);
 }
 
