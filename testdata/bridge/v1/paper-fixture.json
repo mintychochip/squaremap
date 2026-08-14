@@ -1,10 +1,10 @@
 {
   "version": 1,
   "paper_fixture": {
-    "paper": {"version": "paper-26.2", "url": "https://fill.invalid/paper-26.2.jar", "sha256": "8cdaa308c88a17fe9aa8c12c96a09f7d3200b33c878b5b948c595c46d65c1378"},
+    "paper": {"version": "paper-26.2", "url": "https://example.test/paper-26.2.jar", "sha256": "8cdaa308c88a17fe9aa8c12c96a09f7d3200b33c878b5b948c595c46d65c1378"},
     "minecraft_version": "26.2",
-    "plugin": {"version": "squaremap-local-26.2", "url": "https://fill.invalid/squaremap-26.2.jar", "sha256": "8cdaa308c88a17fe9aa8c12c96a09f7d3200b33c878b5b948c595c46d65c1378"},
-    "sidecar": {"version": "squaremap-rust-local-26.2", "url": "https://fill.invalid/squaremap-server-26.2", "sha256": "8cdaa308c88a17fe9aa8c12c96a09f7d3200b33c878b5b948c595c46d65c1378"},
+    "plugin": {"version": "squaremap-local-26.2", "url": "https://example.test/squaremap-26.2.jar", "sha256": "8cdaa308c88a17fe9aa8c12c96a09f7d3200b33c878b5b948c595c46d65c1378"},
+    "sidecar": {"version": "squaremap-rust-local-26.2", "url": "https://example.test/squaremap-server-26.2", "sha256": "8cdaa308c88a17fe9aa8c12c96a09f7d3200b33c878b5b948c595c46d65c1378"},
     "artifacts": {
       "paper": {"path": "paper.jar", "sha256": "8cdaa308c88a17fe9aa8c12c96a09f7d3200b33c878b5b948c595c46d65c1378"},
       "plugin": {"path": "plugin.jar", "sha256": "8cdaa308c88a17fe9aa8c12c96a09f7d3200b33c878b5b948c595c46d65c1378"},
