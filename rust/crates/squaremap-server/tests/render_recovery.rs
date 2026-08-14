@@ -172,6 +172,11 @@ async fn dirty_coalesces_retries_missing_and_requests_both_shading_neighbors() {
     assert!(!report.cancelled);
     assert_eq!(repository.recover().await.unwrap().dirty.len(), 1);
     assert_eq!(installer.installed.lock().unwrap().len(), 1);
+    repository.mark_dirty(&overworld.id(), coordinate(10, 10), 4, &[1; 16], 4).await.unwrap();
+    repository.defer_dirty(&overworld.id(), coordinate(9, 9), 3, 0).await.unwrap();
+    let page = repository.dirty_page_at(1, 0).await.unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].coordinate, coordinate(10, 10));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

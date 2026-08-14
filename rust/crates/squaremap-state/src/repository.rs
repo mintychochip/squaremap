@@ -8,8 +8,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const APPLICATION_ID: i64 = 0x5351_4d50;
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const SCHEMA: &str = include_str!("../migrations/0001_initial.sql");
+const RETRY_MIGRATION: &str = include_str!("../migrations/0002_dirty_retry.sql");
 const MAX_BLOCKING_CALLS: usize = 1;
 
 #[derive(Debug)]
@@ -146,34 +147,37 @@ impl Repository {
             let transaction = connection.transaction()?;
             ensure_current_world(&transaction, &world)?;
             let changed = transaction.execute("INSERT INTO dirty_chunks(namespace,value,epoch,x,z,revision) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(namespace,value,epoch,x,z) DO UPDATE SET revision=excluded.revision WHERE excluded.revision > dirty_chunks.revision", params![world.namespace, world.value, world.epoch as i64, coordinate.x, coordinate.z, revision])?;
+            transaction.execute("DELETE FROM dirty_retries WHERE namespace=?1 AND value=?2 AND epoch=?3 AND x=?4 AND z=?5", params![world.namespace, world.value, world.epoch as i64, coordinate.x, coordinate.z])?;
             transaction.execute("INSERT INTO session_checkpoints(session_id,durable_sequence) VALUES(?1,?2) ON CONFLICT(session_id) DO UPDATE SET durable_sequence=excluded.durable_sequence WHERE excluded.durable_sequence > session_checkpoints.durable_sequence", params![session_id, sequence])?;
             transaction.commit()?;
             Ok(changed != 0)
         }).await
     }
-
-    /// Returns at most `limit` current dirty rows, interleaved by per-world ordinal.
-    pub async fn dirty_page(&self, limit: usize) -> Result<Vec<DirtyChunk>, RepositoryError> {
+    /// Returns at most `limit` current dirty rows whose retry deadline has elapsed.
+    pub async fn dirty_page_at(&self, limit: usize, now: i64) -> Result<Vec<DirtyChunk>, RepositoryError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         self.blocking(move |connection| {
             let mut statement = connection.prepare(
-                "SELECT length(CAST(namespace AS BLOB)),COALESCE(substr(CAST(namespace AS BLOB),1,4097),zeroblob(0)),\
-                        length(CAST(value AS BLOB)),COALESCE(substr(CAST(value AS BLOB),1,4097),zeroblob(0)),\
-                        epoch,x,z,revision \
-                 FROM (\
-                    SELECT dirty_chunks.namespace AS namespace,dirty_chunks.value AS value,\
-                           dirty_chunks.epoch AS epoch,dirty_chunks.x AS x,dirty_chunks.z AS z,\
-                           dirty_chunks.revision AS revision,\
-                           ROW_NUMBER() OVER (PARTITION BY dirty_chunks.namespace,dirty_chunks.value,dirty_chunks.epoch \
-                                              ORDER BY dirty_chunks.x,dirty_chunks.z) AS ordinal \
-                    FROM dirty_chunks INNER JOIN worlds USING(namespace,value) \
-                    WHERE worlds.epoch >= 0 AND dirty_chunks.epoch=worlds.epoch\
-                 ) ORDER BY ordinal,namespace,value,epoch,x,z LIMIT ?1",
+                "SELECT length(CAST(namespace AS BLOB)),COALESCE(substr(CAST(namespace AS BLOB),1,4097),zeroblob(0)),
+                        length(CAST(value AS BLOB)),COALESCE(substr(CAST(value AS BLOB),1,4097),zeroblob(0)),
+                        epoch,x,z,revision
+                 FROM (
+                    SELECT dirty_chunks.namespace AS namespace,dirty_chunks.value AS value,
+                           dirty_chunks.epoch AS epoch,dirty_chunks.x AS x,dirty_chunks.z AS z,
+                           dirty_chunks.revision AS revision,
+                           ROW_NUMBER() OVER (PARTITION BY dirty_chunks.namespace,dirty_chunks.value,dirty_chunks.epoch
+                                              ORDER BY dirty_chunks.x,dirty_chunks.z) AS ordinal
+                    FROM dirty_chunks
+                    INNER JOIN worlds USING(namespace,value)
+                    LEFT JOIN dirty_retries USING(namespace,value,epoch,x,z)
+                    WHERE worlds.epoch >= 0 AND dirty_chunks.epoch=worlds.epoch
+                      AND (dirty_retries.next_attempt IS NULL OR dirty_retries.next_attempt <= ?1)
+                 ) ORDER BY ordinal,namespace,value,epoch,x,z LIMIT ?2",
             )?;
-            let rows = statement.query_map(params![limit], |row| {
+            let rows = statement.query_map(params![now, limit], |row| {
                 let world = WorldId::new(
                     bounded_text(row.get(0)?, row.get(1)?, MAX_TEXT_BYTES)?,
                     bounded_text(row.get(2)?, row.get(3)?, MAX_TEXT_BYTES)?,
@@ -183,11 +187,38 @@ impl Repository {
                 Ok(DirtyChunk {
                     world,
                     coordinate: ChunkCoordinate { x: row.get(5)?, z: row.get(6)? },
-                    revision: checked_u64(row.get(7)?, "dirty revision")
-                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    revision: checked_u64(row.get(7)?, "dirty revision").map_err(|_| rusqlite::Error::InvalidQuery)?,
                 })
             })?.collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
+        }).await
+    }
+
+    pub async fn dirty_page(&self, limit: usize) -> Result<Vec<DirtyChunk>, RepositoryError> {
+        self.dirty_page_at(limit, now_seconds()).await
+    }
+
+    pub async fn defer_dirty(&self, world: &WorldId, coordinate: ChunkCoordinate, revision: u64, now: i64) -> Result<(), RepositoryError> {
+        let revision = checked_i64(revision, "dirty revision")?;
+        let world = world.clone();
+        self.blocking(move |connection| {
+            let transaction = connection.transaction()?;
+            ensure_current_world(&transaction, &world)?;
+            let attempt: i64 = transaction.query_row(
+                "SELECT COALESCE(attempt, 0) FROM dirty_retries WHERE namespace=?1 AND value=?2 AND epoch=?3 AND x=?4 AND z=?5",
+                params![world.namespace, world.value, world.epoch as i64, coordinate.x, coordinate.z],
+                |row| row.get(0),
+            ).optional()?.unwrap_or(0);
+            let next_attempt = attempt.saturating_add(1).min(16);
+            let delay = 1_i64.checked_shl(next_attempt as u32).unwrap_or(86_400).min(86_400);
+            transaction.execute(
+                "INSERT INTO dirty_retries(namespace,value,epoch,x,z,attempt,next_attempt) VALUES(?1,?2,?3,?4,?5,?6,?7)
+                 ON CONFLICT(namespace,value,epoch,x,z) DO UPDATE SET attempt=excluded.attempt,next_attempt=excluded.next_attempt
+                 WHERE EXISTS (SELECT 1 FROM dirty_chunks WHERE namespace=?1 AND value=?2 AND epoch=?3 AND x=?4 AND z=?5 AND revision<=?8)",
+                params![world.namespace, world.value, world.epoch as i64, coordinate.x, coordinate.z, next_attempt, now.saturating_add(delay), revision],
+            )?;
+            transaction.commit()?;
+            Ok(())
         }).await
     }
 
@@ -211,6 +242,7 @@ impl Repository {
             let transaction = connection.transaction()?;
             ensure_current_world(&transaction, &world)?;
             let changed = transaction.execute("DELETE FROM dirty_chunks WHERE namespace=?1 AND value=?2 AND epoch=?3 AND x=?4 AND z=?5 AND revision <= ?6", params![world.namespace, world.value, world.epoch as i64, coordinate.x, coordinate.z, revision])?;
+            transaction.execute("DELETE FROM dirty_retries WHERE namespace=?1 AND value=?2 AND epoch=?3 AND x=?4 AND z=?5", params![world.namespace, world.value, world.epoch as i64, coordinate.x, coordinate.z])?;
             transaction.commit()?;
             Ok(changed != 0)
         }).await
@@ -335,6 +367,10 @@ impl Repository {
         }).await
     }
 }
+fn now_seconds() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)).unwrap_or(0)
+}
+
 fn open_connection(path: &Path) -> Result<Connection, RepositoryError> {
     if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
     let existed_nonempty = std::fs::metadata(path).map(|metadata| metadata.len() != 0).unwrap_or(false);
@@ -347,10 +383,17 @@ fn open_connection(path: &Path) -> Result<Connection, RepositoryError> {
         let transaction = connection.transaction()?;
         transaction.execute_batch("PRAGMA application_id=0x53514D50;")?;
         transaction.execute_batch(SCHEMA)?;
+        transaction.execute_batch(RETRY_MIGRATION)?;
         transaction.commit()?;
     } else {
         if application_id != APPLICATION_ID { return Err(RepositoryError::Schema("wrong application ID".into())); }
-        validate_schema(&connection)?;
+        let version: i64 = connection.query_row("SELECT version FROM schema_version", [], |row| row.get(0))
+            .map_err(|_| RepositoryError::Schema("schema_version table missing".into()))?;
+        if version == 1 {
+            connection.execute_batch(RETRY_MIGRATION)?;
+        } else if version != SCHEMA_VERSION {
+            return Err(RepositoryError::Schema(format!("unsupported schema version {version}")));
+        }
     }
     configure_and_validate(&connection)?;
     validate_schema(&connection)?;
@@ -369,25 +412,25 @@ fn configure_and_validate(connection: &Connection) -> Result<(), RepositoryError
     if app_id != APPLICATION_ID { return Err(RepositoryError::Schema("wrong application ID".into())); }
     Ok(())
 }
-
 fn validate_schema(connection: &Connection) -> Result<(), RepositoryError> {
     let count: i64 = connection.query_row("SELECT count(*) FROM schema_version", [], |row| row.get(0)).map_err(|_| RepositoryError::Schema("schema_version table missing".into()))?;
     if count != 1 { return Err(RepositoryError::Schema("schema_version must contain exactly one row".into())); }
     let version: i64 = connection.query_row("SELECT version FROM schema_version", [], |row| row.get(0))?;
     if version != SCHEMA_VERSION { return Err(RepositoryError::Schema(format!("unsupported schema version {version}"))); }
-    let expected_tables = ["schema_version", "worlds", "dirty_chunks", "render_jobs", "session_checkpoints", "legacy_imports"];
+    let expected_tables = ["schema_version", "worlds", "dirty_chunks", "render_jobs", "session_checkpoints", "legacy_imports", "dirty_retries"];
     let mut statement = connection.prepare("SELECT type,name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name")?;
     let entries: Vec<(String, String)> = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<Result<_, _>>()?;
     if entries.iter().any(|(kind, name)| kind != "table" || !expected_tables.contains(&name.as_str())) || entries.iter().filter(|(kind, _)| kind == "table").count() != expected_tables.len() {
         return Err(RepositoryError::Schema("schema objects do not match checked-in migration".into()));
     }
-    let expected_columns: [(&str, &[(&str, &str, i64, i64)]); 6] = [
+    let expected_columns: [(&str, &[(&str, &str, i64, i64)]); 7] = [
         ("schema_version", &[("version", "INTEGER", 0, 1)]),
         ("worlds", &[("namespace", "TEXT", 1, 1), ("value", "TEXT", 1, 2), ("epoch", "INTEGER", 1, 0), ("config", "BLOB", 1, 0)]),
         ("dirty_chunks", &[("namespace", "TEXT", 1, 1), ("value", "TEXT", 1, 2), ("epoch", "INTEGER", 1, 3), ("x", "INTEGER", 1, 4), ("z", "INTEGER", 1, 5), ("revision", "INTEGER", 1, 0)]),
         ("render_jobs", &[("id", "BLOB", 0, 1), ("namespace", "TEXT", 1, 0), ("value", "TEXT", 1, 0), ("epoch", "INTEGER", 1, 0), ("kind", "INTEGER", 1, 0), ("state", "INTEGER", 1, 0), ("payload", "BLOB", 1, 0), ("completed_chunks", "INTEGER", 1, 0)]),
         ("session_checkpoints", &[("session_id", "BLOB", 0, 1), ("durable_sequence", "INTEGER", 1, 0)]),
         ("legacy_imports", &[("relative_path", "TEXT", 0, 1), ("content_sha256", "BLOB", 1, 0), ("imported_at_epoch_seconds", "INTEGER", 1, 0)]),
+        ("dirty_retries", &[("namespace", "TEXT", 1, 1), ("value", "TEXT", 1, 2), ("epoch", "INTEGER", 1, 3), ("x", "INTEGER", 1, 4), ("z", "INTEGER", 1, 5), ("attempt", "INTEGER", 1, 0), ("next_attempt", "INTEGER", 1, 0)]),
     ];
     for (table, expected) in expected_columns {
         let mut columns = connection.prepare(&format!("PRAGMA table_info({table})"))?;

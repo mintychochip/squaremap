@@ -85,7 +85,8 @@ async fn schema_pragmas_reopen_revision_guards_checkpoint_and_deterministic_reco
     assert_eq!(busy_timeout, 5000);
     assert_eq!(application_id, 0x53514d50);
     let sqlite = rusqlite::Connection::open(&db).unwrap();
-    assert_eq!(sqlite.query_row("SELECT version FROM schema_version", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(sqlite.query_row("SELECT version FROM schema_version", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+    assert_eq!(sqlite.query_row("SELECT count(*) FROM dirty_retries", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
 }
 
 #[tokio::test]
@@ -141,7 +142,8 @@ async fn malformed_schema_is_rejected_before_wal_or_file_mutation() {
          CREATE TABLE dirty_chunks(namespace TEXT);
          CREATE TABLE render_jobs(id BLOB);
          CREATE TABLE session_checkpoints(session_id BLOB);
-         CREATE TABLE legacy_imports(relative_path TEXT);",
+         CREATE TABLE legacy_imports(relative_path TEXT);
+         CREATE TABLE dirty_retries(namespace TEXT NOT NULL,value TEXT NOT NULL,epoch INTEGER NOT NULL,x INTEGER NOT NULL,z INTEGER NOT NULL,attempt INTEGER NOT NULL,next_attempt INTEGER NOT NULL,PRIMARY KEY(namespace,value,epoch,x,z));",
     ).unwrap();
     drop(connection);
     let before = fs::read(&db).unwrap();
@@ -384,8 +386,20 @@ async fn unsupported_schema_versions_and_strict_legacy_bounds_are_rejected() {
     let newer_repository = Repository::open(&newer_db).await.unwrap();
     drop(newer_repository);
     let connection = rusqlite::Connection::open(&newer_db).unwrap();
-    connection.execute("UPDATE schema_version SET version=2", []).unwrap();
+    connection.execute("UPDATE schema_version SET version=3", []).unwrap();
     drop(connection);
+    let legacy_db = dir.path().join("legacy-v1.sqlite");
+    let connection = rusqlite::Connection::open(&legacy_db).unwrap();
+    connection.execute_batch("PRAGMA application_id=0x53514D50;").unwrap();
+    connection.execute_batch(include_str!("../migrations/0001_initial.sql")).unwrap();
+    connection.execute("INSERT INTO worlds(namespace,value,epoch,config) VALUES('minecraft','overworld',1,?1)", [br"{}".as_slice()]).unwrap();
+    connection.execute("INSERT INTO dirty_chunks(namespace,value,epoch,x,z,revision) VALUES('minecraft','overworld',1,4,8,7)", []).unwrap();
+    drop(connection);
+    let migrated = Repository::open(&legacy_db).await.unwrap();
+    assert_eq!(migrated.recover().await.unwrap().dirty.len(), 1);
+    let connection = rusqlite::Connection::open(&legacy_db).unwrap();
+    assert_eq!(connection.query_row("SELECT version FROM schema_version", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+    assert_eq!(connection.query_row("SELECT count(*) FROM dirty_retries", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
     assert!(Repository::open(&newer_db).await.is_err());
 
     let multiple_db = dir.path().join("multiple.sqlite");
