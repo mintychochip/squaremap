@@ -36,7 +36,9 @@ public final class PlatformModule extends AbstractModule {
     @Override
     protected void configure() {
         if (this.platformClass != null) {
-            this.bind(BridgeBootstrapConfig.class).toProvider(PlatformBootstrapConfigProvider.class).in(Singleton.class);
+            this.bind(BridgeBootstrapConfig.class)
+                .toProvider(new PlatformBootstrapConfigProvider(PlatformBootstrapConfigProvider.packagedVersion(this.platformClass)))
+                .in(Singleton.class);
         } else if (this.platform != null) {
             this.bind(BridgeBootstrapConfig.class).toProvider(() -> BridgeBootstrapConfig.configured(this.platform.version())).in(Singleton.class);
         } else {

@@ -1,0 +1,2 @@
+Manifest-Version: 1.0
+squaremap-version: injector-cycle-test
