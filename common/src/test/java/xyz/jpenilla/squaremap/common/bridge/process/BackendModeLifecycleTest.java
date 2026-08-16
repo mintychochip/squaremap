@@ -23,4 +23,24 @@ final class BackendModeLifecycleTest {
         assertTrue(BackendLifecyclePolicy.javaCacheOwner(BackendMode.JAVA));
         assertTrue(BackendLifecyclePolicy.javaCacheOwner(BackendMode.SHADOW));
     }
+
+    @Test
+    void shadowDisablesRustHttpOwnership() {
+        assertFalse(BackendLifecyclePolicy.rustHttpOwner(BackendMode.SHADOW));
+        assertTrue(BackendLifecyclePolicy.rustHttpOwner(BackendMode.RUST));
+    }
+
+    @Test
+    void shadowOwnershipPolicyDisablesRustHttpInExportContract() {
+        assertFalse(BackendLifecyclePolicy.rustHttpOwner(BackendMode.SHADOW));
+        assertTrue(BackendLifecyclePolicy.rustHttpOwner(BackendMode.RUST));
+    }
+
+    @Test
+    void rustDoesNotOwnJavaDirtyOrRenderSchedulers() {
+        assertFalse(BackendLifecyclePolicy.javaDirtyOwner(BackendMode.RUST));
+        assertFalse(BackendLifecyclePolicy.javaRenderOwner(BackendMode.RUST));
+        assertTrue(BackendLifecyclePolicy.javaDirtyOwner(BackendMode.JAVA));
+        assertTrue(BackendLifecyclePolicy.javaRenderOwner(BackendMode.SHADOW));
+    }
 }

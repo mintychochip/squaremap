@@ -56,7 +56,7 @@ public final class Config extends AbstractConfig {
         UPDATE_CHECKER = config.getBoolean("settings.update-checker", UPDATE_CHECKER);
         WEB_ADDRESS = config.getString("settings.web-address", WEB_ADDRESS);
     }
-    public static String BRIDGE_BACKEND_MODE = "JAVA";
+    public static String BRIDGE_BACKEND_MODE = "RUST";
     public static List<String> BRIDGE_SIDECAR_COMMAND = List.of();
     public static String BRIDGE_RUST_OUTPUT_ROOT = "";
     public static int BRIDGE_STARTUP_TIMEOUT_SECONDS = 30;

@@ -20,6 +20,7 @@ import org.checkerframework.checker.nullness.qual.Nullable;
 import org.checkerframework.framework.qual.DefaultQualifier;
 import xyz.jpenilla.squaremap.api.Pair;
 import xyz.jpenilla.squaremap.common.Logging;
+import xyz.jpenilla.squaremap.common.bridge.process.BackendLifecyclePolicy;
 import xyz.jpenilla.squaremap.common.task.render.AbstractRender;
 import xyz.jpenilla.squaremap.common.task.render.BackgroundRender;
 import xyz.jpenilla.squaremap.common.task.render.RenderFactory;
@@ -53,6 +54,9 @@ public final class RenderManager {
     }
 
     public void init() {
+        if (!BackendLifecyclePolicy.javaRenderOwner(BackendLifecyclePolicy.configuredMode())) {
+            return;
+        }
         this.startBackgroundRender();
 
         if (this.readRenderProgress() != null) {

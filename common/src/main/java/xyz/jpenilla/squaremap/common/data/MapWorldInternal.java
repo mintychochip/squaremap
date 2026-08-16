@@ -27,6 +27,7 @@ import xyz.jpenilla.squaremap.api.Registry;
 import xyz.jpenilla.squaremap.api.WorldIdentifier;
 import xyz.jpenilla.squaremap.common.LayerRegistry;
 import xyz.jpenilla.squaremap.common.Logging;
+import xyz.jpenilla.squaremap.common.bridge.process.BackendLifecyclePolicy;
 import xyz.jpenilla.squaremap.common.config.ConfigManager;
 import xyz.jpenilla.squaremap.common.config.WorldAdvanced;
 import xyz.jpenilla.squaremap.common.config.WorldConfig;
@@ -90,7 +91,9 @@ public abstract class MapWorldInternal implements MapWorld {
         this.deserializeDirtyChunks();
 
         this.renderManager = RenderManager.create(this, renderFactory);
-        this.renderManager.init();
+        if (BackendLifecyclePolicy.javaRenderOwner(BackendLifecyclePolicy.configuredMode())) {
+            this.renderManager.init();
+        }
     }
 
     @Override
@@ -181,6 +184,9 @@ public abstract class MapWorldInternal implements MapWorld {
     }
 
     public void chunkModified(final ChunkCoordinate coord) {
+        if (!BackendLifecyclePolicy.javaDirtyOwner(BackendLifecyclePolicy.configuredMode())) {
+            return;
+        }
         if (this.shouldRenderDirtyChunk(coord)) {
             this.modifiedChunks.add(coord);
         }
@@ -210,6 +216,9 @@ public abstract class MapWorldInternal implements MapWorld {
     }
 
     private void serializeDirtyChunks() {
+        if (!BackendLifecyclePolicy.javaDirtyOwner(BackendLifecyclePolicy.configuredMode())) {
+            return;
+        }
         final Path file = this.dataPath.resolve(DIRTY_CHUNKS_FILE_NAME);
         if (this.modifiedChunks.size() > 200000) { // ~6MB
             Logging.logger().warn("Map for world '{}' has a large amount ({}) of chunks queued for background render! If this notice appears frequently, consider adjusting the background render and or update trigger settings.", this.identifier().asString(), this.modifiedChunks.size());
@@ -222,6 +231,9 @@ public abstract class MapWorldInternal implements MapWorld {
     }
 
     private void deserializeDirtyChunks() {
+        if (!BackendLifecyclePolicy.javaDirtyOwner(BackendLifecyclePolicy.configuredMode())) {
+            return;
+        }
         final Path file = this.dataPath.resolve(DIRTY_CHUNKS_FILE_NAME);
         if (!Files.isRegularFile(file)) {
             return;
