@@ -9,8 +9,6 @@ import xyz.jpenilla.squaremap.common.config.ConfigManager;
 import xyz.jpenilla.squaremap.common.data.DirectoryProvider;
 import xyz.jpenilla.squaremap.common.data.MapWorldInternal;
 import xyz.jpenilla.squaremap.common.bridge.state.BridgeStatePublisher;
-import xyz.jpenilla.squaremap.common.task.TaskFactory;
-import xyz.jpenilla.squaremap.common.task.render.RenderFactory;
 
 @DefaultQualifier(NonNull.class)
 public final class ForgeMapWorld extends MapWorldInternal {
@@ -18,13 +16,11 @@ public final class ForgeMapWorld extends MapWorldInternal {
     @AssistedInject
     private ForgeMapWorld(
         @Assisted final ServerLevel level,
-        final RenderFactory renderFactory,
         final DirectoryProvider directoryProvider,
         final ConfigManager configManager,
-        final TaskFactory taskFactory,
         final BridgeStatePublisher statePublisher
     ) {
-        super(level, renderFactory, directoryProvider, configManager);
+        super(level, directoryProvider, configManager);
         this.statePublisher = statePublisher;
     }
 

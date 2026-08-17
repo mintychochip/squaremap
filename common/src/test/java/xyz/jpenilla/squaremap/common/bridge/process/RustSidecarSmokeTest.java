@@ -32,7 +32,7 @@ final class RustSidecarSmokeTest {
         Assumptions.assumeTrue(Files.isRegularFile(binary), "build squaremap-server before running the real sidecar smoke");
         final Path root = Files.createTempDirectory("squaremap-rust-shadow");
         final BridgeBootstrapConfig config = new BridgeBootstrapConfig(
-            BackendMode.SHADOW,
+            BackendMode.RUST,
             "1.3.16-SNAPSHOT",
             new SidecarCommand(List.of(binary.toString())),
             Duration.ofSeconds(20),
@@ -67,7 +67,7 @@ final class RustSidecarSmokeTest {
         Assumptions.assumeTrue(Files.isRegularFile(binary), "build squaremap-server before running the restart smoke");
         final Path root = Files.createTempDirectory("squaremap-rust-restart");
         final BridgeBootstrapConfig config = new BridgeBootstrapConfig(
-            BackendMode.SHADOW, "1.3.16-SNAPSHOT", new SidecarCommand(List.of(binary.toString())),
+            BackendMode.RUST, "1.3.16-SNAPSHOT", new SidecarCommand(List.of(binary.toString())),
             Duration.ofSeconds(20), Duration.ofSeconds(2), root
         );
         final SidecarSupervisor supervisor = new SidecarSupervisor();

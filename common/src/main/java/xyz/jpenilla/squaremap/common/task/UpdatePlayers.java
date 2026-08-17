@@ -5,24 +5,14 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ForkJoinPool;
 import org.checkerframework.checker.nullness.qual.NonNull;
 import org.checkerframework.framework.qual.DefaultQualifier;
-import xyz.jpenilla.squaremap.common.httpd.JsonCache;
 import xyz.jpenilla.squaremap.common.util.Util;
 
 @DefaultQualifier(NonNull.class)
 public final class UpdatePlayers {
-    private static final String JSON_PATH = "/tiles/players.json";
-    private final JsonCache jsonCache;
-
     @Inject
-    private UpdatePlayers(final JsonCache jsonCache) {
-        this.jsonCache = jsonCache;
-    }
-    /** Writes an already-collected immutable snapshot without recollecting server state. */
-    public void publish(final xyz.jpenilla.squaremap.bridge.v1.PlayersReplace snapshot) {
-        ForkJoinPool.commonPool().execute(() -> this.jsonCache.put(JSON_PATH, document(snapshot)));
+    private UpdatePlayers() {
     }
 
     public static String document(final xyz.jpenilla.squaremap.bridge.v1.PlayersReplace snapshot) {

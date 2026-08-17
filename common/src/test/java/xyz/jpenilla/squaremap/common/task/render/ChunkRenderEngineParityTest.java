@@ -90,8 +90,7 @@ class ChunkRenderEngineParityTest {
             final ChunkRenderEngine directEngine = ChunkRenderFixtureCatalog.engine(catalog, fixture, fixture.settings().biomeBlend);
             final ChunkRenderEngine dispatchEngine = ChunkRenderFixtureCatalog.engine(catalog, fixture, fixture.settings().biomeBlend);
             final Map<Long, Integer> writes = new HashMap<>();
-            final ChunkRenderEngine.PixelResult dispatched = AbstractRender.renderChunkDispatch(
-                dispatchEngine,
+            final ChunkRenderEngine.PixelResult dispatched = dispatchEngine.renderChunk(
                 (x, z, color) -> writes.put(key(x, z), color),
                 fixture.neighbors().get(new net.minecraft.world.level.ChunkPos(0, -1)),
                 fixture.center(),

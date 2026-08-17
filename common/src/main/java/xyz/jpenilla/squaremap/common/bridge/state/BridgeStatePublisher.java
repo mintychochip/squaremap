@@ -67,17 +67,13 @@ public final class BridgeStatePublisher {
     public BridgeStatePublisher(
         final Provider<WorldStateExporter> worlds,
         final Provider<PlayerStateExporter> players,
-        final Provider<xyz.jpenilla.squaremap.common.task.UpdateWorldData> legacyWorlds,
-        final Provider<xyz.jpenilla.squaremap.common.task.UpdatePlayers> legacyPlayers,
-        final xyz.jpenilla.squaremap.common.task.TaskFactory markers,
         final BridgeBootstrapConfig config,
         final SidecarSupervisor supervisor,
         final WorldEpochRegistry epochs,
         final BridgeRevisionClock revisions
     ) {
         this(config.backendMode(), worlds.get()::export, players.get()::export, markerExporter(epochs, revisions),
-            legacyWorlds.get()::publish, legacyPlayers.get()::publish,
-            (world, snapshot) -> markers.createUpdateMarkers(world).publish(snapshot),
+            ignored -> {}, ignored -> {}, (world, snapshot) -> {},
             payload -> supervisor.publish(new BridgeEvent.ReplaceState("worlds", Envelope.newBuilder().setWorldStateReplace(payload).build())),
             payload -> supervisor.publish(new BridgeEvent.ReplaceState("players", Envelope.newBuilder().setPlayersReplace(payload).build())),
             payload -> supervisor.publish(new BridgeEvent.ReplaceState("markers:" + payload.getWorld().getNamespace() + ":" + payload.getWorld().getValue(),
@@ -97,12 +93,11 @@ public final class BridgeStatePublisher {
     public synchronized void publishIcons(final IconsReplace snapshot) {
         if (this.publishedIcons != null && this.publishedIcons.toBuilder().setRevision(0).build().equals(snapshot.toBuilder().setRevision(0).build())) return;
         this.publishedIcons = snapshot;
-        if (this.mode != BackendMode.JAVA) this.bridgeIcons.accept(snapshot);
+        this.bridgeIcons.accept(snapshot);
     }
-    public static BridgeStatePublisher forTesting(final BackendMode mode, final Supplier<PlayersReplace> players,
-                                                   final Consumer<PlayersReplace> legacy, final Consumer<PlayersReplace> bridge) {
-        return new BridgeStatePublisher(mode, WorldStateReplace::getDefaultInstance, players, world -> MarkerLayersReplace.getDefaultInstance(),
-            ignored -> {}, legacy, (world, value) -> {}, ignored -> {}, bridge, ignored -> {});
+    public static BridgeStatePublisher forTesting(final Supplier<PlayersReplace> players, final Consumer<PlayersReplace> bridge) {
+        return new BridgeStatePublisher(BackendMode.RUST, WorldStateReplace::getDefaultInstance, players, world -> MarkerLayersReplace.getDefaultInstance(),
+            ignored -> {}, ignored -> {}, (world, value) -> {}, ignored -> {}, bridge, ignored -> {});
     }
 
     public synchronized void publishWorlds() {
@@ -110,16 +105,14 @@ public final class BridgeStatePublisher {
         if (this.publishedWorlds != null && this.publishedWorlds.toBuilder().setRevision(0).build().equals(value.toBuilder().setRevision(0).build())) return;
         this.publishedWorlds = value;
         this.markers.prune(value);
-        if (this.mode != BackendMode.RUST) this.legacyWorlds.accept(value);
-        if (this.mode != BackendMode.JAVA) this.bridgeWorlds.accept(value);
+        this.bridgeWorlds.accept(value);
     }
 
     public synchronized void publishPlayers() {
         final PlayersReplace value = this.players.get();
         if (this.publishedPlayers != null && this.publishedPlayers.toBuilder().setRevision(0).build().equals(value.toBuilder().setRevision(0).build())) return;
         this.publishedPlayers = value;
-        if (this.mode != BackendMode.RUST) this.legacyPlayers.accept(value);
-        if (this.mode != BackendMode.JAVA) this.bridgePlayers.accept(value);
+        this.bridgePlayers.accept(value);
     }
 
     public synchronized void publishMarkers(final MapWorldInternal world) {
@@ -128,8 +121,7 @@ public final class BridgeStatePublisher {
         if (this.publishedMarkers.containsKey(key)
             && this.publishedMarkers.get(key).toBuilder().setRevision(0).build().equals(value.toBuilder().setRevision(0).build())) return;
         this.publishedMarkers.put(key, value);
-        if (this.mode != BackendMode.RUST) this.legacyMarkers.accept(world, value);
-        if (this.mode != BackendMode.JAVA) this.bridgeMarkers.accept(value);
+        this.bridgeMarkers.accept(value);
     }
 
     private static final class MarkerRouter implements FunctionWorld<MarkerLayersReplace> {

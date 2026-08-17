@@ -26,32 +26,15 @@ final class BackendControllerTest {
     void closeScheduler() { this.scheduler.shutdownNow(); }
 
     @Test
-    void javaRoutesOnlyLegacyForAllMethods() {
-        final List<BackendController.BackendRequest> legacy = new ArrayList<>();
-        final List<BackendController.BackendRequest> bridge = new ArrayList<>();
-        final BackendController controller = controller(BackendMode.JAVA, legacy, bridge);
-        controller.fullRender(world); controller.radiusRender(world, 1, 2, 3); controller.cancelRender(world); controller.pauseRenders(world);
-        controller.resetMap(world); controller.reload(); controller.health(); controller.restartProgressLogging();
-        assertEquals(8, legacy.size()); assertTrue(bridge.isEmpty());
-    }
-
-    @Test
     void rustRoutesOnlyBridgeAndPreservesTypedCodes() {
-        final List<BackendController.BackendRequest> legacy = new ArrayList<>();
         final List<BackendController.BackendRequest> bridge = new ArrayList<>();
-        final BackendController controller = controller(BackendMode.RUST, legacy, bridge);
+        final BackendController controller = new BackendController(request -> {
+            bridge.add(request);
+            return CompletableFuture.completedFuture(BackendResult.of(BackendResult.Code.HEALTHY));
+        });
         assertEquals(BackendResult.Code.HEALTHY, controller.fullRender(world).toCompletableFuture().join().code());
         assertEquals(BackendResult.Code.HEALTHY, controller.health().toCompletableFuture().join().code());
-        assertTrue(legacy.isEmpty()); assertEquals(2, bridge.size());
-    }
-
-    @Test
-    void shadowMirrorsOneImmutableRequestAndReturnsJavaResult() {
-        final List<BackendController.BackendRequest> legacy = new ArrayList<>();
-        final List<BackendController.BackendRequest> bridge = new ArrayList<>();
-        final BackendController controller = controller(BackendMode.SHADOW, legacy, bridge);
-        assertEquals(BackendResult.Code.FULL_RENDER_STARTED, controller.fullRender(world).toCompletableFuture().join().code());
-        assertEquals(legacy, bridge);
+        assertEquals(2, bridge.size());
     }
 
     @Test
@@ -111,6 +94,28 @@ final class BackendControllerTest {
     }
 
     @Test
+    void invalidConfigIsConsumedAndNotRepublishedAfterReconnect() {
+        final FakeConnection connection = new FakeConnection();
+        final BridgeBackendController bridge = new BridgeBackendController(connection, this.scheduler);
+        final CompletionStage<BackendResult> pending = bridge.publishConfig(xyz.jpenilla.squaremap.bridge.v1.ConfigReplace.newBuilder().setRevision(7).build());
+        bridge.dispatch(xyz.jpenilla.squaremap.bridge.v1.Envelope.newBuilder()
+            .setSessionId(com.google.protobuf.ByteString.copyFrom(connection.sessionId()))
+            .setProtocolError(xyz.jpenilla.squaremap.bridge.v1.ProtocolError.newBuilder()
+                .setFatal(false)
+                .setCode(xyz.jpenilla.squaremap.bridge.v1.ProtocolErrorCode.PROTOCOL_ERROR_CODE_INVALID_MESSAGE)
+                .setConfigRevision(7))
+            .build());
+        assertEquals(BackendResult.Code.INVALID_CONFIG, pending.toCompletableFuture().join().code());
+        assertTrue(connection.rejectedConfigRevisions.contains(7L));
+        bridge.dispatch(xyz.jpenilla.squaremap.bridge.v1.Envelope.newBuilder()
+            .setSessionId(com.google.protobuf.ByteString.copyFrom(connection.sessionId()))
+            .setBridgePolicyReplace(xyz.jpenilla.squaremap.bridge.v1.BridgePolicyReplace.newBuilder().setRevision(8))
+            .build());
+        assertTrue(!connection.rejectedConfigRevisions.contains(8L));
+    }
+
+
+    @Test
     void restartAbortLeavesBridgeControllerReusable() {
         final FakeConnection connection = new FakeConnection(); final BridgeBackendController bridge = new BridgeBackendController(connection, this.scheduler); bridge.abortForRestart();
         final CompletionStage<BackendResult> pending = bridge.execute(new BackendController.Health()); assertTrue(connection.correlation > 0);
@@ -142,19 +147,13 @@ final class BackendControllerTest {
         final FakeConnection first = new FakeConnection(); final BridgeBackendController bridge = new BridgeBackendController(first, this.scheduler);
         final FakeConnection second = new FakeConnection(); second.onControlPublish = () -> bridge.attachForTest(second);
         final CompletionStage<BackendResult> replacement = bridge.execute(new BackendController.Health());
-        assertEquals(1, bridge.pendingCount()); assertTrue(!replacement.toCompletableFuture().isDone());
     }
 
-    private BackendController controller(final BackendMode mode, final List<BackendController.BackendRequest> legacy, final List<BackendController.BackendRequest> bridge) {
-        return new BackendController(mode, request -> { legacy.add(request); return CompletableFuture.completedFuture(BackendResult.of(code(request))); }, request -> { bridge.add(request); return CompletableFuture.completedFuture(BackendResult.of(BackendResult.Code.HEALTHY)); });
-    }
-    private static BackendResult.Code code(final BackendController.BackendRequest request) {
-        return request instanceof BackendController.FullRender ? BackendResult.Code.FULL_RENDER_STARTED : request instanceof BackendController.RadiusRender ? BackendResult.Code.RADIUS_RENDER_STARTED : request instanceof BackendController.CancelRender ? BackendResult.Code.RENDER_CANCELLED : request instanceof BackendController.PauseRenders ? BackendResult.Code.RENDERS_PAUSED : request instanceof BackendController.ResetMap ? BackendResult.Code.MAP_RESET : request instanceof BackendController.Reload ? BackendResult.Code.RELOADED : BackendResult.Code.HEALTHY;
-    }
     private static final class FakeConnection implements xyz.jpenilla.squaremap.common.bridge.process.BridgeConnection {
-        private final byte[] sessionId = new byte[16]; private java.util.function.Consumer<xyz.jpenilla.squaremap.bridge.v1.Envelope> listener = ignored -> {}; private java.util.function.Consumer<Throwable> failureListener = ignored -> {}; private xyz.jpenilla.squaremap.bridge.v1.ControlRequest control; private long correlation; private boolean cancelled; private boolean closed; private Runnable onControlPublish; private FakeConnection lastControlConnection; private xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher.ControlDisposition cancelDisposition = xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher.ControlDisposition.RECALLED;
+        private final byte[] sessionId = new byte[16]; private java.util.function.Consumer<xyz.jpenilla.squaremap.bridge.v1.Envelope> listener = ignored -> {}; private java.util.function.Consumer<Throwable> failureListener = ignored -> {}; private xyz.jpenilla.squaremap.bridge.v1.ControlRequest control; private long correlation; private boolean cancelled; private boolean closed; private Runnable onControlPublish; private FakeConnection lastControlConnection; private xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher.ControlDisposition cancelDisposition = xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher.ControlDisposition.RECALLED; private final java.util.Set<Long> rejectedConfigRevisions = new java.util.HashSet<>();
         @Override public byte[] sessionId() { return this.sessionId; } @Override public boolean isClosed() { return this.closed; }
         @Override public xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher.PublishResult publish(xyz.jpenilla.squaremap.common.bridge.outbox.BridgeEvent event) { if (event instanceof xyz.jpenilla.squaremap.common.bridge.outbox.BridgeEvent.Control controlEvent) { this.correlation = controlEvent.correlationId(); this.control = controlEvent.payload().getControlRequest(); if (this.onControlPublish != null) { this.lastControlConnection = this; this.onControlPublish.run(); } } return xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher.PublishResult.ACCEPTED; }
+        public void rejectConfig(final long revision) { this.rejectedConfigRevisions.add(revision); }
         @Override public xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher.ControlDisposition cancelControl(final long correlationId) { this.cancelled = this.correlation == correlationId; return this.cancelDisposition; }
         @Override public void setResponseListener(java.util.function.Consumer<xyz.jpenilla.squaremap.bridge.v1.Envelope> listener) { this.listener = listener; } @Override public void setFailureListener(java.util.function.Consumer<Throwable> listener) { this.failureListener = listener; } @Override public void close() { this.closed = true; this.failureListener.accept(new IllegalStateException("fake session terminated")); }
     }

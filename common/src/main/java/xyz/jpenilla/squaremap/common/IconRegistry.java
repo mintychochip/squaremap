@@ -43,7 +43,7 @@ public final class IconRegistry implements Registry<BufferedImage> {
         final BridgeBootstrapConfig bridgeConfig,
         final xyz.jpenilla.squaremap.common.bridge.state.BridgeRevisionClock revisions
     ) {
-        this(directoryProvider, bridgeConfig.backendMode() != xyz.jpenilla.squaremap.common.bridge.process.BackendMode.RUST, revisions);
+        this(directoryProvider, false, revisions);
     }
 
     private IconRegistry(

@@ -69,7 +69,7 @@ final class ProductionBridgeWiringTest {
         final Path data = Files.createTempDirectory("squaremap-wiring-sidecar");
         SidecarSupervisor supervisor = null;
         try {
-            Config.BRIDGE_BACKEND_MODE = "SHADOW";
+            Config.BRIDGE_BACKEND_MODE = "RUST";
             final Path rustRoot = data.resolve("rust").toAbsolutePath();
             Config.BRIDGE_RUST_OUTPUT_ROOT = rustRoot.toString();
             final var command = java.util.List.of(
@@ -78,7 +78,7 @@ final class ProductionBridgeWiringTest {
             );
             Config.BRIDGE_SIDECAR_COMMAND = command;
             final BridgeBootstrapConfig config = new BridgeBootstrapConfig(
-                BackendMode.SHADOW,
+                BackendMode.RUST,
                 "fixture-version",
                 new SidecarCommand(command),
                 Duration.ofSeconds(10),
@@ -110,9 +110,5 @@ final class ProductionBridgeWiringTest {
     void rustIsTheDefaultWebBackend() {
         assertEquals("RUST", Config.BRIDGE_BACKEND_MODE);
         assertTrue(BackendLifecyclePolicy.rustHttpOwner(BackendLifecyclePolicy.configuredMode()));
-        assertFalse(BackendLifecyclePolicy.javaHttpOwner(BackendLifecyclePolicy.configuredMode()));
-        assertFalse(BackendLifecyclePolicy.javaCacheOwner(BackendLifecyclePolicy.configuredMode()));
-        assertFalse(BackendLifecyclePolicy.javaDirtyOwner(BackendLifecyclePolicy.configuredMode()));
-        assertFalse(BackendLifecyclePolicy.javaRenderOwner(BackendLifecyclePolicy.configuredMode()));
     }
 }

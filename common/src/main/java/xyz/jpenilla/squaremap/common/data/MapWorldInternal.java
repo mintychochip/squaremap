@@ -1,18 +1,8 @@
 package xyz.jpenilla.squaremap.common.data;
 
-import com.google.gson.JsonIOException;
-import com.google.gson.JsonSyntaxException;
-import com.google.gson.reflect.TypeToken;
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.EmptyBlockGetter;
@@ -26,23 +16,17 @@ import xyz.jpenilla.squaremap.api.MapWorld;
 import xyz.jpenilla.squaremap.api.Registry;
 import xyz.jpenilla.squaremap.api.WorldIdentifier;
 import xyz.jpenilla.squaremap.common.LayerRegistry;
-import xyz.jpenilla.squaremap.common.Logging;
-import xyz.jpenilla.squaremap.common.bridge.process.BackendLifecyclePolicy;
 import xyz.jpenilla.squaremap.common.config.ConfigManager;
 import xyz.jpenilla.squaremap.common.config.WorldAdvanced;
 import xyz.jpenilla.squaremap.common.config.WorldConfig;
 import xyz.jpenilla.squaremap.common.layer.SpawnIconLayer;
 import xyz.jpenilla.squaremap.common.layer.WorldBorderLayer;
-import xyz.jpenilla.squaremap.common.task.render.RenderFactory;
 import xyz.jpenilla.squaremap.common.util.Colors;
-import xyz.jpenilla.squaremap.common.util.FileUtil;
-import xyz.jpenilla.squaremap.common.util.ImageIOExecutor;
 import xyz.jpenilla.squaremap.common.util.Util;
 import xyz.jpenilla.squaremap.common.visibilitylimit.VisibilityLimitImpl;
 
 @DefaultQualifier(NonNull.class)
 public abstract class MapWorldInternal implements MapWorld {
-    private static final String DIRTY_CHUNKS_FILE_NAME = "dirty_chunks.json";
     private static final Map<WorldIdentifier, LayerRegistry> LAYER_REGISTRIES = new HashMap<>();
 
     private final ServerLevel level;
@@ -50,9 +34,6 @@ public abstract class MapWorldInternal implements MapWorld {
     private final WorldAdvanced advancedWorldConfig;
     private final Path dataPath;
     private final Path tilesPath;
-    private final ImageIOExecutor imageIOExecutor;
-    private final RenderManager renderManager;
-    private final Set<ChunkCoordinate> modifiedChunks = ConcurrentHashMap.newKeySet();
     private final BlockColors blockColors;
     private final LevelBiomeColorData levelBiomeColorData;
     private final VisibilityLimitImpl visibilityLimit;
@@ -60,13 +41,10 @@ public abstract class MapWorldInternal implements MapWorld {
 
     protected MapWorldInternal(
         final ServerLevel level,
-        final RenderFactory renderFactory,
         final DirectoryProvider directoryProvider,
         final ConfigManager configManager
     ) {
         this.level = level;
-
-        this.imageIOExecutor = ImageIOExecutor.create(level);
 
         this.worldConfig = configManager.worldConfig(this.level);
         this.advancedWorldConfig = configManager.worldAdvanced(this.level);
@@ -87,13 +65,6 @@ public abstract class MapWorldInternal implements MapWorld {
 
         this.visibilityLimit = new VisibilityLimitImpl(this);
         this.visibilityLimit.load(this.config().VISIBILITY_LIMITS);
-
-        this.deserializeDirtyChunks();
-
-        this.renderManager = RenderManager.create(this, renderFactory);
-        if (BackendLifecyclePolicy.javaRenderOwner(BackendLifecyclePolicy.configuredMode())) {
-            this.renderManager.init();
-        }
     }
 
     @Override
@@ -104,10 +75,6 @@ public abstract class MapWorldInternal implements MapWorld {
     @Override
     public WorldIdentifier identifier() {
         return Util.worldIdentifier(this.level);
-    }
-
-    public RenderManager renderManager() {
-        return this.renderManager;
     }
 
     public Path dataPath() {
@@ -174,33 +141,9 @@ public abstract class MapWorldInternal implements MapWorld {
         return Colors.rgb(state.getMapColor(EmptyBlockGetter.INSTANCE, BlockPos.ZERO));
     }
 
-    public void saveImage(final Image image) {
-        this.imageIOExecutor.saveImage(image);
-    }
-
     public boolean shouldRenderDirtyChunk(final ChunkCoordinate coord) {
         return this.config().BACKGROUND_RENDER_ENABLED
             && this.visibilityLimit().shouldRenderChunk(coord);
-    }
-
-    public void chunkModified(final ChunkCoordinate coord) {
-        if (!BackendLifecyclePolicy.javaDirtyOwner(BackendLifecyclePolicy.configuredMode())) {
-            return;
-        }
-        if (this.shouldRenderDirtyChunk(coord)) {
-            this.modifiedChunks.add(coord);
-        }
-    }
-
-    public boolean hasModifiedChunks() {
-        return !this.modifiedChunks.isEmpty();
-    }
-
-    public ChunkCoordinate nextModifiedChunk() {
-        final Iterator<ChunkCoordinate> it = this.modifiedChunks.iterator();
-        final ChunkCoordinate coord = it.next();
-        it.remove();
-        return coord;
     }
 
     public void shutdown() {
@@ -210,46 +153,6 @@ public abstract class MapWorldInternal implements MapWorld {
         if (this.layerRegistry().hasEntry(WorldBorderLayer.KEY)) {
             this.layerRegistry().unregister(WorldBorderLayer.KEY);
         }
-        this.renderManager.shutdown();
-        this.imageIOExecutor.shutdown();
-        this.serializeDirtyChunks();
-    }
-
-    private void serializeDirtyChunks() {
-        if (!BackendLifecyclePolicy.javaDirtyOwner(BackendLifecyclePolicy.configuredMode())) {
-            return;
-        }
-        final Path file = this.dataPath.resolve(DIRTY_CHUNKS_FILE_NAME);
-        if (this.modifiedChunks.size() > 200000) { // ~6MB
-            Logging.logger().warn("Map for world '{}' has a large amount ({}) of chunks queued for background render! If this notice appears frequently, consider adjusting the background render and or update trigger settings.", this.identifier().asString(), this.modifiedChunks.size());
-        }
-        try {
-            FileUtil.atomicWrite(file, tmp -> Files.writeString(tmp, Util.gson().toJson(this.modifiedChunks)));
-        } catch (final IOException ex) {
-            Logging.logger().warn("Failed to serialize dirty chunks for world '{}' to file '{}'", this.identifier().asString(), file, ex);
-        }
-    }
-
-    private void deserializeDirtyChunks() {
-        if (!BackendLifecyclePolicy.javaDirtyOwner(BackendLifecyclePolicy.configuredMode())) {
-            return;
-        }
-        final Path file = this.dataPath.resolve(DIRTY_CHUNKS_FILE_NAME);
-        if (!Files.isRegularFile(file)) {
-            return;
-        }
-        final List<ChunkCoordinate> deserialized;
-        try (final BufferedReader reader = Files.newBufferedReader(file)) {
-            deserialized = Util.gson().fromJson(reader, new TypeToken<List<ChunkCoordinate>>() {}.getType());
-        } catch (final JsonIOException | JsonSyntaxException | IOException ex) {
-            Logging.logger().warn("Failed to deserialize dirty chunks for world '{}' from file '{}'", this.identifier().asString(), file, ex);
-            return;
-        }
-        if (deserialized == null) {
-            Logging.logger().warn("Failed to deserialize dirty chunks for world '{}' from file '{}' (null result, file is corrupted or empty?)", this.identifier().asString(), file);
-            return;
-        }
-        this.modifiedChunks.addAll(deserialized);
     }
 
     public void didReset() {

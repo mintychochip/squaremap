@@ -1,40 +1,15 @@
 package xyz.jpenilla.squaremap.common.task;
 
-import com.google.inject.assistedinject.Assisted;
-import com.google.inject.assistedinject.AssistedInject;
 import java.awt.Color;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.concurrent.ForkJoinPool;
-import org.checkerframework.checker.nullness.qual.NonNull;
-import xyz.jpenilla.squaremap.common.data.DirectoryProvider;
-import xyz.jpenilla.squaremap.common.data.MapWorldInternal;
-import xyz.jpenilla.squaremap.common.httpd.JsonCache;
 import xyz.jpenilla.squaremap.common.util.Util;
 
 public final class UpdateMarkers {
-    private final MapWorldInternal mapWorld;
-    private final String jsonPathString;
-    private final JsonCache jsonCache;
-
-    @AssistedInject
-    private UpdateMarkers(
-        @Assisted final @NonNull MapWorldInternal mapWorld,
-        final @NonNull DirectoryProvider directoryProvider,
-        final @NonNull JsonCache jsonCache
-    ) {
-        this.mapWorld = mapWorld;
-        final Path jsonPath = this.mapWorld.tilesPath().resolve("markers.json");
-        this.jsonPathString = "/" + directoryProvider.webDirectory().relativize(jsonPath).toString().replace("\\", "/");
-        this.jsonCache = jsonCache;
-    }
-    /** Writes an already-collected immutable snapshot without recollecting the layer registry. */
-    public void publish(final xyz.jpenilla.squaremap.bridge.v1.MarkerLayersReplace snapshot) {
-        ForkJoinPool.commonPool().execute(() -> this.jsonCache.put(this.jsonPathString, document(snapshot)));
+    private UpdateMarkers() {
     }
 
     public static String document(final xyz.jpenilla.squaremap.bridge.v1.MarkerLayersReplace snapshot) {

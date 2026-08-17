@@ -17,9 +17,7 @@ import org.checkerframework.framework.qual.DefaultQualifier;
 import xyz.jpenilla.squaremap.api.Squaremap;
 import xyz.jpenilla.squaremap.api.SquaremapProvider;
 import xyz.jpenilla.squaremap.common.backend.BackendControllerSupport;
-import xyz.jpenilla.squaremap.common.bridge.process.BackendMode;
 import xyz.jpenilla.squaremap.common.bridge.process.SidecarSupervisor;
-import xyz.jpenilla.squaremap.common.bridge.process.BackendLifecyclePolicy;
 import xyz.jpenilla.squaremap.common.config.ConfigBridgeExporter;
 import xyz.jpenilla.squaremap.common.bridge.process.BridgeBootstrapConfig;
 import xyz.jpenilla.squaremap.common.bridge.process.BridgeConnection;
@@ -29,8 +27,6 @@ import xyz.jpenilla.squaremap.common.config.ConfigManager;
 import xyz.jpenilla.squaremap.common.config.Messages;
 import xyz.jpenilla.squaremap.common.data.DirectoryProvider;
 import xyz.jpenilla.squaremap.common.data.LevelBiomeColorData;
-import xyz.jpenilla.squaremap.common.httpd.IntegratedServer;
-import xyz.jpenilla.squaremap.common.httpd.JsonCache;
 import xyz.jpenilla.squaremap.common.layer.SpawnIconLayer;
 import xyz.jpenilla.squaremap.common.util.Components;
 import xyz.jpenilla.squaremap.common.util.ReflectionUtil;
@@ -49,7 +45,6 @@ public final class SquaremapCommon {
     private final WorldManagerImpl worldManager;
     private final Commands commands;
     private final SquaremapJarAccess squaremapJar;
-    private final JsonCache jsonCache;
     private final Provider<BridgeBootstrapConfig> bootstrapConfig;
     private final SidecarSupervisor sidecarSupervisor;
     private BridgeConnection bridgeConnection;
@@ -66,7 +61,6 @@ public final class SquaremapCommon {
         final WorldManagerImpl worldManager,
         final Commands commands,
         final SquaremapJarAccess squaremapJar,
-        final JsonCache jsonCache,
         final Provider<BridgeBootstrapConfig> bootstrapConfig,
         final SidecarSupervisor sidecarSupervisor
     ) {
@@ -80,9 +74,9 @@ public final class SquaremapCommon {
         this.worldManager = worldManager;
         this.commands = commands;
         this.squaremapJar = squaremapJar;
-        this.jsonCache = jsonCache;
         this.bootstrapConfig = bootstrapConfig;
         this.sidecarSupervisor = sidecarSupervisor;
+        this.sidecarSupervisor.setBridgeIdentityDirectory(directoryProvider.dataDirectory());
     }
 
     public void init() {
@@ -93,19 +87,17 @@ public final class SquaremapCommon {
         this.commands.registerCommands();
     }
     private void start() {
-        this.startSidecarIfNeeded();
+        this.startSidecar();
         this.squaremapJar.extract("web", this.directoryProvider.webDirectory(), Config.UPDATE_WEB_DIR);
         LevelBiomeColorData.loadImages(this.directoryProvider);
         this.worldManager.start();
         this.platform.startCallback();
-        final BackendMode mode = this.bootstrapConfig.get().backendMode();
-        if (Config.HTTPD_ENABLED && BackendLifecyclePolicy.javaHttpOwner(mode)) {
-            IntegratedServer.startServer(this.directoryProvider, this.jsonCache, null);
-        } else if (!Config.HTTPD_ENABLED) {
+        if (!Config.HTTPD_ENABLED) {
             Logging.logger().info(Messages.LOG_INTERNAL_WEB_DISABLED);
         }
     }
-    private void startSidecarIfNeeded() {
+
+    private void startSidecar() {
         final BridgeBootstrapConfig bootstrapConfig = this.bootstrapConfig.get();
         Logging.logger().info(
             "Configured bridge backend mode {} with sidecar command {} and output root {}",
@@ -113,50 +105,27 @@ public final class SquaremapCommon {
             bootstrapConfig.sidecarCommand() == null ? List.of() : bootstrapConfig.sidecarCommand().command(),
             bootstrapConfig.rustOutputRoot()
         );
-        if (bootstrapConfig.backendMode() == BackendMode.JAVA) {
-            return;
-        }
         BridgeBootstrapConfig.validateIsolatedRoots(this.directoryProvider.webDirectory(), bootstrapConfig.rustOutputRoot());
-        try {
-            Logging.logger().info(
-                "Starting {} backend sidecar with command {} and output root {}",
-                bootstrapConfig.backendMode(),
-                bootstrapConfig.sidecarCommand().command(),
-                bootstrapConfig.rustOutputRoot()
-            );
-            this.bridgeConnection = this.sidecarSupervisor.start(bootstrapConfig)
-                .toCompletableFuture()
-                .join();
-            this.bridgeConnection.setFailureListener(failure -> {
-                Logging.logger().error("Bridge sidecar connection failed", failure);
-                final byte[] captured = this.sidecarSupervisor.stderrSnapshot();
-                if (captured.length > 0) {
-                    Logging.logger().error("Bridge sidecar stderr: {}", new String(captured, java.nio.charset.StandardCharsets.UTF_8));
-                }
-            });
-        } catch (final CompletionException failure) {
-            this.bridgeConnection = null;
-            if (bootstrapConfig.backendMode() == BackendMode.SHADOW) {
-                Logging.logger().warn("Shadow sidecar failed to launch; Java remains primary", failure.getCause());
-            } else {
-                throw failure;
+        Logging.logger().info(
+            "Starting Rust backend sidecar with command {} and output root {}",
+            bootstrapConfig.sidecarCommand().command(),
+            bootstrapConfig.rustOutputRoot()
+        );
+        this.bridgeConnection = this.sidecarSupervisor.start(bootstrapConfig)
+            .toCompletableFuture()
+            .join();
+        this.bridgeConnection.setFailureListener(failure -> {
+            Logging.logger().error("Bridge sidecar connection failed", failure);
+            final byte[] captured = this.sidecarSupervisor.stderrSnapshot();
+            if (captured.length > 0) {
+                Logging.logger().error("Bridge sidecar stderr: {}", new String(captured, java.nio.charset.StandardCharsets.UTF_8));
             }
-        }
+        });
     }
 
     private void stop() {
-        final BackendMode mode = this.bootstrapConfig.get().backendMode();
-        if (Config.HTTPD_ENABLED && BackendLifecyclePolicy.javaHttpOwner(mode)) {
-            IntegratedServer.stopServer();
-        }
         this.platform.stopCallback();
         this.worldManager.shutdown();
-        if (Config.HTTPD_ENABLED && BackendLifecyclePolicy.javaHttpOwner(mode) && !Config.FLUSH_JSON_IMMEDIATELY) {
-            this.jsonCache.flush();
-        }
-        if (BackendLifecyclePolicy.javaCacheOwner(mode)) {
-            this.jsonCache.clear();
-        }
     }
 
     public void reload() {
@@ -186,6 +155,10 @@ public final class SquaremapCommon {
     public String version() {
         return this.platform.version();
     }
+    public WorldManager worldManager() {
+        return this.worldManager;
+    }
+
 
     public void updateCheck() {
         if (!Config.UPDATE_CHECKER) {

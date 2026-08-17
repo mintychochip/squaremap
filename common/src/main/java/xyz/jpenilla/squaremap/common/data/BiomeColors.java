@@ -1,14 +1,8 @@
 package xyz.jpenilla.squaremap.common.data;
 
-import it.unimi.dsi.fastutil.longs.Long2ReferenceLinkedOpenHashMap;
 import java.util.Set;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.Holder;
-import net.minecraft.core.QuartPos;
-import net.minecraft.server.level.ServerLevel;
-import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.biome.Biome;
-import net.minecraft.world.level.biome.BiomeManager;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
@@ -16,7 +10,6 @@ import net.minecraft.world.level.material.MapColor;
 import org.checkerframework.checker.nullness.qual.NonNull;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.checkerframework.framework.qual.DefaultQualifier;
-import xyz.jpenilla.squaremap.common.task.render.AbstractRender;
 import xyz.jpenilla.squaremap.common.util.ColorBlender;
 import xyz.jpenilla.squaremap.common.util.Colors;
 import xyz.jpenilla.squaremap.common.util.chunksnapshot.ChunkSnapshot;
@@ -59,18 +52,6 @@ public final class BiomeColors {
     @FunctionalInterface
     public interface BiomeLookup {
         Biome biome(BlockPos pos);
-    }
-
-    public BiomeColors(final MapWorldInternal world, final AbstractRender.ChunkSnapshotManager chunkSnapshotProvider) {
-        this(world, chunkSnapshotProvider, world.config().MAP_BIOMES_BLEND);
-    }
-
-    public BiomeColors(final MapWorldInternal world, final AbstractRender.ChunkSnapshotManager chunkSnapshotProvider, final int blendRadius) {
-        this(
-            BiomeCache.sized(world.serverLevel(), chunkSnapshotProvider, BLOCKPOS_BIOME_CACHE_SIZE)::biome,
-            world.levelBiomeColorData(),
-            blendRadius
-        );
     }
 
     public static BiomeColors fixture(
@@ -153,59 +134,5 @@ public final class BiomeColors {
 
     private Biome biome(final BlockPos pos) {
         return this.biomeLookup.biome(pos);
-    }
-
-    private static final class BiomeCache {
-        private final ServerLevel level;
-        private final AbstractRender.ChunkSnapshotManager chunkSnapshotManager;
-        private final int size;
-        private final Long2ReferenceLinkedOpenHashMap<Biome> cache;
-        private final BiomeManager biomeManager;
-
-        private BiomeCache(
-            final ServerLevel level,
-            final AbstractRender.ChunkSnapshotManager chunkSnapshotManager,
-            final int size
-        ) {
-            this.level = level;
-            this.chunkSnapshotManager = chunkSnapshotManager;
-            this.size = size;
-            this.cache = new Long2ReferenceLinkedOpenHashMap<>(size);
-            this.biomeManager = this.level.getBiomeManager().withDifferentSource(this::noiseBiome);
-        }
-
-        public Biome biome(final BlockPos pos) {
-            final long blockKey = pos.asLong();
-            final @Nullable Biome cached = this.cache.get(blockKey);
-            if (cached != null) {
-                return cached;
-            }
-
-            final Biome biome = this.biomeManager.getBiome(pos).value();
-
-            if (this.cache.size() >= this.size) {
-                this.cache.removeLast();
-            }
-            this.cache.putAndMoveToFirst(blockKey, biome);
-            return biome;
-        }
-
-        private Holder<Biome> noiseBiome(final int quartX, final int quartY, final int quartZ) {
-            final ChunkPos chunkPos = new ChunkPos(
-                QuartPos.toSection(quartX),
-                QuartPos.toSection(quartZ)
-            );
-            final @Nullable ChunkSnapshot chunk = this.chunkSnapshotManager.snapshotDirect(chunkPos).join();
-
-            final BiomeManager.NoiseBiomeSource noiseBiomeSource = chunk == null
-                ? this.level::getUncachedNoiseBiome // no chunk exists, this will get from the chunk generator
-                : chunk;
-
-            return noiseBiomeSource.getNoiseBiome(quartX, quartY, quartZ);
-        }
-
-        public static BiomeCache sized(final ServerLevel level, final AbstractRender.ChunkSnapshotManager snapshotCache, final int size) {
-            return new BiomeCache(level, snapshotCache, size);
-        }
     }
 }

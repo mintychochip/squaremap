@@ -41,6 +41,8 @@ import xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher;
 /** Launches and authenticates one managed sidecar process. */
 @Singleton
 public final class SidecarSupervisor implements AutoCloseable {
+    public static final int PROTOCOL_MAJOR = 1;
+    public static final int PROTOCOL_MINOR = 0;
     public static final int BOOTSTRAP_TOKEN_BYTES = 32;
     public static final int SESSION_ID_BYTES = 16;
     private enum LifecycleState {
@@ -70,11 +72,12 @@ public final class SidecarSupervisor implements AutoCloseable {
     private volatile boolean closed;
     private ScheduledFuture<?> timeoutTask;
     private ScheduledFuture<?> restartTask;
-    private BridgeBootstrapConfig restartConfig;
     private final java.util.concurrent.CopyOnWriteArrayList<Consumer<BridgeConnection>> reconnectListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private byte[] durableBridgeId;
+    private BridgeBootstrapConfig restartConfig;
     private int restartStarts;
-    private long restartWindowStartNanos;
     private long healthySinceNanos;
+    private long restartWindowStartNanos;
 
     static final Duration[] RESTART_DELAYS = {
         Duration.ofSeconds(1), Duration.ofSeconds(2), Duration.ofSeconds(4),
@@ -84,11 +87,14 @@ public final class SidecarSupervisor implements AutoCloseable {
     static final Duration RESTART_WINDOW = Duration.ofMinutes(10);
     static final Duration HEALTHY_RESET = Duration.ofMinutes(10);
     public SidecarSupervisor() {
-        this(new SecureRandom());
+        this(new SecureRandom(), null);
     }
-
     SidecarSupervisor(final SecureRandom secureRandom) {
+        this(secureRandom, null);
+    }
+    public SidecarSupervisor(final SecureRandom secureRandom, final java.nio.file.Path dataDirectory) {
         this.secureRandom = Objects.requireNonNull(secureRandom, "secureRandom");
+        this.durableBridgeId = loadOrCreateBridgeId(this.secureRandom, dataDirectory);
         final ThreadFactory factory = runnable -> {
             final Thread thread = new Thread(runnable, "squaremap-sidecar");
             thread.setDaemon(true);
@@ -97,8 +103,58 @@ public final class SidecarSupervisor implements AutoCloseable {
         this.executor = Executors.newCachedThreadPool(factory);
         this.scheduler = Executors.newSingleThreadScheduledExecutor(factory);
     }
+    public void setBridgeIdentityDirectory(final java.nio.file.Path dataDirectory) {
+        synchronized (this.lock) {
+            this.durableBridgeId = loadOrCreateBridgeId(this.secureRandom, dataDirectory);
+        }
+    }
+    private static byte[] loadOrCreateBridgeId(final SecureRandom random, final java.nio.file.Path dataDirectory) {
+        final byte[] identity = new byte[SESSION_ID_BYTES];
+        if (dataDirectory != null) {
+            final java.nio.file.Path path = dataDirectory.resolve("bridge-identity.bin");
+            try {
+                if (java.nio.file.Files.isRegularFile(path)) {
+                    final byte[] stored = java.nio.file.Files.readAllBytes(path);
+                    if (stored.length != SESSION_ID_BYTES || allZero(stored)) {
+                        throw new IllegalStateException("persisted bridge identity is invalid");
+                    }
+                    return stored;
+                }
+                random.nextBytes(identity);
+                if (allZero(identity)) identity[0] = 1;
+                java.nio.file.Files.createDirectories(dataDirectory);
+                final java.nio.file.Path temporary = path.resolveSibling(path.getFileName() + ".tmp");
+                java.nio.file.Files.write(temporary, identity, java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.TRUNCATE_EXISTING, java.nio.file.StandardOpenOption.WRITE);
+                try {
+                    java.nio.file.Files.move(temporary, path, java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                } catch (java.nio.file.AtomicMoveNotSupportedException unsupported) {
+                    java.nio.file.Files.move(temporary, path, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                }
+                return identity;
+            } catch (java.io.IOException error) {
+                throw new IllegalStateException("could not load or persist bridge identity", error);
+            }
+        }
+        random.nextBytes(identity);
+        if (allZero(identity)) identity[0] = 1;
+        return identity;
+    }
+    private static boolean allZero(final byte[] bytes) {
+        for (final byte value : bytes) {
+            if (value != 0) return false;
+        }
+        return true;
+    }
+    BridgeConnection startDetachedForTests() {
+        synchronized (this.lock) {
+            final byte[] session = new byte[SESSION_ID_BYTES];
+            this.connection = new ManagedConnection(null, null, session, Duration.ofMillis(100), true, 1L);
+            this.lifecycleState = LifecycleState.READY;
+            this.startFuture = CompletableFuture.completedFuture(this.connection);
+            return this.connection;
+        }
+    }
 
-    /** Starts one sidecar and recovers boundedly after an authenticated failure. */
     public CompletionStage<BridgeConnection> start(final BridgeBootstrapConfig config) {
         Objects.requireNonNull(config, "config");
         synchronized (this.lock) {
@@ -108,13 +164,6 @@ public final class SidecarSupervisor implements AutoCloseable {
             this.startFuture = new CompletableFuture<>();
             if (this.lifecycleState == LifecycleState.CLOSED || this.lifecycleState == LifecycleState.FAILED) {
                 this.startFuture.completeExceptionally(new IllegalStateException("supervisor is closed"));
-                return this.startFuture;
-            }
-            if (config.backendMode() == BackendMode.JAVA) {
-                final byte[] session = new byte[SESSION_ID_BYTES];
-                this.connection = new ManagedConnection(null, null, session, config.shutdownGrace(), true, 1L);
-                this.lifecycleState = LifecycleState.READY;
-                this.startFuture.complete(this.connection);
                 return this.startFuture;
             }
             this.restartConfig = config;
@@ -250,17 +299,23 @@ public final class SidecarSupervisor implements AutoCloseable {
             this.listener.close();
             this.listener = null;
             final Envelope hello = FrameCodec.read(accepted);
+            final long helloSequence = hello.getSequence();
+            if (helloSequence <= 0L || helloSequence > Long.MAX_VALUE - 2L) {
+                throw new SecurityException("invalid handshake sequence");
+            }
             final byte[] sessionId = hello.getSessionId().toByteArray();
-            final boolean validMajor = hello.getProtocolMajor() == 1;
+            final boolean validMajor = hello.getProtocolMajor() == PROTOCOL_MAJOR;
+            final int negotiatedMinor = Math.min(hello.getProtocolMinor(), PROTOCOL_MINOR);
+            final boolean validMinor = hello.getProtocolMinor() <= PROTOCOL_MINOR;
             final boolean validSession = sessionId.length == SESSION_ID_BYTES;
             final boolean validPayload = hello.getPayloadCase() == Envelope.PayloadCase.HELLO;
             final boolean validToken = validPayload && MessageDigest.isEqual(
                 token,
                 hello.getHello().getBootstrapToken().toByteArray()
             );
-            final boolean acceptedHandshake = validMajor && validSession && validToken;
-            this.writeHelloAck(accepted, sessionId, hello.getSequence(), acceptedHandshake,
-                acceptedHandshake ? "" : rejectionReason(validMajor, validSession, validPayload, validToken));
+            final boolean acceptedHandshake = validMajor && validMinor && validSession && validToken;
+            this.writeHelloAck(accepted, sessionId, helloSequence, acceptedHandshake, negotiatedMinor,
+                acceptedHandshake ? "" : rejectionReason(validMajor, validMinor, validSession, validPayload, validToken));
             if (!acceptedHandshake) {
                 throw new SecurityException("sidecar handshake rejected");
             }
@@ -270,11 +325,8 @@ public final class SidecarSupervisor implements AutoCloseable {
                 sessionId,
                 config.shutdownGrace(),
                 false,
-                hello.getSequence() + 2L
+                Math.addExact(helloSequence, 2L)
             );
-            synchronized (this.lock) {
-                this.healthySinceNanos = System.nanoTime();
-            }
             synchronized (this.lock) {
                 if (this.lifecycleState != LifecycleState.STARTING || this.closed) {
                     closeQuietly(accepted);
@@ -282,15 +334,18 @@ public final class SidecarSupervisor implements AutoCloseable {
                 }
                 this.connection = managed;
                 this.lifecycleState = LifecycleState.READY;
+                this.healthySinceNanos = 0L;
+                managed.publishBridgeIdentity(this.durableBridgeId);
+                this.healthySinceNanos = System.nanoTime();
+                final ScheduledFuture<?> timeout = this.timeoutTask;
+                if (timeout != null) {
+                    timeout.cancel(false);
+                }
+                this.reconnectListeners.forEach(listener -> listener.accept(managed));
+                this.executor.execute(managed::readFrames);
                 if (this.startFuture != null && !this.startFuture.isDone()) {
                     this.startFuture.complete(managed);
                 }
-            }
-            this.reconnectListeners.forEach(listener -> listener.accept(managed));
-            this.executor.execute(managed::readFrames);
-            final ScheduledFuture<?> timeout = this.timeoutTask;
-            if (timeout != null) {
-                timeout.cancel(false);
             }
         } catch (final Throwable failure) {
             this.failStart(failure);
@@ -325,16 +380,17 @@ public final class SidecarSupervisor implements AutoCloseable {
         final byte[] sessionId,
         final long sequence,
         final boolean accepted,
+        final int negotiatedMinor,
         final String reason
     ) throws IOException {
         final Envelope ack = Envelope.newBuilder()
-            .setProtocolMajor(1)
-            .setProtocolMinor(0)
+            .setProtocolMajor(PROTOCOL_MAJOR)
+            .setProtocolMinor(negotiatedMinor)
             .setSessionId(ByteString.copyFrom(sessionId))
             .setSequence(sequence + 1)
             .setHelloAck(HelloAck.newBuilder()
-                .setProtocolMajor(1)
-                .setProtocolMinor(0)
+                .setProtocolMajor(PROTOCOL_MAJOR)
+                .setProtocolMinor(negotiatedMinor)
                 .setAccepted(accepted)
                 .setRejectionReason(reason))
             .build();
@@ -374,10 +430,6 @@ public final class SidecarSupervisor implements AutoCloseable {
         if (this.restartWindowStartNanos == 0L || now - this.restartWindowStartNanos >= RESTART_WINDOW.toNanos()) {
             this.restartWindowStartNanos = now;
             this.restartStarts = 0;
-        }
-        if (this.healthySinceNanos != 0L && now - this.healthySinceNanos >= HEALTHY_RESET.toNanos()) {
-            this.restartStarts = 0;
-            this.restartWindowStartNanos = now;
         }
         if (this.restartStarts >= MAX_RESTARTS_PER_WINDOW) return false;
         final int attempt = this.restartStarts++;
@@ -483,12 +535,16 @@ public final class SidecarSupervisor implements AutoCloseable {
 
     private static String rejectionReason(
         final boolean validMajor,
+        final boolean validMinor,
         final boolean validSession,
         final boolean validPayload,
         final boolean validToken
     ) {
         if (!validMajor) {
             return "unsupported protocol major";
+        }
+        if (!validMinor) {
+            return "unsupported protocol minor";
         }
         if (!validSession) {
             return "invalid session id";
@@ -526,16 +582,19 @@ public final class SidecarSupervisor implements AutoCloseable {
         private final Process process;
         private final byte[] sessionId;
         private final AtomicBoolean closed = new AtomicBoolean();
-        private final AtomicBoolean failureSignaled = new AtomicBoolean();
+        private final Object failureLock = new Object();
+        private Throwable capturedFailure;
+        private Consumer<Throwable> failureListener = ignored -> {};
+        private boolean failureDelivered;
         private final Duration shutdownGrace;
         private final boolean noProcess;
         private final BridgePublisher publisher;
         private final InboundSequenceTracker inboundSequences;
         private volatile FrameLimits frameLimits = FrameLimits.DEFAULT;
+        private volatile Consumer<Envelope> replayListener = ignored -> {};
         private volatile Consumer<Envelope> readyListener = ignored -> {};
         private volatile Consumer<Envelope> responseListener = ignored -> {};
         private volatile Consumer<Envelope> snapshotRequestListener = ignored -> {};
-        private volatile Consumer<Throwable> failureListener = ignored -> {};
         private ManagedConnection(final SocketChannel socket, final Process process, final byte[] sessionId,
                                   final Duration shutdownGrace, final boolean noProcess, final long inboundSequence) {
             this.socket = socket;
@@ -557,6 +616,7 @@ public final class SidecarSupervisor implements AutoCloseable {
         @Override public boolean isClosed() { return this.closed.get(); }
         @Override public BridgePublisher.PublishResult publish(final BridgeEvent event) { return this.publisher.publish(event); }
         @Override public BridgePublisher.ControlDisposition cancelControl(final long correlationId) { return this.publisher.cancelControl(correlationId); }
+        @Override public void rejectConfig(final long revision) { this.publisher.rejectConfig(revision); }
         @Override public void applyPolicy(final BridgePolicyReplace policy) {
             this.frameLimits = new FrameLimits(policy.getMaxControlFrameBytes(), policy.getMaxSnapshotFrameBytes(), policy.getMaxUncompressedSnapshotBytes());
             this.publisher.applyPolicy(policy);
@@ -567,11 +627,24 @@ public final class SidecarSupervisor implements AutoCloseable {
         @Override public void setResponseListener(final Consumer<Envelope> listener) {
             this.responseListener = java.util.Objects.requireNonNull(listener, "listener");
         }
+        @Override public void setReplayListener(final Consumer<Envelope> listener) {
+            this.replayListener = java.util.Objects.requireNonNull(listener, "listener");
+        }
         @Override public void setSnapshotRequestListener(final Consumer<Envelope> listener) {
             this.snapshotRequestListener = java.util.Objects.requireNonNull(listener, "listener");
         }
         @Override public void setFailureListener(final Consumer<Throwable> listener) {
-            this.failureListener = java.util.Objects.requireNonNull(listener, "listener");
+            Objects.requireNonNull(listener, "listener");
+            final Throwable failure;
+            synchronized (this.failureLock) {
+                this.failureListener = listener;
+                if (this.capturedFailure == null || this.failureDelivered) {
+                    return;
+                }
+                this.failureDelivered = true;
+                failure = this.capturedFailure;
+            }
+            listener.accept(failure);
         }
         @Override public void setAcknowledgementListener(final Consumer<BridgePublisher.Sent> listener) {
             this.publisher.setAcknowledgementListener(listener);
@@ -585,10 +658,16 @@ public final class SidecarSupervisor implements AutoCloseable {
                     if (!java.security.MessageDigest.isEqual(this.sessionId, envelope.getSessionId().toByteArray())) {
                         throw new SecurityException("bridge envelope session mismatch");
                     }
-                    if (envelope.hasReady()) this.readyListener.accept(envelope);
+                    if (!this.inboundSequences.accept(envelope.getSequence())) {
+                        throw new SecurityException("bridge envelope sequence mismatch");
+                    }
+                    if (envelope.hasResumeWatermark() || envelope.hasDirtyReplayRequest()
+                        || envelope.hasDirtyReplayItem() || envelope.hasDirtyResyncComplete()
+                        || envelope.hasWorldResyncRequired()) this.replayListener.accept(envelope);
+                    else if (envelope.hasReady()) this.readyListener.accept(envelope);
                     else if (envelope.hasAck()) this.publisher.acknowledge(envelope);
                     else if (envelope.hasProtocolError() && envelope.getProtocolError().getFatal()) throw new IOException("fatal bridge protocol error");
-                    else if (envelope.hasChunkSnapshotRequest()) this.snapshotRequestListener.accept(envelope);
+                    else if (envelope.hasChunkSnapshotRequest() || envelope.hasWorldEnumerationRequest()) this.snapshotRequestListener.accept(envelope);
                     else this.responseListener.accept(envelope);
                 }
             } catch (final Exception failure) {
@@ -600,9 +679,19 @@ public final class SidecarSupervisor implements AutoCloseable {
         }
 
         private void signalFailure(final Throwable failure) {
-            if (this.failureSignaled.compareAndSet(false, true)) {
-                this.failureListener.accept(failure);
+            final Consumer<Throwable> listener;
+            synchronized (this.failureLock) {
+                if (this.capturedFailure != null) {
+                    return;
+                }
+                this.capturedFailure = Objects.requireNonNull(failure, "failure");
+                if (this.failureDelivered) {
+                    return;
+                }
+                this.failureDelivered = true;
+                listener = this.failureListener;
             }
+            listener.accept(failure);
         }
 
         @Override public void close() {

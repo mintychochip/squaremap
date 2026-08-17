@@ -17,8 +17,7 @@ import xyz.jpenilla.squaremap.common.config.ConfigManager;
 import xyz.jpenilla.squaremap.common.data.DirectoryProvider;
 import xyz.jpenilla.squaremap.common.data.MapWorldInternal;
 import xyz.jpenilla.squaremap.common.bridge.state.BridgeStatePublisher;
-import xyz.jpenilla.squaremap.common.task.TaskFactory;
-import xyz.jpenilla.squaremap.common.task.render.RenderFactory;
+
 import xyz.jpenilla.squaremap.common.util.ExceptionLoggingScheduledThreadPoolExecutor;
 import xyz.jpenilla.squaremap.common.util.Util;
 import xyz.jpenilla.squaremap.paper.util.Folia;
@@ -31,14 +30,12 @@ public final class PaperMapWorld extends MapWorldInternal {
     private PaperMapWorld(
         @Assisted final ServerLevel level,
         final JavaPlugin plugin,
-        final RenderFactory renderFactory,
         final DirectoryProvider directoryProvider,
         final Server server,
         final ConfigManager configManager,
-        final TaskFactory taskFactory,
         final BridgeStatePublisher statePublisher
     ) {
-        super(level, renderFactory, directoryProvider, configManager);
+        super(level, directoryProvider, configManager);
         if (Folia.FOLIA) {
             this.markerTaskHandler = new FoliaMarkerTaskHandler(level, statePublisher);
         } else {

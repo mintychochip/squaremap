@@ -89,7 +89,7 @@ public final class BackendPaths {
      * the other active backend's root. The Java backend owns the legacy web
      * output tree; shadow and rust backends must use a separate tree.
      *
-     * @param mode backend mode; {@link BackendMode#JAVA} returns the Java root
+     * @param mode backend mode; only {@link BackendMode#RUST} is supported
      * @param javaRoot root used by the Java backend (uncanonicalized)
      * @param configuredRustRoot configured root for the rust backend
      * @return canonicalized root for {@code mode}
@@ -103,8 +103,8 @@ public final class BackendPaths {
     ) {
         Objects.requireNonNull(mode, "mode");
         Objects.requireNonNull(javaRoot, "javaRoot");
-        if (mode == BackendMode.JAVA) {
-            return canonicalize(javaRoot);
+        if (mode != BackendMode.RUST) {
+            throw new IllegalArgumentException("squaremap only supports the Rust map backend");
         }
         if (configuredRustRoot == null || !configuredRustRoot.isAbsolute()) {
             throw new IllegalArgumentException("Rust backend requires an absolute output root distinct from Java web output");

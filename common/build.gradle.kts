@@ -81,8 +81,6 @@ dependencies {
     exclude("net.kyori", "option")
   }
 
-  api(libs.undertow)
-
   api(libs.htmlSanitizer) {
     isTransitive = false
   }

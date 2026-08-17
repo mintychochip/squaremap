@@ -44,7 +44,6 @@ import xyz.jpenilla.squaremap.common.SquaremapCommon;
 import xyz.jpenilla.squaremap.common.WorldManager;
 import xyz.jpenilla.squaremap.common.bridge.outbox.BridgeEvent;
 import xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher;
-import xyz.jpenilla.squaremap.common.bridge.process.BackendLifecyclePolicy;
 import xyz.jpenilla.squaremap.common.bridge.process.BackendMode;
 import xyz.jpenilla.squaremap.common.bridge.process.BridgeBootstrapConfig;
 import xyz.jpenilla.squaremap.common.bridge.process.BridgeConnection;
@@ -510,9 +509,7 @@ public final class BridgeBackendController implements AutoCloseable {
             .orElseThrow(() -> new IllegalStateException("replay target world not enabled: " + itemWorld.asString()));
         final int x = item.getCoordinate().getX();
         final int z = item.getCoordinate().getZ();
-        if (BackendLifecyclePolicy.javaDirtyOwner(this.mode)) {
-            world.chunkModified(new ChunkCoordinate(x, z));
-        }
+
     }
 
     private void onDirtyResyncComplete(final DirtyResyncComplete complete) {
