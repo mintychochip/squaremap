@@ -6,6 +6,7 @@ import org.gradle.api.file.RegularFile
 import org.gradle.api.plugins.BasePluginExtension
 import org.gradle.api.provider.Provider
 import org.gradle.api.provider.ProviderFactory
+import org.gradle.kotlin.dsl.findByType
 import org.gradle.kotlin.dsl.getByType
 import java.io.File
 
@@ -61,7 +62,7 @@ val Project.githubUrl: Provider<String>
   get() = providers.gradleProperty("githubUrl")
 
 fun Project.lastCommitHash(): String {
-  val indraCommit = extensions.getByType<IndraGitExtension>().commit().orNull?.name
+  val indraCommit = extensions.findByType<IndraGitExtension>()?.commit()?.orNull?.name
   return indraCommit?.substring(0, 7)
     ?: resolveNativeGitCommit(rootProject.projectDir) { command, workingDirectory ->
       val output = providers.exec {
