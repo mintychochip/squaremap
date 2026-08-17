@@ -26,6 +26,23 @@ dependencies {
   implementation(libs.bStatsBukkit)
 }
 
+dependencies {
+  testImplementation(libs.junitJupiter)
+  testRuntimeOnly(libs.junitPlatformLauncher)
+}
+
+tasks.register<JavaExec>("rustShadowSmoke") {
+  group = "verification"
+  description = "Run the local black-box Paper production proof driver."
+  classpath = sourceSets["main"].runtimeClasspath + configurations.testRuntimeClasspath.get()
+  mainClass.set("xyz.jpenilla.squaremap.paper.verification.RustShadowSmokeDriver")
+  val fixture = providers.gradleProperty("rustSmokeFixture").orElse(rootProject.file("testdata/bridge/v1/paper-fixture.json").absolutePath)
+  val binary = providers.gradleProperty("rustSmokeBinary")
+  val output = providers.gradleProperty("rustSmokeOutput").orElse(layout.buildDirectory.dir("verification/rust-shadow").map { it.asFile.absolutePath })
+  args(fixture.get(), binary.orElse("").get().ifBlank { "paper" })
+  systemProperty("squaremap.rustSmoke.output", output.get())
+}
+
 tasks {
   jar {
     manifest {
