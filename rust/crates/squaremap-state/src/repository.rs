@@ -8,9 +8,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const APPLICATION_ID: i64 = 0x5351_4d50;
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 4;
 const SCHEMA: &str = include_str!("../migrations/0001_initial.sql");
 const RETRY_MIGRATION: &str = include_str!("../migrations/0002_dirty_retry.sql");
+const OWNER_MIGRATION: &str = include_str!("../migrations/0003_owner_lease.sql");
 const MAX_BLOCKING_CALLS: usize = 1;
 
 #[derive(Debug)]
@@ -59,6 +60,81 @@ impl Repository {
         let connection = tokio::task::spawn_blocking(move || open_connection(&path)).await??;
         drop(permit_guard);
         Ok(Self { connection: Arc::new(Mutex::new(connection)), permit })
+    }
+
+    pub async fn bridge_checkpoint(&self, bridge_id: &[u8]) -> Result<Option<SessionCheckpoint>, RepositoryError> {
+        if bridge_id.len() != MAX_BRIDGE_ID_BYTES || bridge_id.iter().all(|byte| *byte == 0) { return Err(ModelError::Bounds("bridge ID must be exactly 16 non-zero bytes").into()); }
+        let bridge_id = bridge_id.to_vec();
+        self.blocking(move |connection| {
+            connection.query_row(
+                "SELECT length(CAST(bridge_id AS BLOB)),COALESCE(substr(CAST(bridge_id AS BLOB),1,17),zeroblob(0)),length(CAST(session_id AS BLOB)),COALESCE(substr(CAST(session_id AS BLOB),1,17),zeroblob(0)),durable_sequence FROM bridge_checkpoints WHERE bridge_id=?1",
+                params![bridge_id],
+                |row| {
+                    let stored_bridge_id = bounded_blob(row.get(0)?, row.get(1)?, MAX_BRIDGE_ID_BYTES)?;
+                    let stored_session_id = bounded_blob(row.get(2)?, row.get(3)?, MAX_SESSION_ID_BYTES)?;
+                    if stored_bridge_id.len() != MAX_BRIDGE_ID_BYTES
+                        || stored_bridge_id.iter().all(|byte| *byte == 0)
+                        || stored_session_id.len() != MAX_SESSION_ID_BYTES
+                    {
+                        return Err(rusqlite::Error::InvalidQuery);
+                    }
+                    Ok(SessionCheckpoint {
+                        bridge_id: stored_bridge_id,
+                        session_id: stored_session_id,
+                        durable_sequence: checked_u64(row.get(4)?, "checkpoint").map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    })
+                },
+            ).optional().map_err(RepositoryError::from)
+        }).await
+    }
+    /// Durably persists an authenticated bridge identity and its accepted
+    /// sequence watermark before dirty work is processed.
+    pub async fn persist_bridge_identity(
+        &self,
+        bridge_id: &[u8],
+        session_id: &[u8],
+        durable_sequence: u64,
+    ) -> Result<(), RepositoryError> {
+        if bridge_id.len() != MAX_BRIDGE_ID_BYTES || bridge_id.iter().all(|byte| *byte == 0) {
+            return Err(ModelError::Bounds("bridge ID must be exactly 16 non-zero bytes").into());
+        }
+        if session_id.len() != MAX_SESSION_ID_BYTES {
+            return Err(ModelError::Bounds("session ID must be exactly 16 bytes").into());
+        }
+        let durable_sequence = checked_i64(durable_sequence, "checkpoint sequence")?;
+        let bridge_id = bridge_id.to_vec();
+        let session_id = session_id.to_vec();
+        self.blocking(move |connection| {
+            let transaction = connection.transaction()?;
+            transaction.execute(
+                "INSERT INTO bridge_checkpoints(bridge_id,session_id,durable_sequence) VALUES(?1,?2,?3)
+                 ON CONFLICT(bridge_id) DO UPDATE SET session_id=excluded.session_id,durable_sequence=MAX(bridge_checkpoints.durable_sequence,excluded.durable_sequence)",
+                params![bridge_id, session_id, durable_sequence],
+            )?;
+            transaction.commit()?;
+            Ok(())
+        }).await
+    }
+
+    /// Returns the single durable bridge identity, or no identity before the
+    /// first authenticated negotiation. Multiple identities are fail-closed.
+    pub async fn bridge_identity(&self) -> Result<Option<Vec<u8>>, RepositoryError> {
+        self.blocking(|connection| {
+            let mut statement = connection.prepare("SELECT bridge_id FROM bridge_checkpoints ORDER BY bridge_id")?;
+            let mut rows = statement.query([])?;
+            let mut identity = None;
+            while let Some(row) = rows.next()? {
+                let raw: Vec<u8> = row.get(0)?;
+                if raw.len() != MAX_BRIDGE_ID_BYTES || raw.iter().all(|byte| *byte == 0) {
+                    return Err(RepositoryError::Schema("bridge_checkpoints contains an invalid bridge identity".into()));
+                }
+                if identity.is_some() {
+                    return Err(RepositoryError::Schema("multiple bridge identities are persisted".into()));
+                }
+                identity = Some(raw);
+            }
+            Ok(identity)
+        }).await
     }
 
     async fn blocking<T, F>(&self, operation: F) -> Result<T, RepositoryError>
@@ -136,19 +212,23 @@ impl Repository {
         }).await
     }
 
-    pub async fn mark_dirty(&self, world: &WorldId, coordinate: ChunkCoordinate, revision: u64, session_id: &[u8], sequence: u64) -> Result<bool, RepositoryError> {
+    pub async fn mark_dirty(&self, world: &WorldId, coordinate: ChunkCoordinate, revision: u64, bridge_id: &[u8], session_id: &[u8], sequence: u64) -> Result<bool, RepositoryError> {
         world.validate()?;
+        if bridge_id.len() != MAX_BRIDGE_ID_BYTES || bridge_id.iter().all(|byte| *byte == 0) { return Err(ModelError::Bounds("bridge ID must be exactly 16 non-zero bytes").into()); }
         if session_id.len() != MAX_SESSION_ID_BYTES { return Err(ModelError::Bounds("session ID must be exactly 16 bytes").into()); }
         let revision = checked_i64(revision, "dirty revision")?;
         let sequence = checked_i64(sequence, "session sequence")?;
         let world = world.clone();
+        let bridge_id = bridge_id.to_vec();
         let session_id = session_id.to_vec();
         self.blocking(move |connection| {
             let transaction = connection.transaction()?;
             ensure_current_world(&transaction, &world)?;
-            let changed = transaction.execute("INSERT INTO dirty_chunks(namespace,value,epoch,x,z,revision) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(namespace,value,epoch,x,z) DO UPDATE SET revision=excluded.revision WHERE excluded.revision > dirty_chunks.revision", params![world.namespace, world.value, world.epoch as i64, coordinate.x, coordinate.z, revision])?;
+            let changed = transaction.execute("INSERT INTO dirty_chunks(namespace,value,epoch,x,z,revision,owner_bridge_id,owner_session_id,lease_expires_epoch_seconds,replay_pending) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,0,0) ON CONFLICT(namespace,value,epoch,x,z) DO UPDATE SET revision=excluded.revision,owner_bridge_id=excluded.owner_bridge_id,owner_session_id=excluded.owner_session_id,replay_pending=0 WHERE excluded.revision > dirty_chunks.revision", params![world.namespace, world.value, world.epoch as i64, coordinate.x, coordinate.z, revision, bridge_id, session_id])?;
             transaction.execute("DELETE FROM dirty_retries WHERE namespace=?1 AND value=?2 AND epoch=?3 AND x=?4 AND z=?5", params![world.namespace, world.value, world.epoch as i64, coordinate.x, coordinate.z])?;
-            transaction.execute("INSERT INTO session_checkpoints(session_id,durable_sequence) VALUES(?1,?2) ON CONFLICT(session_id) DO UPDATE SET durable_sequence=excluded.durable_sequence WHERE excluded.durable_sequence > session_checkpoints.durable_sequence", params![session_id, sequence])?;
+            if sequence != 0 {
+                transaction.execute("INSERT INTO bridge_checkpoints(bridge_id,session_id,durable_sequence) VALUES(?1,?2,?3) ON CONFLICT(bridge_id) DO UPDATE SET session_id=excluded.session_id,durable_sequence=MAX(bridge_checkpoints.durable_sequence,excluded.durable_sequence)", params![bridge_id, session_id, sequence])?;
+            }
             transaction.commit()?;
             Ok(changed != 0)
         }).await
@@ -163,11 +243,15 @@ impl Repository {
             let mut statement = connection.prepare(
                 "SELECT length(CAST(namespace AS BLOB)),COALESCE(substr(CAST(namespace AS BLOB),1,4097),zeroblob(0)),
                         length(CAST(value AS BLOB)),COALESCE(substr(CAST(value AS BLOB),1,4097),zeroblob(0)),
-                        epoch,x,z,revision
+                        epoch,x,z,revision,
+                        length(CAST(owner_bridge_id AS BLOB)),COALESCE(substr(CAST(owner_bridge_id AS BLOB),1,17),zeroblob(0)),
+                        lease_expires_epoch_seconds
                  FROM (
                     SELECT dirty_chunks.namespace AS namespace,dirty_chunks.value AS value,
                            dirty_chunks.epoch AS epoch,dirty_chunks.x AS x,dirty_chunks.z AS z,
                            dirty_chunks.revision AS revision,
+                           dirty_chunks.owner_bridge_id AS owner_bridge_id,
+                           dirty_chunks.lease_expires_epoch_seconds AS lease_expires_epoch_seconds,
                            ROW_NUMBER() OVER (PARTITION BY dirty_chunks.namespace,dirty_chunks.value,dirty_chunks.epoch
                                               ORDER BY dirty_chunks.x,dirty_chunks.z) AS ordinal
                     FROM dirty_chunks
@@ -184,10 +268,18 @@ impl Repository {
                     checked_u64(row.get(4)?, "dirty epoch").map_err(|_| rusqlite::Error::InvalidQuery)?,
                 );
                 world.validate().map_err(|_| rusqlite::Error::InvalidQuery)?;
+                let owner_bridge_id = bounded_blob(row.get(8)?, row.get(9)?, MAX_BRIDGE_ID_BYTES)?;
+                if owner_bridge_id.len() != MAX_BRIDGE_ID_BYTES
+                    || owner_bridge_id.iter().all(|byte| *byte == 0)
+                {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
                 Ok(DirtyChunk {
                     world,
                     coordinate: ChunkCoordinate { x: row.get(5)?, z: row.get(6)? },
                     revision: checked_u64(row.get(7)?, "dirty revision").map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    owner_bridge_id,
+                    lease_expires_epoch_seconds: row.get(10)?,
                 })
             })?.collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
@@ -197,6 +289,7 @@ impl Repository {
     pub async fn dirty_page(&self, limit: usize) -> Result<Vec<DirtyChunk>, RepositoryError> {
         self.dirty_page_at(limit, now_seconds()).await
     }
+
 
     pub async fn defer_dirty(&self, world: &WorldId, coordinate: ChunkCoordinate, revision: u64, now: i64) -> Result<(), RepositoryError> {
         let revision = checked_i64(revision, "dirty revision")?;
@@ -341,6 +434,391 @@ impl Repository {
         }).await
     }
 
+    /// Releases the lease on one owned row (clears expiry and replay flag) so a
+    /// stale row can never linger leased by a dead bridge.
+    /// Releases the exact lease identified by world, coordinate, revision, owner,
+    /// and session. Stale cleanup must never clear another row's lease.
+    pub async fn release_dirty_lease(
+        &self,
+        world: &WorldId,
+        coordinate: ChunkCoordinate,
+        revision: u64,
+        bridge_id: &[u8],
+        session_id: &[u8],
+    ) -> Result<(), RepositoryError> {
+        world.validate()?;
+        if bridge_id.len() != MAX_BRIDGE_ID_BYTES || bridge_id.iter().all(|byte| *byte == 0) {
+            return Err(ModelError::Bounds("bridge ID must be exactly 16 non-zero bytes").into());
+        }
+        if session_id.len() != MAX_SESSION_ID_BYTES || session_id.iter().all(|byte| *byte == 0) {
+            return Err(ModelError::Bounds("session ID must be exactly 16 non-zero bytes").into());
+        }
+        let revision = checked_i64(revision, "dirty revision")?;
+        let world = world.clone();
+        let bridge_id = bridge_id.to_vec();
+        let session_id = session_id.to_vec();
+        self.blocking(move |connection| {
+            let transaction = connection.transaction()?;
+            ensure_current_world(&transaction, &world)?;
+            transaction.execute(
+                "UPDATE dirty_chunks SET lease_expires_epoch_seconds=0,replay_pending=0
+                 WHERE namespace=?1 AND value=?2 AND epoch=?3 AND x=?4 AND z=?5
+                   AND revision=?6 AND owner_bridge_id=?7 AND owner_session_id=?8",
+                params![world.namespace, world.value, world.epoch as i64, coordinate.x, coordinate.z, revision, bridge_id, session_id],
+            )?;
+            transaction.commit()?;
+            Ok(())
+        }).await
+    }
+
+    /// Owner-scoped page: returns at most `limit` rows owned by `bridge_id` that
+    /// are unleased/unreplayed, ordered deterministically.
+    pub async fn dirty_page_for_owner(
+        &self,
+        bridge_id: &[u8],
+        limit: usize,
+        now: i64,
+    ) -> Result<Vec<DirtyChunk>, RepositoryError> {
+        if bridge_id.len() != MAX_BRIDGE_ID_BYTES || bridge_id.iter().all(|byte| *byte == 0) {
+            return Err(ModelError::Bounds("bridge ID must be exactly 16 non-zero bytes").into());
+        }
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let bridge_id = bridge_id.to_vec();
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.blocking(move |connection| {
+            let mut statement = connection.prepare(
+                "SELECT length(CAST(dirty_chunks.namespace AS BLOB)),COALESCE(substr(CAST(dirty_chunks.namespace AS BLOB),1,4097),zeroblob(0)),
+                        length(CAST(dirty_chunks.value AS BLOB)),COALESCE(substr(CAST(dirty_chunks.value AS BLOB),1,4097),zeroblob(0)),
+                        dirty_chunks.epoch,dirty_chunks.x,dirty_chunks.z,dirty_chunks.revision,
+                        length(CAST(dirty_chunks.owner_bridge_id AS BLOB)),COALESCE(substr(CAST(dirty_chunks.owner_bridge_id AS BLOB),1,17),zeroblob(0)),
+                        dirty_chunks.lease_expires_epoch_seconds
+                 FROM dirty_chunks
+                 INNER JOIN worlds USING(namespace,value)
+                 WHERE worlds.epoch >= 0 AND dirty_chunks.epoch=worlds.epoch
+                   AND dirty_chunks.owner_bridge_id=?1
+                   AND dirty_chunks.replay_pending=0
+                   AND (dirty_chunks.lease_expires_epoch_seconds=0 OR dirty_chunks.lease_expires_epoch_seconds<=?2)
+                 ORDER BY dirty_chunks.namespace,dirty_chunks.value,dirty_chunks.epoch,dirty_chunks.x,dirty_chunks.z
+                 LIMIT ?3",
+            )?;
+            let rows = statement.query_map(params![bridge_id, now, limit], |row| {
+                let world = WorldId::new(
+                    bounded_text(row.get(0)?, row.get(1)?, MAX_TEXT_BYTES)?,
+                    bounded_text(row.get(2)?, row.get(3)?, MAX_TEXT_BYTES)?,
+                    checked_u64(row.get(4)?, "dirty epoch").map_err(|_| rusqlite::Error::InvalidQuery)?,
+                );
+                world.validate().map_err(|_| rusqlite::Error::InvalidQuery)?;
+                let owner_bridge_id = bounded_blob(row.get(8)?, row.get(9)?, MAX_BRIDGE_ID_BYTES)?;
+                if owner_bridge_id.len() != MAX_BRIDGE_ID_BYTES
+                    || owner_bridge_id.iter().all(|byte| *byte == 0)
+                {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+                Ok(DirtyChunk {
+                    world,
+                    coordinate: ChunkCoordinate { x: row.get(5)?, z: row.get(6)? },
+                    revision: checked_u64(row.get(7)?, "dirty revision").map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    owner_bridge_id,
+                    lease_expires_epoch_seconds: row.get(10)?,
+                })
+            })?.collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        }).await
+    }
+
+    /// Atomically leases one unleased, unreplayed row to the given bridge, marking
+    /// it replay-pending until completion; returns the leased row or None.
+    pub async fn assign_dirty_lease(
+        &self,
+        bridge_id: &[u8],
+        limit: usize,
+        lease_expires_epoch_seconds: i64,
+    ) -> Result<Option<DirtyLease>, RepositoryError> {
+        self.assign_dirty_lease_at(bridge_id, limit, lease_expires_epoch_seconds, now_seconds()).await
+    }
+
+    /// Extracts one eligible dirty row for `bridge_id` under an explicit clock.
+    pub async fn assign_dirty_lease_at(
+        &self,
+        bridge_id: &[u8],
+        limit: usize,
+        lease_expires_epoch_seconds: i64,
+        now: i64,
+    ) -> Result<Option<DirtyLease>, RepositoryError> {
+        if bridge_id.len() != MAX_BRIDGE_ID_BYTES || bridge_id.iter().all(|byte| *byte == 0) {
+            return Err(ModelError::Bounds("bridge ID must be exactly 16 non-zero bytes").into());
+        }
+        if limit == 0 || lease_expires_epoch_seconds < 0 {
+            return Err(ModelError::Bounds("lease limit and expiry must be positive").into());
+        }
+        let bridge_id = bridge_id.to_vec();
+        self.blocking(move |connection| {
+            let transaction = connection.transaction()?;
+            let row: Option<(WorldId, ChunkCoordinate, i64, Vec<u8>)> = transaction
+                .query_row(
+                    "SELECT dirty_chunks.namespace,dirty_chunks.value,dirty_chunks.epoch,dirty_chunks.x,dirty_chunks.z,dirty_chunks.revision,dirty_chunks.owner_session_id FROM dirty_chunks
+                     INNER JOIN worlds USING(namespace,value)
+                     WHERE worlds.epoch >= 0 AND dirty_chunks.epoch=worlds.epoch
+                       AND (dirty_chunks.replay_pending=0
+                            OR (dirty_chunks.replay_pending=1 AND dirty_chunks.lease_expires_epoch_seconds>0 AND dirty_chunks.lease_expires_epoch_seconds<=?1))
+                     ORDER BY dirty_chunks.namespace,dirty_chunks.value,dirty_chunks.epoch,dirty_chunks.x,dirty_chunks.z
+                     LIMIT 1",
+                    params![now],
+                    |row| {
+                        let world = WorldId::new(
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            checked_u64(row.get::<_, i64>(2)?, "dirty epoch").map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        );
+                        Ok((
+                            world,
+                            ChunkCoordinate { x: row.get(3)?, z: row.get(4)? },
+                            row.get::<_, i64>(5)?,
+                            row.get::<_, Vec<u8>>(6)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((world, coordinate, revision, owner_session_id)) = row else {
+                transaction.commit()?;
+                return Ok(None);
+            };
+            if owner_session_id.len() != MAX_SESSION_ID_BYTES || owner_session_id.iter().all(|byte| *byte == 0) {
+                return Err(RepositoryError::Schema("dirty row contains invalid owner session".into()));
+            }
+            transaction.execute(
+                "UPDATE dirty_chunks SET owner_bridge_id=?1,lease_expires_epoch_seconds=?2,replay_pending=1
+                 WHERE namespace=?3 AND value=?4 AND epoch=?5 AND x=?6 AND z=?7
+                   AND (replay_pending=0 OR (replay_pending=1 AND lease_expires_epoch_seconds>0 AND lease_expires_epoch_seconds<=?8))",
+                params![bridge_id, lease_expires_epoch_seconds, world.namespace, world.value, world.epoch as i64, coordinate.x, coordinate.z, now],
+            )?;
+            transaction.commit()?;
+            Ok(Some(DirtyLease {
+                world,
+                coordinate,
+                revision: checked_u64(revision, "dirty revision")?,
+                owner_bridge_id: bridge_id,
+                owner_session_id,
+                lease_expires_epoch_seconds,
+            }))
+        }).await
+    }
+
+    /// Returns every row owned by `bridge_id` for bounded replay after reconnect.
+    pub async fn dirty_rows_for_replay(&self, bridge_id: &[u8]) -> Result<Vec<DirtyRow>, RepositoryError> {
+        if bridge_id.len() != MAX_BRIDGE_ID_BYTES || bridge_id.iter().all(|byte| *byte == 0) {
+            return Err(ModelError::Bounds("bridge ID must be exactly 16 non-zero bytes").into());
+        }
+        let bridge_id = bridge_id.to_vec();
+        self.blocking(move |connection| {
+            let mut statement = connection.prepare(
+                "SELECT dirty_chunks.namespace,dirty_chunks.value,dirty_chunks.epoch,dirty_chunks.x,dirty_chunks.z,dirty_chunks.revision FROM dirty_chunks
+                 INNER JOIN worlds USING(namespace,value)
+                 WHERE worlds.epoch >= 0 AND dirty_chunks.epoch=worlds.epoch
+                   AND dirty_chunks.owner_bridge_id=?1
+                 ORDER BY dirty_chunks.namespace,dirty_chunks.value,dirty_chunks.epoch,dirty_chunks.x,dirty_chunks.z",
+            )?;
+            let rows = statement.query_map(params![bridge_id], |row| {
+                let world = WorldId::new(
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    checked_u64(row.get::<_, i64>(2)?, "dirty epoch").map_err(|_| rusqlite::Error::InvalidQuery)?,
+                );
+                world.validate().map_err(|_| rusqlite::Error::InvalidQuery)?;
+                Ok(DirtyRow {
+                    world,
+                    coordinate: ChunkCoordinate { x: row.get(3)?, z: row.get(4)? },
+                    revision: checked_u64(row.get(5)?, "dirty revision").map_err(|_| rusqlite::Error::InvalidQuery)?,
+                })
+            })?.collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        }).await
+    }
+
+    /// Returns one bounded page of replay-pending rows owned by the bridge/session
+    /// for a single world, using a keyset cursor over (x, z). The limit is treated
+    /// as `limit + 1` so the caller can detect `has_more` without a count query.
+    pub async fn dirty_replay_page(
+        &self,
+        bridge_id: &[u8],
+        session_id: &[u8],
+        world: &WorldId,
+        cursor: Option<&ChunkCoordinate>,
+        limit: usize,
+    ) -> Result<Vec<DirtyRow>, RepositoryError> {
+        if bridge_id.len() != MAX_BRIDGE_ID_BYTES || bridge_id.iter().all(|byte| *byte == 0) {
+            return Err(ModelError::Bounds("bridge ID must be exactly 16 non-zero bytes").into());
+        }
+        if session_id.len() != MAX_SESSION_ID_BYTES || session_id.iter().all(|byte| *byte == 0) {
+            return Err(ModelError::Bounds("session ID must be exactly 16 non-zero bytes").into());
+        }
+        world.validate()?;
+        if limit == 0 {
+            return Err(ModelError::Bounds("limit must be positive").into());
+        }
+        let bridge_id = bridge_id.to_vec();
+        let session_id = session_id.to_vec();
+        let world = world.clone();
+        let (cursor_x, cursor_z) = cursor.map(|c| (Some(c.x), Some(c.z))).unwrap_or((None, None));
+        let cursor_x = cursor_x.map(i64::from);
+        let cursor_z = cursor_z.map(i64::from);
+        let limit = i64::try_from(limit.checked_add(1).unwrap_or(usize::MAX)).unwrap_or(i64::MAX);
+        self.blocking(move |connection| {
+            let mut statement = connection.prepare(
+                "SELECT dirty_chunks.namespace,dirty_chunks.value,dirty_chunks.epoch,dirty_chunks.x,dirty_chunks.z,dirty_chunks.revision
+                 FROM dirty_chunks
+                 INNER JOIN worlds USING(namespace,value)
+                 WHERE worlds.epoch >= 0 AND dirty_chunks.epoch=worlds.epoch
+                   AND dirty_chunks.owner_bridge_id=?1
+                   AND dirty_chunks.owner_session_id=?2
+                   AND dirty_chunks.replay_pending=1
+                   AND dirty_chunks.namespace=?3 AND dirty_chunks.value=?4 AND dirty_chunks.epoch=?5
+                   AND (?6 IS NULL OR (dirty_chunks.x > ?6 OR (dirty_chunks.x = ?6 AND dirty_chunks.z > ?7)))
+                 ORDER BY dirty_chunks.x, dirty_chunks.z
+                 LIMIT ?8",
+            )?;
+            let rows = statement.query_map(
+                params![
+                    bridge_id,
+                    session_id,
+                    world.namespace,
+                    world.value,
+                    world.epoch as i64,
+                    cursor_x,
+                    cursor_z,
+                    limit,
+                ],
+                |row| {
+                    let world = WorldId::new(
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        checked_u64(row.get::<_, i64>(2)?, "dirty epoch").map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    );
+                    world.validate().map_err(|_| rusqlite::Error::InvalidQuery)?;
+                    Ok(DirtyRow {
+                        world,
+                        coordinate: ChunkCoordinate { x: row.get(3)?, z: row.get(4)? },
+                        revision: checked_u64(row.get(5)?, "dirty revision").map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    })
+                },
+            )?.collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        }).await
+    }
+
+    /// On authenticated reconnect, moves every row owned by `bridge_id` to the
+    /// the checkpoint session without changing the durable watermark.
+    pub async fn reassign_bridge_lease(
+        &self,
+        bridge_id: &[u8],
+        session_id: &[u8],
+    ) -> Result<(), RepositoryError> {
+        if bridge_id.len() != MAX_BRIDGE_ID_BYTES || bridge_id.iter().all(|byte| *byte == 0) {
+            return Err(ModelError::Bounds("bridge ID must be exactly 16 non-zero bytes").into());
+        }
+        if session_id.len() != MAX_SESSION_ID_BYTES || session_id.iter().all(|byte| *byte == 0) {
+            return Err(ModelError::Bounds("session ID must be exactly 16 non-zero bytes").into());
+        }
+        let bridge_id = bridge_id.to_vec();
+        let session_id = session_id.to_vec();
+        self.blocking(move |connection| {
+            let transaction = connection.transaction()?;
+            let durable_sequence: i64 = transaction.query_row(
+                "SELECT COALESCE(MAX(durable_sequence),0) FROM bridge_checkpoints WHERE bridge_id=?1",
+                params![bridge_id],
+                |row| row.get(0),
+            ).unwrap_or(0);
+            transaction.execute(
+                "UPDATE dirty_chunks
+                 SET owner_session_id=?1,lease_expires_epoch_seconds=0,replay_pending=1
+                 WHERE owner_bridge_id=?2
+                   AND (namespace,value,epoch) IN (SELECT namespace,value,epoch FROM worlds WHERE epoch >= 0)",
+                params![session_id, bridge_id],
+            )?;
+            transaction.execute(
+                "INSERT INTO bridge_checkpoints(bridge_id,session_id,durable_sequence) VALUES(?1,?2,?3)
+                 ON CONFLICT(bridge_id) DO UPDATE SET session_id=excluded.session_id,durable_sequence=MAX(durable_sequence,excluded.durable_sequence)",
+                params![bridge_id, session_id, durable_sequence],
+            )?;
+            transaction.commit()?;
+            Ok(())
+        }).await
+    }
+
+    /// Owner-scoped completion removes exactly one owned row and its retry state.
+    pub async fn complete_dirty_for_owner(
+        &self,
+        world: &WorldId,
+        coordinate: ChunkCoordinate,
+        revision: u64,
+        bridge_id: &[u8],
+    ) -> Result<bool, RepositoryError> {
+        world.validate()?;
+        if bridge_id.len() != MAX_BRIDGE_ID_BYTES || bridge_id.iter().all(|byte| *byte == 0) {
+            return Err(ModelError::Bounds("bridge ID must be exactly 16 non-zero bytes").into());
+        }
+        let revision = checked_i64(revision, "dirty revision")?;
+        let world = world.clone();
+        let bridge_id = bridge_id.to_vec();
+        self.blocking(move |connection| {
+            let transaction = connection.transaction()?;
+            ensure_current_world(&transaction, &world)?;
+            let changed = transaction.execute(
+                "DELETE FROM dirty_chunks WHERE namespace=?1 AND value=?2 AND epoch=?3 AND x=?4 AND z=?5
+                   AND owner_bridge_id=?6 AND revision <= ?7",
+                params![world.namespace, world.value, world.epoch as i64, coordinate.x, coordinate.z, bridge_id, revision],
+            )?;
+            if changed != 0 {
+                transaction.execute(
+                    "DELETE FROM dirty_retries WHERE namespace=?1 AND value=?2 AND epoch=?3 AND x=?4 AND z=?5",
+                    params![world.namespace, world.value, world.epoch as i64, coordinate.x, coordinate.z],
+                )?;
+            }
+            transaction.commit()?;
+            Ok(changed != 0)
+        }).await
+    }
+
+    /// Owner-scoped deferral with retry backoff for one owned row.
+    pub async fn defer_dirty_for_owner(
+        &self,
+        world: &WorldId,
+        coordinate: ChunkCoordinate,
+        revision: u64,
+        bridge_id: &[u8],
+        now: i64,
+    ) -> Result<(), RepositoryError> {
+        world.validate()?;
+        if bridge_id.len() != MAX_BRIDGE_ID_BYTES || bridge_id.iter().all(|byte| *byte == 0) {
+            return Err(ModelError::Bounds("bridge ID must be exactly 16 non-zero bytes").into());
+        }
+        let revision = checked_i64(revision, "dirty revision")?;
+        let world = world.clone();
+        let bridge_id = bridge_id.to_vec();
+        self.blocking(move |connection| {
+            let transaction = connection.transaction()?;
+            ensure_current_world(&transaction, &world)?;
+            let attempt: i64 = transaction.query_row(
+                "SELECT COALESCE(attempt, 0) FROM dirty_retries WHERE namespace=?1 AND value=?2 AND epoch=?3 AND x=?4 AND z=?5",
+                params![world.namespace, world.value, world.epoch as i64, coordinate.x, coordinate.z],
+                |row| row.get(0),
+            ).optional()?.unwrap_or(0);
+            let next_attempt = attempt.saturating_add(1).min(16);
+            let delay = 1_i64.checked_shl(next_attempt as u32).unwrap_or(86_400).min(86_400);
+            transaction.execute(
+                "INSERT INTO dirty_retries(namespace,value,epoch,x,z,attempt,next_attempt) VALUES(?1,?2,?3,?4,?5,?6,?7)
+                 ON CONFLICT(namespace,value,epoch,x,z) DO UPDATE SET attempt=excluded.attempt,next_attempt=excluded.next_attempt
+                 WHERE EXISTS (SELECT 1 FROM dirty_chunks WHERE namespace=?1 AND value=?2 AND epoch=?3 AND x=?4 AND z=?5
+                   AND owner_bridge_id=?9 AND revision<=?8)",
+                params![world.namespace, world.value, world.epoch as i64, coordinate.x, coordinate.z, next_attempt, now.saturating_add(delay), revision, bridge_id],
+            )?;
+            transaction.commit()?;
+            Ok(())
+        }).await
+    }
+
     pub async fn recover(&self) -> Result<Recovery, RepositoryError> {
         self.blocking(|connection| recover_connection(connection)).await
     }
@@ -384,13 +862,33 @@ fn open_connection(path: &Path) -> Result<Connection, RepositoryError> {
         transaction.execute_batch("PRAGMA application_id=0x53514D50;")?;
         transaction.execute_batch(SCHEMA)?;
         transaction.execute_batch(RETRY_MIGRATION)?;
+        transaction.execute_batch(OWNER_MIGRATION)?;
         transaction.commit()?;
     } else {
         if application_id != APPLICATION_ID { return Err(RepositoryError::Schema("wrong application ID".into())); }
         let version: i64 = connection.query_row("SELECT version FROM schema_version", [], |row| row.get(0))
             .map_err(|_| RepositoryError::Schema("schema_version table missing".into()))?;
-        if version == 1 {
-            connection.execute_batch(RETRY_MIGRATION)?;
+        if version == 1 || version == 2 {
+            let transaction = connection.transaction()?;
+            let current: i64 = transaction.query_row("SELECT version FROM schema_version", [], |row| row.get(0))
+                .map_err(|_| RepositoryError::Schema("schema_version table missing".into()))?;
+            if current == 1 {
+                transaction.execute_batch(RETRY_MIGRATION)?;
+                transaction.execute_batch(OWNER_MIGRATION)?;
+            } else if current == 2 {
+                transaction.execute_batch("ALTER TABLE session_checkpoints RENAME TO legacy_session_checkpoints; CREATE TABLE bridge_checkpoints(bridge_id BLOB PRIMARY KEY, session_id BLOB NOT NULL, durable_sequence INTEGER NOT NULL); UPDATE schema_version SET version=3;")?;
+                transaction.execute_batch(OWNER_MIGRATION)?;
+            } else if current == 3 {
+                transaction.execute_batch(OWNER_MIGRATION)?;
+            } else {
+                transaction.rollback().ok();
+                return Err(RepositoryError::Schema(format!("unsupported schema version {current}")));
+            }
+            transaction.commit()?;
+        } else if version == 3 {
+            let transaction = connection.transaction()?;
+            transaction.execute_batch(OWNER_MIGRATION)?;
+            transaction.commit()?;
         } else if version != SCHEMA_VERSION {
             return Err(RepositoryError::Schema(format!("unsupported schema version {version}")));
         }
@@ -417,18 +915,19 @@ fn validate_schema(connection: &Connection) -> Result<(), RepositoryError> {
     if count != 1 { return Err(RepositoryError::Schema("schema_version must contain exactly one row".into())); }
     let version: i64 = connection.query_row("SELECT version FROM schema_version", [], |row| row.get(0))?;
     if version != SCHEMA_VERSION { return Err(RepositoryError::Schema(format!("unsupported schema version {version}"))); }
-    let expected_tables = ["schema_version", "worlds", "dirty_chunks", "render_jobs", "session_checkpoints", "legacy_imports", "dirty_retries"];
+    let expected_tables = ["schema_version", "worlds", "dirty_chunks", "render_jobs", "legacy_session_checkpoints", "bridge_checkpoints", "legacy_imports", "dirty_retries"];
     let mut statement = connection.prepare("SELECT type,name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name")?;
     let entries: Vec<(String, String)> = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<Result<_, _>>()?;
     if entries.iter().any(|(kind, name)| kind != "table" || !expected_tables.contains(&name.as_str())) || entries.iter().filter(|(kind, _)| kind == "table").count() != expected_tables.len() {
         return Err(RepositoryError::Schema("schema objects do not match checked-in migration".into()));
     }
-    let expected_columns: [(&str, &[(&str, &str, i64, i64)]); 7] = [
+    let expected_columns: [(&str, &[(&str, &str, i64, i64)]); 8] = [
         ("schema_version", &[("version", "INTEGER", 0, 1)]),
         ("worlds", &[("namespace", "TEXT", 1, 1), ("value", "TEXT", 1, 2), ("epoch", "INTEGER", 1, 0), ("config", "BLOB", 1, 0)]),
-        ("dirty_chunks", &[("namespace", "TEXT", 1, 1), ("value", "TEXT", 1, 2), ("epoch", "INTEGER", 1, 3), ("x", "INTEGER", 1, 4), ("z", "INTEGER", 1, 5), ("revision", "INTEGER", 1, 0)]),
+        ("dirty_chunks", &[("namespace", "TEXT", 1, 1), ("value", "TEXT", 1, 2), ("epoch", "INTEGER", 1, 3), ("x", "INTEGER", 1, 4), ("z", "INTEGER", 1, 5), ("revision", "INTEGER", 1, 0), ("owner_bridge_id", "BLOB", 1, 0), ("owner_session_id", "BLOB", 1, 0), ("lease_expires_epoch_seconds", "INTEGER", 1, 0), ("replay_pending", "INTEGER", 1, 0)]),
         ("render_jobs", &[("id", "BLOB", 0, 1), ("namespace", "TEXT", 1, 0), ("value", "TEXT", 1, 0), ("epoch", "INTEGER", 1, 0), ("kind", "INTEGER", 1, 0), ("state", "INTEGER", 1, 0), ("payload", "BLOB", 1, 0), ("completed_chunks", "INTEGER", 1, 0)]),
-        ("session_checkpoints", &[("session_id", "BLOB", 0, 1), ("durable_sequence", "INTEGER", 1, 0)]),
+        ("legacy_session_checkpoints", &[("session_id", "BLOB", 0, 1), ("durable_sequence", "INTEGER", 1, 0)]),
+        ("bridge_checkpoints", &[("bridge_id", "BLOB", 0, 1), ("session_id", "BLOB", 1, 0), ("durable_sequence", "INTEGER", 1, 0)]),
         ("legacy_imports", &[("relative_path", "TEXT", 0, 1), ("content_sha256", "BLOB", 1, 0), ("imported_at_epoch_seconds", "INTEGER", 1, 0)]),
         ("dirty_retries", &[("namespace", "TEXT", 1, 1), ("value", "TEXT", 1, 2), ("epoch", "INTEGER", 1, 3), ("x", "INTEGER", 1, 4), ("z", "INTEGER", 1, 5), ("attempt", "INTEGER", 1, 0), ("next_attempt", "INTEGER", 1, 0)]),
     ];
@@ -468,11 +967,17 @@ fn recover_connection(connection: &mut Connection) -> Result<Recovery, Repositor
         })?.collect::<Result<Vec<_>, _>>()?
     };
     let dirty = {
-        let mut statement = connection.prepare("SELECT length(CAST(dirty_chunks.namespace AS BLOB)),COALESCE(substr(CAST(dirty_chunks.namespace AS BLOB),1,4097),zeroblob(0)),length(CAST(dirty_chunks.value AS BLOB)),COALESCE(substr(CAST(dirty_chunks.value AS BLOB),1,4097),zeroblob(0)),dirty_chunks.epoch,dirty_chunks.x,dirty_chunks.z,dirty_chunks.revision FROM dirty_chunks INNER JOIN worlds USING(namespace,value) WHERE worlds.epoch >= 0 AND dirty_chunks.epoch=worlds.epoch ORDER BY dirty_chunks.namespace,dirty_chunks.value,dirty_chunks.epoch,dirty_chunks.x,dirty_chunks.z")?;
+        let mut statement = connection.prepare("SELECT length(CAST(dirty_chunks.namespace AS BLOB)),COALESCE(substr(CAST(dirty_chunks.namespace AS BLOB),1,4097),zeroblob(0)),length(CAST(dirty_chunks.value AS BLOB)),COALESCE(substr(CAST(dirty_chunks.value AS BLOB),1,4097),zeroblob(0)),dirty_chunks.epoch,dirty_chunks.x,dirty_chunks.z,dirty_chunks.revision,length(CAST(dirty_chunks.owner_bridge_id AS BLOB)),COALESCE(substr(CAST(dirty_chunks.owner_bridge_id AS BLOB),1,17),zeroblob(0)),dirty_chunks.lease_expires_epoch_seconds FROM dirty_chunks INNER JOIN worlds USING(namespace,value) WHERE worlds.epoch >= 0 AND dirty_chunks.epoch=worlds.epoch ORDER BY dirty_chunks.namespace,dirty_chunks.value,dirty_chunks.epoch,dirty_chunks.x,dirty_chunks.z")?;
         statement.query_map([], |row| {
             let world = WorldId::new(bounded_text(row.get(0)?, row.get(1)?, MAX_TEXT_BYTES)?, bounded_text(row.get(2)?, row.get(3)?, MAX_TEXT_BYTES)?, checked_u64(row.get(4)?, "dirty epoch").map_err(|_| rusqlite::Error::InvalidQuery)?);
             world.validate().map_err(|_| rusqlite::Error::InvalidQuery)?;
-            Ok(DirtyChunk { world, coordinate: ChunkCoordinate { x: row.get(5)?, z: row.get(6)? }, revision: checked_u64(row.get(7)?, "dirty revision").map_err(|_| rusqlite::Error::InvalidQuery)? })
+            let owner_bridge_id = bounded_blob(row.get(8)?, row.get(9)?, MAX_BRIDGE_ID_BYTES)?;
+            if owner_bridge_id.len() != MAX_BRIDGE_ID_BYTES
+                || owner_bridge_id.iter().all(|byte| *byte == 0)
+            {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            Ok(DirtyChunk { world, coordinate: ChunkCoordinate { x: row.get(5)?, z: row.get(6)? }, revision: checked_u64(row.get(7)?, "dirty revision").map_err(|_| rusqlite::Error::InvalidQuery)?, owner_bridge_id, lease_expires_epoch_seconds: row.get(10)? })
         })?.collect::<Result<Vec<_>, _>>()?
     };
     let jobs = {
@@ -485,10 +990,17 @@ fn recover_connection(connection: &mut Connection) -> Result<Recovery, Repositor
         })?.collect::<Result<Vec<_>, _>>()?
     };
     let checkpoints = {
-        let mut statement = connection.prepare("SELECT length(CAST(session_id AS BLOB)),COALESCE(substr(CAST(session_id AS BLOB),1,17),zeroblob(0)),durable_sequence FROM session_checkpoints ORDER BY session_id")?;
+        let mut statement = connection.prepare("SELECT length(CAST(bridge_id AS BLOB)),COALESCE(substr(CAST(bridge_id AS BLOB),1,17),zeroblob(0)),length(CAST(session_id AS BLOB)),COALESCE(substr(CAST(session_id AS BLOB),1,17),zeroblob(0)),durable_sequence FROM bridge_checkpoints ORDER BY bridge_id")?;
         statement.query_map([], |row| {
-            let session_id = bounded_blob(row.get(0)?, row.get(1)?, MAX_SESSION_ID_BYTES)?;
-            Ok(SessionCheckpoint { session_id, durable_sequence: checked_u64(row.get(2)?, "checkpoint").map_err(|_| rusqlite::Error::InvalidQuery)? })
+            let bridge_id = bounded_blob(row.get(0)?, row.get(1)?, MAX_BRIDGE_ID_BYTES)?;
+            let session_id = bounded_blob(row.get(2)?, row.get(3)?, MAX_SESSION_ID_BYTES)?;
+            if bridge_id.len() != MAX_BRIDGE_ID_BYTES
+                || bridge_id.iter().all(|byte| *byte == 0)
+                || session_id.len() != MAX_SESSION_ID_BYTES
+            {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            Ok(SessionCheckpoint { bridge_id, session_id, durable_sequence: checked_u64(row.get(4)?, "checkpoint").map_err(|_| rusqlite::Error::InvalidQuery)? })
         })?.collect::<Result<Vec<_>, _>>()?
     };
     Ok(Recovery { worlds, dirty, jobs, checkpoints })
@@ -506,6 +1018,7 @@ pub(crate) fn deterministic_job_id(world: &WorldId, kind: JobKind) -> Vec<u8> {
     hash.update([kind as u8]);
     hash.finalize().to_vec()
 }
+
 
 fn legacy_key(world: &WorldId, filename: &str) -> String {
     let mut identity = Vec::with_capacity(8 + world.namespace.len() + world.value.len());
@@ -525,8 +1038,6 @@ fn bounded_blob(length: i64, prefix: Vec<u8>, max: usize) -> Result<Vec<u8>, rus
 fn bounded_text(length: i64, prefix: Vec<u8>, max: usize) -> Result<String, rusqlite::Error> {
     String::from_utf8(bounded_blob(length, prefix, max)?).map_err(|_| rusqlite::Error::InvalidQuery)
 }
-
-
 fn read_marker(transaction: &Transaction<'_>, key: &str) -> Result<Option<[u8; 32]>, RepositoryError> {
     let marker: Option<(i64, Vec<u8>)> = transaction.query_row("SELECT length(content_sha256),substr(content_sha256,1,33) FROM legacy_imports WHERE relative_path=?1", params![key], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
     let Some((length, prefix)) = marker else { return Ok(None); };
@@ -549,8 +1060,8 @@ fn import_parsed(connection: &mut Connection, world: &WorldId, parsed: &ParsedLe
         let ownership = if file.relative_path.ends_with("resume_render.json") { read_marker(&transaction, &ownership_key)? } else { None };
         if prior.as_ref().is_some_and(|hash| hash.as_slice() == file.sha256.as_slice()) { continue; }
         if file.relative_path.ends_with("dirty_chunks.json") {
-            for coordinate in &parsed.dirty {
-                transaction.execute("INSERT INTO dirty_chunks(namespace,value,epoch,x,z,revision) VALUES(?1,?2,?3,?4,?5,0) ON CONFLICT(namespace,value,epoch,x,z) DO NOTHING", params![world.namespace, world.value, epoch, coordinate.x, coordinate.z])?;
+            if !parsed.dirty.is_empty() {
+                return Err(RepositoryError::InvalidLegacy { path: file.relative_path.clone().into(), message: "legacy dirty rows have no authenticated owner/session; import rejected".into() });
             }
         } else {
             let payload = parsed.resume_payload.clone().unwrap_or_default();
@@ -558,16 +1069,36 @@ fn import_parsed(connection: &mut Connection, world: &WorldId, parsed: &ParsedLe
             payload_hash.update(&payload);
             let payload_hash = payload_hash.finalize().to_vec();
             let id = deterministic_job_id(world, JobKind::Resume);
-            let existing: Option<(Vec<u8>, String, String, i64, i64, i64, Vec<u8>, i64)> = transaction.query_row("SELECT length(CAST(id AS BLOB)),COALESCE(substr(CAST(id AS BLOB),1,33),zeroblob(0)),length(CAST(namespace AS BLOB)),COALESCE(substr(CAST(namespace AS BLOB),1,4097),zeroblob(0)),length(CAST(value AS BLOB)),COALESCE(substr(CAST(value AS BLOB),1,4097),zeroblob(0)),epoch,kind,state,length(payload),COALESCE(substr(payload,1,16777217),zeroblob(0)),completed_chunks FROM render_jobs WHERE id=?1", params![id], |row| Ok((
-                bounded_blob(row.get(0)?, row.get(1)?, MAX_JOB_ID_BYTES)?,
-                bounded_text(row.get(2)?, row.get(3)?, MAX_TEXT_BYTES)?,
-                bounded_text(row.get(4)?, row.get(5)?, MAX_TEXT_BYTES)?,
-                row.get(6)?,
-                row.get(7)?,
-                row.get(8)?,
-                bounded_blob(row.get(9)?, row.get(10)?, MAX_PAYLOAD_BYTES)?,
-                row.get(11)?,
-            ))).optional()?;
+            let existing: Option<(Vec<u8>, String, String, i64, i64, i64, Vec<u8>, i64)> = transaction.query_row(
+                "SELECT
+                    length(CAST(id AS BLOB)),
+                    COALESCE(substr(CAST(id AS BLOB),1,33),zeroblob(0)),
+                    length(CAST(namespace AS BLOB)),
+                    COALESCE(substr(CAST(namespace AS BLOB),1,4097),zeroblob(0)),
+                    length(CAST(value AS BLOB)),
+                    COALESCE(substr(CAST(value AS BLOB),1,4097),zeroblob(0)),
+                    epoch,
+                    kind,
+                    state,
+                    length(payload),
+                    COALESCE(substr(payload,1,16777217),zeroblob(0)),
+                    completed_chunks
+                 FROM render_jobs
+                 WHERE id=?1",
+                params![id],
+                |row| {
+                    Ok((
+                        bounded_blob(row.get(0)?, row.get(1)?, MAX_JOB_ID_BYTES)?,
+                        bounded_text(row.get(2)?, row.get(3)?, MAX_TEXT_BYTES)?,
+                        bounded_text(row.get(4)?, row.get(5)?, MAX_TEXT_BYTES)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        bounded_blob(row.get(9)?, row.get(10)?, MAX_PAYLOAD_BYTES)?,
+                        row.get(11)?,
+                    ))
+                },
+            ).optional()?;
             match existing {
                 None => {
                     transaction.execute("INSERT INTO render_jobs(id,namespace,value,epoch,kind,state,payload,completed_chunks) VALUES(?1,?2,?3,?4,?5,?6,?7,0)", params![id, world.namespace, world.value, epoch, JobKind::Resume as i64, JobState::Resumable as i64, payload])?;

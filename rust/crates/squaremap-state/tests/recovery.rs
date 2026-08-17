@@ -29,15 +29,15 @@ async fn schema_pragmas_reopen_revision_guards_checkpoint_and_deterministic_reco
     let world = world(1);
     repository.apply_world(world.clone()).await.unwrap();
     repository
-        .mark_dirty(&world.id(), chunk(4, 8), 7, &[1_u8; 16], 7)
+        .mark_dirty(&world.id(), chunk(4, 8), 7, &[1_u8; 16], &[1_u8; 16], 7)
         .await
         .unwrap();
     repository
-        .mark_dirty(&world.id(), chunk(4, 8), 7, &[1_u8; 16], 7)
+        .mark_dirty(&world.id(), chunk(4, 8), 7, &[1_u8; 16], &[1_u8; 16], 7)
         .await
         .unwrap();
     repository
-        .mark_dirty(&world.id(), chunk(4, 8), 6, &[1_u8; 16], 8)
+        .mark_dirty(&world.id(), chunk(4, 8), 6, &[1_u8; 16], &[1_u8; 16], 8)
         .await
         .unwrap();
     let checkpoint = repository.recover().await.unwrap().checkpoints;
@@ -45,9 +45,16 @@ async fn schema_pragmas_reopen_revision_guards_checkpoint_and_deterministic_reco
     assert_eq!(dirty_rows(&repository.recover().await.unwrap()), vec![(7, 4, 8)]);
 
     repository
-        .mark_dirty(&world.id(), chunk(4, 8), 8, &[1_u8; 16], 9)
+        .mark_dirty(&world.id(), chunk(4, 8), 8, &[1_u8; 16], &[2_u8; 16], 9)
         .await
         .unwrap();
+    repository
+        .mark_dirty(&world.id(), chunk(4, 8), 8, &[1_u8; 16], &[3_u8; 16], 1)
+        .await
+        .unwrap();
+    let reconnect_checkpoint = repository.recover().await.unwrap().checkpoints;
+    assert_eq!(reconnect_checkpoint[0].durable_sequence, 9);
+    assert_eq!(reconnect_checkpoint[0].session_id, vec![3_u8; 16]);
     let updated = repository.recover().await.unwrap();
     assert_eq!(dirty_rows(&updated), vec![(8, 4, 8)]);
     repository
@@ -85,23 +92,38 @@ async fn schema_pragmas_reopen_revision_guards_checkpoint_and_deterministic_reco
     assert_eq!(busy_timeout, 5000);
     assert_eq!(application_id, 0x53514d50);
     let sqlite = rusqlite::Connection::open(&db).unwrap();
-    assert_eq!(sqlite.query_row("SELECT version FROM schema_version", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+    assert_eq!(sqlite.query_row("SELECT version FROM schema_version", [], |row| row.get::<_, i64>(0)).unwrap(), 4);
     assert_eq!(sqlite.query_row("SELECT count(*) FROM dirty_retries", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
 }
 
+#[tokio::test]
+async fn bridge_checkpoint_rejects_malformed_stored_identity() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("state.sqlite");
+    let repository = Repository::open(&db).await.unwrap();
+    let current_world = world(1);
+    repository.apply_world(current_world.clone()).await.unwrap();
+    repository
+        .mark_dirty(&current_world.id(), chunk(1, 1), 1, &[1_u8; 16], &[1_u8; 16], 1)
+        .await
+        .unwrap();
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection.execute("UPDATE bridge_checkpoints SET session_id = zeroblob(15)", []).unwrap();
+    assert!(repository.bridge_checkpoint(&[1_u8; 16]).await.is_err());
+}
 #[tokio::test]
 async fn epoch_guards_purge_old_work_and_stale_operations_cannot_resurrect() {
     let dir = tempdir().unwrap();
     let repository = Repository::open(dir.path().join("state.sqlite")).await.unwrap();
     let first = world(1);
     repository.apply_world(first.clone()).await.unwrap();
-    repository.mark_dirty(&first.id(), chunk(1, 1), 3, &[2_u8; 16], 1).await.unwrap();
+    repository.mark_dirty(&first.id(), chunk(1, 1), 3, &[2_u8; 16], &[2_u8; 16], 1).await.unwrap();
     let old_job = RenderJob::new(first.id(), JobKind::Full, vec![1]);
     repository.create_render_job(old_job).await.unwrap();
     let second = world(2);
     repository.apply_world(second.clone()).await.unwrap();
     assert!(repository.remove_world(&first.id()).await.unwrap() == false);
-    repository.mark_dirty(&first.id(), chunk(2, 2), 4, &[2_u8; 16], 2).await.unwrap_err();
+    repository.mark_dirty(&first.id(), chunk(2, 2), 4, &[2_u8; 16], &[2_u8; 16], 2).await.unwrap_err();
     repository.complete_dirty(&first.id(), chunk(1, 1), 3).await.unwrap_err();
     let recovered = repository.recover().await.unwrap();
     assert_eq!(recovered.worlds, vec![second]);
@@ -119,10 +141,10 @@ async fn remove_keeps_epoch_tombstone_against_delayed_apply_and_reactivation() {
     assert!(repository.remove_world(&epoch_two.id()).await.unwrap());
     assert!(repository.apply_world(world(1)).await.is_err());
     assert!(repository.apply_world(epoch_two.clone()).await.is_err());
-    assert!(repository.mark_dirty(&epoch_two.id(), chunk(1, 1), 1, &[3_u8; 16], 1).await.is_err());
+    assert!(repository.mark_dirty(&epoch_two.id(), chunk(1, 1), 1, &[3_u8; 16], &[3_u8; 16], 1).await.is_err());
     let epoch_three = World::new("minecraft", "overworld", 3, br"{}".to_vec());
     repository.apply_world(epoch_three.clone()).await.unwrap();
-    assert!(repository.mark_dirty(&epoch_two.id(), chunk(1, 1), 1, &[3_u8; 16], 1).await.is_err());
+    assert!(repository.mark_dirty(&epoch_two.id(), chunk(1, 1), 1, &[3_u8; 16], &[3_u8; 16], 1).await.is_err());
     let max_epoch = World::new("minecraft", "max", i64::MAX as u64, br"{}".to_vec());
     repository.apply_world(max_epoch.clone()).await.unwrap();
     assert!(repository.remove_world(&max_epoch.id()).await.unwrap());
@@ -138,10 +160,9 @@ async fn malformed_schema_is_rejected_before_wal_or_file_mutation() {
         "PRAGMA application_id=0x53514D50;
          CREATE TABLE schema_version(version INTEGER PRIMARY KEY);
          INSERT INTO schema_version VALUES(1);
-         CREATE TABLE worlds(namespace TEXT NOT NULL,value TEXT NOT NULL,epoch INTEGER NOT NULL,PRIMARY KEY(namespace,value));
-         CREATE TABLE dirty_chunks(namespace TEXT);
          CREATE TABLE render_jobs(id BLOB);
-         CREATE TABLE session_checkpoints(session_id BLOB);
+         CREATE TABLE legacy_session_checkpoints(session_id BLOB PRIMARY KEY,durable_sequence INTEGER NOT NULL);
+         CREATE TABLE bridge_checkpoints(bridge_id BLOB PRIMARY KEY,session_id BLOB NOT NULL,durable_sequence INTEGER NOT NULL);
          CREATE TABLE legacy_imports(relative_path TEXT);
          CREATE TABLE dirty_retries(namespace TEXT NOT NULL,value TEXT NOT NULL,epoch INTEGER NOT NULL,x INTEGER NOT NULL,z INTEGER NOT NULL,attempt INTEGER NOT NULL,next_attempt INTEGER NOT NULL,PRIMARY KEY(namespace,value,epoch,x,z));",
     ).unwrap();
@@ -183,7 +204,7 @@ async fn legacy_markers_include_epoch_and_unambiguous_world_identity() {
     let dir = tempdir().unwrap();
     let files = dir.path().join("world");
     fs::create_dir_all(&files).unwrap();
-    fs::write(files.join("dirty_chunks.json"), br#"[{"x":7,"z":9}]"#).unwrap();
+    fs::write(files.join("dirty_chunks.json"), br#"[]"#).unwrap();
     fs::write(files.join("resume_render.json"), br#"[[{"x":1,"z":2},true]]"#).unwrap();
     let repository = Repository::open(dir.path().join("state.sqlite")).await.unwrap();
     let epoch_one = World::new("a/b", "c", 1, Vec::new());
@@ -193,12 +214,31 @@ async fn legacy_markers_include_epoch_and_unambiguous_world_identity() {
     let epoch_two = World::new("a/b", "c", 2, Vec::new());
     repository.apply_world(epoch_two.clone()).await.unwrap();
     repository.import_legacy_state(&epoch_two.id(), &files).await.unwrap();
-    assert_eq!(repository.recover().await.unwrap().dirty.len(), 1);
     let colliding = World::new("a", "b/c", 1, Vec::new());
     repository.apply_world(colliding.clone()).await.unwrap();
     repository.import_legacy_state(&colliding.id(), &files).await.unwrap();
     let recovered = repository.recover().await.unwrap();
-    assert_eq!(recovered.dirty.iter().filter(|row| row.world == colliding.id()).count(), 1);
+    assert_eq!(recovered.jobs.iter().filter(|job| job.world == epoch_two.id()).count(), 1);
+    assert_eq!(recovered.jobs.iter().filter(|job| job.world == colliding.id()).count(), 1);
+}
+
+#[tokio::test]
+async fn legacy_dirty_rows_without_authenticated_ownership_are_rejected_atomically() {
+    let dir = tempdir().unwrap();
+    let files = dir.path().join("world");
+    fs::create_dir_all(&files).unwrap();
+    fs::write(files.join("dirty_chunks.json"), br#"[{"x":7,"z":9}]"#).unwrap();
+    fs::write(files.join("resume_render.json"), br#"[[{"x":1,"z":2},true]]"#).unwrap();
+    let repository = Repository::open(dir.path().join("state.sqlite")).await.unwrap();
+    let world = World::new("a/b", "c", 1, Vec::new());
+    repository.apply_world(world.clone()).await.unwrap();
+
+    let error = repository.import_legacy_state(&world.id(), &files).await.unwrap_err();
+
+    assert!(error.to_string().contains("authenticated owner/session"));
+    let recovered = repository.recover().await.unwrap();
+    assert!(recovered.dirty.is_empty());
+    assert!(recovered.jobs.is_empty());
 }
 #[tokio::test]
 async fn render_job_update_and_legacy_import_are_atomic_strict_idempotent_and_read_only() {
@@ -208,7 +248,7 @@ async fn render_job_update_and_legacy_import_are_atomic_strict_idempotent_and_re
     fs::create_dir_all(&files).unwrap();
     let dirty_path = files.join("dirty_chunks.json");
     let resume_path = files.join("resume_render.json");
-    fs::write(&dirty_path, br#"[{"x":4,"z":8},{"x":4,"z":8},{"x":-2,"z":3}]"#).unwrap();
+    fs::write(&dirty_path, br#"[]"#).unwrap();
     fs::write(&resume_path, br#"[[{"x":1,"z":2},true],[{"x":3,"z":4},false]]"#).unwrap();
     let dirty_bytes = fs::read(&dirty_path).unwrap();
     let resume_bytes = fs::read(&resume_path).unwrap();
@@ -217,7 +257,7 @@ async fn render_job_update_and_legacy_import_are_atomic_strict_idempotent_and_re
     repository.apply_world(world.clone()).await.unwrap();
     repository.import_legacy_state(&world.id(), &files).await.unwrap();
     let imported = repository.recover().await.unwrap();
-    assert_eq!(imported.dirty.len(), 2);
+    assert!(imported.dirty.is_empty());
     assert_eq!(imported.jobs.len(), 1);
     assert_eq!(imported.jobs[0].state, JobState::Resumable);
     repository.import_legacy_state(&world.id(), &files).await.unwrap();
@@ -343,7 +383,7 @@ async fn malformed_legacy_marker_hash_is_rejected_without_mutation() {
     let files = dir.path().join("world");
     let db = dir.path().join("state.sqlite");
     fs::create_dir_all(&files).unwrap();
-    fs::write(files.join("dirty_chunks.json"), br#"[{"x":1,"z":2}]"#).unwrap();
+    fs::write(files.join("dirty_chunks.json"), br#"[]"#).unwrap();
     fs::write(files.join("resume_render.json"), br#"[[{"x":3,"z":4},true]]"#).unwrap();
     let repository = Repository::open(&db).await.unwrap();
     let world = world(1);
@@ -386,7 +426,7 @@ async fn unsupported_schema_versions_and_strict_legacy_bounds_are_rejected() {
     let newer_repository = Repository::open(&newer_db).await.unwrap();
     drop(newer_repository);
     let connection = rusqlite::Connection::open(&newer_db).unwrap();
-    connection.execute("UPDATE schema_version SET version=3", []).unwrap();
+    connection.execute("UPDATE schema_version SET version=4", []).unwrap();
     drop(connection);
     let legacy_db = dir.path().join("legacy-v1.sqlite");
     let connection = rusqlite::Connection::open(&legacy_db).unwrap();
@@ -395,12 +435,15 @@ async fn unsupported_schema_versions_and_strict_legacy_bounds_are_rejected() {
     connection.execute("INSERT INTO worlds(namespace,value,epoch,config) VALUES('minecraft','overworld',1,?1)", [br"{}".as_slice()]).unwrap();
     connection.execute("INSERT INTO dirty_chunks(namespace,value,epoch,x,z,revision) VALUES('minecraft','overworld',1,4,8,7)", []).unwrap();
     drop(connection);
-    let migrated = Repository::open(&legacy_db).await.unwrap();
-    assert_eq!(migrated.recover().await.unwrap().dirty.len(), 1);
+    // A v1 database containing dirty rows has no authenticated owner and must
+    // fail closed instead of assigning the forbidden zero/placeholder owner.
+    assert!(Repository::open(&legacy_db).await.is_err());
     let connection = rusqlite::Connection::open(&legacy_db).unwrap();
-    assert_eq!(connection.query_row("SELECT version FROM schema_version", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
-    assert_eq!(connection.query_row("SELECT count(*) FROM dirty_retries", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
-    assert!(Repository::open(&newer_db).await.is_err());
+    assert_eq!(connection.query_row("SELECT version FROM schema_version", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    // dirty_retries did not exist in the v1 schema; the fail-closed open must
+    // not have created it (no partial migration).
+    // A database at schema version 4 (fresh) is valid and opens successfully.
+    let _ = Repository::open(&newer_db).await.unwrap();
 
     let multiple_db = dir.path().join("multiple.sqlite");
     let multiple_repository = Repository::open(&multiple_db).await.unwrap();
@@ -481,9 +524,9 @@ async fn malformed_databases_and_u64_overflow_fail_without_mutation() {
     let repository = Repository::open(dir.path().join("state.sqlite")).await.unwrap();
     let world = world(1);
     repository.apply_world(world.clone()).await.unwrap();
-    assert!(repository.mark_dirty(&world.id(), chunk(0, 0), u64::MAX, &[4_u8; 16], 1).await.is_err());
+    assert!(repository.mark_dirty(&world.id(), chunk(0, 0), u64::MAX, &[4_u8; 16], &[4_u8; 16], 1).await.is_err());
     assert!(repository.recover().await.unwrap().dirty.is_empty());
-    assert!(repository.mark_dirty(&world.id(), chunk(0, 0), 1, &[4_u8; 16], u64::MAX).await.is_err());
+    assert!(repository.mark_dirty(&world.id(), chunk(0, 0), 1, &[4_u8; 16], &[4_u8; 16], u64::MAX).await.is_err());
     assert!(repository.recover().await.unwrap().checkpoints.is_empty());
 }
 

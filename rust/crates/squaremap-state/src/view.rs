@@ -110,7 +110,7 @@ pub enum MarkerGeometryView {
     #[serde(rename = "rectangle")] Rectangle { points: Vec<ViewPoint> },
     #[serde(rename = "polyline")] Polyline { points: PolylinePoints },
     #[serde(rename = "polygon")] Polygon { points: Vec<Vec<ViewPoint>> },
-    #[serde(rename = "polygon")] MultiPolygon { points: Vec<Vec<Vec<ViewPoint>>> },
+    #[serde(rename = "multipolygon")] MultiPolygon { points: Vec<Vec<Vec<ViewPoint>>> },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -7,6 +7,7 @@ pub const MAX_CONFIG_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_SESSION_ID_BYTES: usize = 16;
 pub const MAX_JOB_ID_BYTES: usize = 32;
+pub const MAX_BRIDGE_ID_BYTES: usize = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WorldId {
@@ -59,6 +60,33 @@ pub struct DirtyChunk {
     pub world: WorldId,
     pub coordinate: ChunkCoordinate,
     pub revision: u64,
+    pub owner_bridge_id: Vec<u8>,
+    pub lease_expires_epoch_seconds: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirtyRow {
+    pub world: WorldId,
+    pub coordinate: ChunkCoordinate,
+    pub revision: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirtyLease {
+    pub world: WorldId,
+    pub coordinate: ChunkCoordinate,
+    pub revision: u64,
+    pub owner_bridge_id: Vec<u8>,
+    pub owner_session_id: Vec<u8>,
+    pub lease_expires_epoch_seconds: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnerLease {
+    pub bridge_id: Vec<u8>,
+    pub session_id: Vec<u8>,
+    pub durable_sequence: u64,
+    pub lease_expires_epoch_seconds: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,6 +140,7 @@ impl RenderJob {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionCheckpoint {
+    pub bridge_id: Vec<u8>,
     pub session_id: Vec<u8>,
     pub durable_sequence: u64,
 }

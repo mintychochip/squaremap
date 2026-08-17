@@ -6,7 +6,7 @@ mod repository;
 
 pub use canonical::CanonicalState;
 pub use model::{
-    ChunkCoordinate, DirtyChunk, JobKind, JobState, ModelError, Recovery, RenderJob,
-    SessionCheckpoint, World, WorldId,
+    ChunkCoordinate, DirtyChunk, DirtyLease, DirtyRow, JobKind, JobState, ModelError,
+    OwnerLease, Recovery, RenderJob, SessionCheckpoint, World, WorldId,
 };
 pub use repository::{Repository, RepositoryError};
