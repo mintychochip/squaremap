@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "scenario": "fixture",
+  "input_hash": "ab017e92bc1026facab592914ed1f4ef0f391d19decd1e41e3e1f68ad750eefa",
+  "normalization": "none",
+  "outputs": [
+    {"path": "empty.json", "type": "json"},
+    {"path": "icons.json", "type": "json"},
+    {"path": "markers.json", "type": "json"},
+    {"path": "players.json", "type": "json"},
+    {"path": "settings.json", "type": "json"},
+    {"path": "world-settings.json", "type": "json"}
+  ]
+}

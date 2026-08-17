@@ -1,0 +1,34 @@
+{
+  "date": "2026-08-16",
+  "scope": "deterministic Java/Rust backend parity probes plus scoped live-shadow evidence",
+  "matrix_consistency": "parity_matrix test passed",
+  "verification": {
+    "java_oracle_and_contracts": "BUILD SUCCESSFUL",
+    "java_http_ownership_oracle": "BUILD SUCCESSFUL",
+    "paper_fixture_fail_closed_validation": "BUILD SUCCESSFUL",
+    "rust_render_probe": "11 passed",
+    "rust_bootstrap_control": "8 passed",
+    "rust_state_publication": "2 passed",
+    "rust_control_replay_resync": "15 passed",
+    "rust_comparator_replay": "20 passed",
+    "rust_http_contract": "11 passed",
+    "rust_sidecar_config_restart_smoke": "BUILD SUCCESSFUL",
+    "rust_scoped_live_shadow": "0 mismatches across 2 paths",
+    "java_binary_resolver_contract": "BUILD SUCCESSFUL",
+    "rust_matrix_consistency": "1 passed"
+  },
+  "fixture_comparison": {
+    "manifest": "testdata/bridge/v1/parity-probe-manifest.json",
+    "input_hash": "ab017e92bc1026facab592914ed1f4ef0f391d19decd1e41e3e1f68ad750eefa",
+    "paths": 6,
+    "mismatches": 0,
+    "verdict": "equal"
+  },
+  "alignment_status": "deterministic_contracts_verified_live_alignment_blocked",
+  "limitations": [
+    "The Rust render probe consumes the canonical Java-generated corpus independently; it is not a live Java process adapter.",
+    "The HTTP contract suite is Rust-only and does not establish Java/Rust HTTP parity.",
+    "PaperFixtureManifestTest proves the configured live fixture fails closed because artifacts are placeholders and the world corpus is absent.",
+    "A complete live Paper shadow comparison, full replay convergence, fault/reconnect, performance/RSS, remote release publication and five-target resolution (Rust resolver parity unproven), and cutover gates remain unproven."
+  ]
+}

@@ -13,8 +13,22 @@ pub struct BenchmarkReport {
     pub passed: bool,
 }
 
+pub fn percentile(samples: &mut [u128], percentile: f64) -> Option<u128> {
+    if samples.is_empty() || !percentile.is_finite() || !(0.0..=1.0).contains(&percentile) {
+        return None;
+    }
+    samples.sort_unstable();
+    let rank = (samples.len() - 1) as f64 * percentile;
+    let lower = rank.floor() as usize;
+    let upper = rank.ceil() as usize;
+    let fraction = rank - lower as f64;
+    let low = samples[lower] as f64;
+    let high = samples[upper] as f64;
+    Some((low + (high - low) * fraction).round() as u128)
+}
+
 pub fn run(iterations: u64, threshold: f64) -> BenchmarkReport {
-    let iterations = iterations.max(1);
+    assert!(iterations > 0, "benchmark iterations must be greater than zero");
     let start = Instant::now();
     let mut checksum = 0u64;
     for index in 0..iterations {
@@ -30,7 +44,7 @@ pub fn run(iterations: u64, threshold: f64) -> BenchmarkReport {
         threshold_items_per_second: threshold,
         compared_paths: 0,
         mismatches: 0,
-        passed: items_per_second >= threshold,
+        passed: threshold.is_finite() && threshold >= 0.0 && items_per_second >= threshold,
     }
 }
 
@@ -40,7 +54,18 @@ pub fn run_output(
     iterations: u64,
     threshold: f64,
 ) -> std::io::Result<BenchmarkReport> {
-    let iterations = iterations.max(1);
+    if iterations == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "benchmark iterations must be greater than zero",
+        ));
+    }
+    if !threshold.is_finite() || threshold <= 0.0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "benchmark threshold must be finite and positive",
+        ));
+    }
     let start = Instant::now();
     let mut compared_paths = 0usize;
     let mut mismatches = 0usize;
@@ -58,7 +83,7 @@ pub fn run_output(
         threshold_items_per_second: threshold,
         compared_paths,
         mismatches,
-        passed: mismatches == 0 && items_per_second >= threshold,
+        passed: threshold.is_finite() && threshold >= 0.0 && mismatches == 0 && items_per_second >= threshold,
     })
 }
 

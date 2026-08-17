@@ -1,0 +1,34 @@
+Matched renderer comparison status (2026-08-14)
+
+Shared contract:
+- Corpus: testdata/bridge/v2/render, 26 valid cases, fixed order.
+- Fixture decoding and engine/context construction outside timing.
+- 10 warmup passes and 30 measured passes.
+- One item = one direct chunk render producing 256 pixels and a 16-value south edge.
+- Java and Rust fold a per-pass checksum identically: case stream -> pass hash -> measured-sequence hash.
+- Java output validation is outside the timed region; Rust validates its fixture oracle before timing.
+
+Java direct renderer:
+- Command: ./gradlew :squaremap-common:test --tests '*ChunkRenderBenchmarkTest' -Dsquaremap.renderBenchmark=true --no-daemon --console=plain --rerun-tasks
+- Result: BUILD SUCCESSFUL.
+- Timed elapsed: 170,353,423 ns.
+- Throughput: 4,578.716331 items/s.
+- Checksum: -5578976407213116928.
+
+Rust direct renderer:
+- Command: cargo run --manifest-path rust/Cargo.toml -p squaremap-render --bin render_protocol --release
+- Result: completed.
+- Timed elapsed: 71,323,265 ns.
+- Throughput: 10,936.123017 items/s.
+- Checksum: -5578976407213116928.
+
+Parity:
+- Checksums match exactly.
+- Rust fixture oracle validation passed for all 26 cases.
+- Java targeted benchmark test passed.
+- The measured render-only throughput ratio is approximately 2.39x in favor of Rust (10,936.123017 / 4,578.716331).
+
+Caveats:
+- This is a direct renderer comparison, not a full backend lifecycle comparison. Scheduler, bridge, repository, HTTP, PNG encoding, and filesystem output are excluded.
+- Java timing is inside a Gradle-launched JVM test process, but Gradle startup and fixture setup are outside the timed interval. For publication-quality numbers, run the same Java driver as a standalone release JVM process and repeat both backends multiple times.
+- The ratio is valid for this fixed corpus/protocol only; it is not a universal backend speedup claim.

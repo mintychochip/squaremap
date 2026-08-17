@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "generator": "deterministic-phase3-corpus-v1",
+  "scope": "deterministic fixtures only; no Paper/live evidence",
+  "commit_sha": "cb1dcc1be04ba8a15c3cd3151f663245f32c19de",
+  "dirty_tree": true,
+  "paths": [
+    {"path":"fixtures/java/empty.json","sha256":"4f13641a8fb32f08103b3fd950faeaa4ef75c67148d2f12ca57688ca4cde65bd"},
+    {"path":"fixtures/java/icons.json","sha256":"836cbbc4615094de2c0545034acb121242589b44b7fac2c1e9e720a543f70f7e"},
+    {"path":"fixtures/java/markers.json","sha256":"218ea5466164301ca9cd77d9376999b13b4cc7d216320ca4effa6ef744cb47cb"},
+    {"path":"fixtures/java/players.json","sha256":"ede4d0b95343ffb4c1e9e2be03364355dc1275866a0cee6a77d823b562b2a132"},
+    {"path":"fixtures/java/settings.json","sha256":"1835a59e49107e8c6b806e03f3e042f776acad32379a39071cdac2d07998aa66"},
+    {"path":"fixtures/java/world-settings.json","sha256":"ebbaaf8fc9204201dcd265ca28c6940d92e4fde114eff46dd08be61edc7e3a04"},
+    {"path":"fixtures/rust/empty.json","sha256":"4f13641a8fb32f08103b3fd950faeaa4ef75c67148d2f12ca57688ca4cde65bd"},
+    {"path":"fixtures/rust/icons.json","sha256":"836cbbc4615094de2c0545034acb121242589b44b7fac2c1e9e720a543f70f7e"},
+    {"path":"fixtures/rust/markers.json","sha256":"218ea5466164301ca9cd77d9376999b13b4cc7d216320ca4effa6ef744cb47cb"},
+    {"path":"fixtures/rust/players.json","sha256":"ede4d0b95343ffb4c1e9e2be03364355dc1275866a0cee6a77d823b562b2a132"},
+    {"path":"fixtures/rust/settings.json","sha256":"1835a59e49107e8c6b806e03f3e042f776acad32379a39071cdac2d07998aa66"},
+    {"path":"fixtures/rust/world-settings.json","sha256":"ebbaaf8fc9204201dcd265ca28c6940d92e4fde114eff46dd08be61edc7e3a04"},
+    {"path":"fixtures/parity-report.json","sha256":"1bac96d5facb5e6b9987b8d63ab9dbef989100175983df9c86f7a9ac245da709"},
+    {"path":"render/primitives.json","sha256":"c36892fbfdcae0594786fc7345cd2a9685622fdcf0e958d518e5a7219ced464e"},
+    {"path":"world-fixture.json","sha256":"787f72e6631183fc3e029b9877050d7a87c759cb0f7bc8072a1a72cbbb61ce07"}
+  ],
+  "render_case_inventory": {"manifest":"../v2/render/manifest.json","valid_cases":26,"malformed_cases":14},
+  "comparator": {"command":"cargo run -q -p squaremap-compare -- compare-output --java ../testdata/bridge/v1/fixtures/java --rust ../testdata/bridge/v1/fixtures/rust --report ../testdata/bridge/v1/fixtures/parity-report.json","compared_paths":6,"mismatch_count":0,"ignored_mismatches":0}
+}

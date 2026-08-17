@@ -1,0 +1,62 @@
+{
+  "date": "2026-08-16",
+  "scope": "Java/Rust backend parity probes plus scoped live shadow evidence",
+  "scope_verdict": "deterministic_probe_coverage_passed_scoped_live_shadow_passed_complete_alignment_blocked",
+  "deterministic": {
+    "java_render_oracle": "passed",
+    "rust_render_probe": "11 passed",
+    "rust_bootstrap_control_lifecycle": "8 passed",
+    "rust_control_replay_resync_contracts": "15 passed",
+    "rust_config_compatibility": "2 passed",
+    "java_backend_controller_contract": "BUILD SUCCESSFUL",
+    "java_state_exporter_contract": "BUILD SUCCESSFUL",
+    "java_state_publisher_contract": "BUILD SUCCESSFUL",
+    "rust_view_contract": "9 passed",
+    "rust_state_publication_contract": "2 passed",
+    "rust_bridge_mode_contract": "4 passed",
+    "java_http_ownership_contract": "BUILD SUCCESSFUL",
+    "rust_http_contract": "11 passed",
+    "rust_comparator_contracts": "20 passed",
+    "java_recovery_scenario_contract": "BUILD SUCCESSFUL",
+    "rust_render_recovery_contract": "10 passed",
+    "java_dirty_publisher_contract": "BUILD SUCCESSFUL",
+    "rust_dirty_persistence_recovery_contracts": "35 passed",
+    "java_snapshot_enumeration_contract": "BUILD SUCCESSFUL",
+    "rust_enumeration_replay_boundary_contracts": "11 passed",
+    "java_configuration_wiring_contract": "BUILD SUCCESSFUL",
+    "rust_configuration_ownership_contracts": "6 passed",
+    "java_binary_resolver_contract": "BUILD SUCCESSFUL",
+    "java_target_triple_mapping": "BUILD SUCCESSFUL",
+    "java_platform_module_cycle": "BUILD SUCCESSFUL",
+    "v1_fixture_report": {
+      "scenario": "fixture",
+      "input_hash": "ab017e92bc1026facab592914ed1f4ef0f391d19decd1e41e3e1f68ad750eefa",
+      "compared_paths": 6,
+      "mismatches": 0,
+      "verdict": "equal"
+    }
+  },
+  "control_alignment": {
+    "covered": [
+      "authoritative full-render enumeration",
+      "durable job creation and cancellation",
+      "render cancellation during blocked discovery",
+      "per-world pause/resume",
+      "reset cleanup and active-render fencing"
+    ],
+    "not_covered": [
+      "Java Reload execution; Rust intentionally leaves Reload to the Java boundary"
+    ]
+  },
+  "not_proven": [
+    "Complete live Java-primary/Rust-shadow comparison against the full Paper/world corpus; the scoped Paper 26.2-112 run compared two paths with zero mismatches.",
+    "Paired Java/Rust HTTP request semantics, full replay convergence, and production-equivalent sidecar fault/reconnect proof.",
+    "End-to-end performance/RSS, remote release publication and five-target resolution, rollback, observation, and clean cutover."
+  ],
+  "required_prerequisites": [
+    "Pinned production-equivalent Java plugin and Paper artifacts plus the manifest-matching sidecar artifact.",
+    "Non-empty deterministic Paper world corpus and isolated runtime ports/directories.",
+    "A runner that can start Paper, exercise HTTP/control/replay/fault scenarios, and collect artifacts.",
+    "Independent report retention for each Java-primary/Rust-shadow scenario."
+  ]
+}

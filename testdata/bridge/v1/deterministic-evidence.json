@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "scope": "Phase 3 deterministic corpus only; Paper/live scope is unavailable and not claimed",
+  "commit_sha": "cb1dcc1be04ba8a15c3cd3151f663245f32c19de",
+  "dirty_tree": true,
+  "commands": [
+    "./gradlew :squaremap-common:test --tests xyz.jpenilla.squaremap.common.task.render.ChunkRenderFixtureGenerator -Dsquaremap.task11.root=/home/jlo/dev/squaremap/.worktrees/rust-backend-migration -Dsquaremap.regenerate=--overwrite",
+    "./gradlew :squaremap-common:test --tests xyz.jpenilla.squaremap.common.task.render.ChunkRenderFixtureOracleTest --tests xyz.jpenilla.squaremap.common.task.render.ChunkRenderFixtureCatalogTest --tests xyz.jpenilla.squaremap.common.task.render.ChunkRenderMalformedFactoryTest -Dsquaremap.task11.root=/home/jlo/dev/squaremap/.worktrees/rust-backend-migration",
+    "cargo test -p squaremap-render --test chunk_render --test region_render --test snapshot_render_hardening",
+    "cargo run -q -p squaremap-compare -- compare-output --java ../testdata/bridge/v1/fixtures/java --rust ../testdata/bridge/v1/fixtures/rust --report ../testdata/bridge/v1/fixtures/parity-report.json"
+  ],
+  "results": {
+    "java_generator_exit_code": 0,
+    "java_oracle_exit_code": 0,
+    "rust_fixture_exit_code": 0,
+    "comparator_exit_code": 0,
+    "compared_paths": 6,
+    "mismatch_count": 0,
+    "ignored_mismatches": 0,
+    "render_valid_cases": 26,
+    "render_malformed_cases": 14
+  },
+  "input_hashes": {
+    "world_fixture.json": "787f72e6631183fc3e029b9877050d7a87c759cb0f7bc8072a1a72cbbb61ce07",
+    "render_manifest.json": "f71c9a0733d75a81a7a886d6ad6ffb2b019ba6c19723a8823134b253bdefc4f1"
+  },
+  "raw_artifact_hashes": {
+    "fixtures/parity-report.json": "1bac96d5facb5e6b9987b8d63ab9dbef989100175983df9c86f7a9ac245da709",
+    "corpus.inventory.json": "ab017e92bc1026facab592914ed1f4ef0f391d19decd1e41e3e1f68ad750eefa"
+  }
+}

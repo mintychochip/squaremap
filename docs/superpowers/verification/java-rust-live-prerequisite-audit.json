@@ -1,0 +1,18 @@
+{
+  "date": "2026-08-16",
+  "manifest": "testdata/bridge/v1/paper-fixture.json",
+  "status": "blocked_before_launch",
+  "checks": {
+    "paper_artifact": {"path": "testdata/bridge/v1/paper.jar", "sha256_matches_manifest": true, "format": "placeholder_bytes"},
+    "plugin_artifact": {"path": "testdata/bridge/v1/plugin.jar", "sha256_matches_manifest": true, "format": "placeholder_bytes"},
+    "sidecar_artifact": {"path": "testdata/bridge/v1/squaremap-server", "sha256_matches_manifest": true, "format": "placeholder_bytes"},
+    "world_corpus_inventory": {"path": "testdata/bridge/v1/world-corpus.inventory.json", "present": false, "manifest_hash": "0000000000000000000000000000000000000000000000000000000000000000"}
+  },
+  "proof": "ProofFixture.load rejects placeholder artifact metadata before starting Paper; the live Rust shadow driver cannot execute this fixture until real Paper/plugin artifacts and a complete world corpus are supplied. The Rust sidecar itself has a separate authenticated config/restart smoke path that passes.",
+  "required_inputs": [
+    "real Paper 26.2 jar",
+    "real squaremap plugin jar",
+    "production-equivalent sidecar artifact matching the fixture manifest",
+    "non-empty world-corpus.inventory.json with matching SHA-256"
+  ]
+}
