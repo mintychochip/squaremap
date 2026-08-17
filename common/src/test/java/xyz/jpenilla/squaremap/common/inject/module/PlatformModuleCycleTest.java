@@ -9,7 +9,6 @@ import java.time.Duration;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import xyz.jpenilla.squaremap.common.SquaremapPlatform;
-import xyz.jpenilla.squaremap.common.bridge.process.BackendMode;
 import xyz.jpenilla.squaremap.common.bridge.process.BridgeBootstrapConfig;
 import xyz.jpenilla.squaremap.common.bridge.process.SidecarCommand;
 
@@ -32,7 +31,6 @@ final class PlatformModuleCycleTest {
 
     private static BridgeBootstrapConfig fixtureConfig(final String version) {
         return new BridgeBootstrapConfig(
-            BackendMode.RUST,
             version,
             new SidecarCommand(List.of("fixture")),
             Duration.ofSeconds(1),

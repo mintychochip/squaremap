@@ -286,9 +286,8 @@ class SidecarSupervisorTest {
         supervisor.close();
     }
     @Test
-    void nonJavaBackendRejectsMissingRustOutputRoot() {
+    void rustBackendRejectsMissingRustOutputRoot() {
         assertThrows(IllegalArgumentException.class, () -> new BridgeBootstrapConfig(
-            BackendMode.RUST,
             "fixture",
             new SidecarCommand(List.of("fixture")),
             Duration.ofSeconds(1),
@@ -343,7 +342,6 @@ class SidecarSupervisorTest {
         ));
         if (stateFile != null) command.add("--state-file=" + stateFile);
         return new BridgeBootstrapConfig(
-            BackendMode.RUST,
             "fixture",
             new SidecarCommand(command),
             timeout,
