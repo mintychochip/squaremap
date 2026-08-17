@@ -4,12 +4,27 @@ use squaremap_render::{color, coordinates, visibility};
 
 const FIXTURE: &str = include_str!("../../../../testdata/bridge/v1/render/primitives.json");
 
-fn fixture() -> Value { serde_json::from_str(FIXTURE).expect("immutable fixture JSON") }
-fn hex(value: &str) -> u32 { u32::from_str_radix(value.trim_start_matches("0x"), 16).expect("fixture hex") }
-fn i32v(row: &Map<String, Value>, name: &str) -> i32 { row[name].as_i64().expect(name) as i32 }
-fn boolv(row: &Map<String, Value>, name: &str) -> bool { row[name].as_bool().expect(name) }
-fn row_array<'a>(row: &'a Value, name: &str) -> &'a [Value] { row[name].as_array().expect(name) }
-fn query(row: &Value) -> (i32, i32) { (row["x"].as_i64().unwrap() as i32, row["z"].as_i64().unwrap() as i32) }
+fn fixture() -> Value {
+    serde_json::from_str(FIXTURE).expect("immutable fixture JSON")
+}
+fn hex(value: &str) -> u32 {
+    u32::from_str_radix(value.trim_start_matches("0x"), 16).expect("fixture hex")
+}
+fn i32v(row: &Map<String, Value>, name: &str) -> i32 {
+    row[name].as_i64().expect(name) as i32
+}
+fn boolv(row: &Map<String, Value>, name: &str) -> bool {
+    row[name].as_bool().expect(name)
+}
+fn row_array<'a>(row: &'a Value, name: &str) -> &'a [Value] {
+    row[name].as_array().expect(name)
+}
+fn query(row: &Value) -> (i32, i32) {
+    (
+        row["x"].as_i64().unwrap() as i32,
+        row["z"].as_i64().unwrap() as i32,
+    )
+}
 
 #[test]
 fn fixture_schema_and_coordinates() {
@@ -19,15 +34,21 @@ fn fixture_schema_and_coordinates() {
     for row in row_array(&f["coordinates"], "conversions") {
         let object = row.as_object().unwrap();
         let n = i32v(object, "input");
-        let tuple: Vec<i32> = row_array(row, "tuple").iter().map(|v| v.as_i64().unwrap() as i32).collect();
-        assert_eq!(tuple, vec![
-            coordinates::region_to_block(n).unwrap(),
-            coordinates::block_to_region(n),
-            coordinates::region_to_chunk(n).unwrap(),
-            coordinates::chunk_to_region(n),
-            coordinates::chunk_to_block(n).unwrap(),
-            coordinates::block_to_chunk(n),
-        ]);
+        let tuple: Vec<i32> = row_array(row, "tuple")
+            .iter()
+            .map(|v| v.as_i64().unwrap() as i32)
+            .collect();
+        assert_eq!(
+            tuple,
+            vec![
+                coordinates::region_to_block(n).unwrap(),
+                coordinates::block_to_region(n),
+                coordinates::region_to_chunk(n).unwrap(),
+                coordinates::chunk_to_region(n),
+                coordinates::chunk_to_block(n).unwrap(),
+                coordinates::block_to_chunk(n),
+            ]
+        );
     }
     for row in row_array(&f["coordinates"], "reverse") {
         let object = row.as_object().unwrap();
@@ -47,7 +68,9 @@ fn fixture_schema_and_coordinates() {
     for row in row_array(&f["coordinates"], "malformed") {
         let object = row.as_object().unwrap();
         let n = i32v(object, "input");
-        let java_result = object["java_result"].as_i64().expect("recorded Java coordinate result");
+        let java_result = object["java_result"]
+            .as_i64()
+            .expect("recorded Java coordinate result");
         assert!((i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(&java_result));
         let result = match object["function"].as_str().unwrap() {
             "region_to_block" => coordinates::region_to_block(n),
@@ -79,25 +102,52 @@ fn fixture_tiles_and_empty_visibility() {
     for row in row_array(&f["tiles"], "invalid") {
         let zoom = row["zoom"].as_u64().unwrap() as u8;
         let max_zoom = row["max_zoom"].as_u64().unwrap() as u8;
-        assert_eq!(coordinates::tile_for_region(0, 0, zoom, max_zoom), Err(coordinates::CoordinateError::InvalidZoom));
+        assert_eq!(
+            coordinates::tile_for_region(0, 0, zoom, max_zoom),
+            Err(coordinates::CoordinateError::InvalidZoom)
+        );
     }
     let empty = visibility::VisibilityLimit::new(Vec::new()).unwrap();
     let empty_fixture = &f["visibility"]["empty"];
-    assert_eq!(empty.contains_block(i32::MIN, i32::MAX), empty_fixture["contains_block"]);
+    assert_eq!(
+        empty.contains_block(i32::MIN, i32::MAX),
+        empty_fixture["contains_block"]
+    );
     assert_eq!(empty.contains_chunk(-3, 7), empty_fixture["contains_chunk"]);
-    assert_eq!(empty.contains_region(12, -9), empty_fixture["contains_region"]);
-    assert_eq!(empty.count_chunks_in_region(0, 0).unwrap(), empty_fixture["count_chunks"].as_u64().unwrap() as u16);
-    assert_eq!(empty.count_chunks_in_region(i32::MAX, 0), Err(visibility::VisibilityError::CountOverflow));
+    assert_eq!(
+        empty.contains_region(12, -9),
+        empty_fixture["contains_region"]
+    );
+    assert_eq!(
+        empty.count_chunks_in_region(0, 0).unwrap(),
+        empty_fixture["count_chunks"].as_u64().unwrap() as u16
+    );
+    assert_eq!(
+        empty.count_chunks_in_region(i32::MAX, 0),
+        Err(visibility::VisibilityError::CountOverflow)
+    );
 }
 
 fn shape_from_row(row: &Value) -> visibility::VisibilityShape {
     let kind = row["kind"].as_str().unwrap();
-    let params: Vec<i32> = row_array(row, "params").iter().map(|v| v.as_i64().unwrap() as i32).collect();
+    let params: Vec<i32> = row_array(row, "params")
+        .iter()
+        .map(|v| v.as_i64().unwrap() as i32)
+        .collect();
     match kind {
-        "rectangle" => visibility::VisibilityShape::Rectangle(visibility::Rectangle::new(params[0], params[1], params[2], params[3]).unwrap()),
-        "circle" => visibility::VisibilityShape::Circle(visibility::Circle::new(params[0], params[1], params[2]).unwrap()),
-        "polygon" => visibility::VisibilityShape::Polygon(visibility::Polygon::new(params.chunks_exact(2).map(|p| (p[0], p[1])).collect()).unwrap()),
-        "world_border" => visibility::VisibilityShape::WorldBorder(visibility::WorldBorderSnapshot::new(params[0], params[1], params[2]).unwrap()),
+        "rectangle" => visibility::VisibilityShape::Rectangle(
+            visibility::Rectangle::new(params[0], params[1], params[2], params[3]).unwrap(),
+        ),
+        "circle" => visibility::VisibilityShape::Circle(
+            visibility::Circle::new(params[0], params[1], params[2]).unwrap(),
+        ),
+        "polygon" => visibility::VisibilityShape::Polygon(
+            visibility::Polygon::new(params.chunks_exact(2).map(|p| (p[0], p[1])).collect())
+                .unwrap(),
+        ),
+        "world_border" => visibility::VisibilityShape::WorldBorder(
+            visibility::WorldBorderSnapshot::new(params[0], params[1], params[2]).unwrap(),
+        ),
         other => panic!("unknown shape {other}"),
     }
 }
@@ -143,7 +193,12 @@ fn every_visibility_fixture_vector_matches() {
         let limit = visibility::VisibilityLimit::new(vec![shape]).unwrap();
         for vector in row_array(row, "count_chunks") {
             let (x, z) = query(vector);
-            assert_eq!(limit.count_chunks_in_region(x, z).unwrap(), vector["result"].as_u64().unwrap() as u16, "{} count ({x},{z})", row["id"]);
+            assert_eq!(
+                limit.count_chunks_in_region(x, z).unwrap(),
+                vector["result"].as_u64().unwrap() as u16,
+                "{} count ({x},{z})",
+                row["id"]
+            );
         }
     }
 }
@@ -151,21 +206,67 @@ fn every_visibility_fixture_vector_matches() {
 #[test]
 fn every_runtime_border_fixture_vector_matches() {
     for row in row_array(&fixture()["visibility"], "runtime") {
-        let border = visibility::WorldBorderSnapshot::from_runtime(row["center_x"].as_f64().unwrap(), row["center_z"].as_f64().unwrap(), row["size"].as_f64().unwrap()).unwrap();
-        assert_eq!(border.center_x(), row["resolved"]["center_x"].as_i64().unwrap() as i32);
-        assert_eq!(border.center_z(), row["resolved"]["center_z"].as_i64().unwrap() as i32);
-        assert_eq!(border.radius(), row["resolved"]["radius"].as_i64().unwrap() as i32);
-        for vector in row_array(row, "blocks") { let (x,z)=query(vector); assert_eq!(border.contains_block(x,z), vector["result"].as_bool().unwrap()); }
-        for vector in row_array(row, "chunks") { let (x,z)=query(vector); assert_eq!(border.contains_chunk(x,z), vector["result"].as_bool().unwrap()); }
-        for vector in row_array(row, "regions") { let (x,z)=query(vector); assert_eq!(border.contains_region(x,z), vector["result"].as_bool().unwrap()); }
-        for vector in row_array(row, "count_chunks") { let (x,z)=query(vector); assert_eq!(visibility::VisibilityLimit::new(vec![visibility::VisibilityShape::WorldBorder(border)]).unwrap().count_chunks_in_region(x,z).unwrap(), vector["result"].as_u64().unwrap() as u16); }
+        let border = visibility::WorldBorderSnapshot::from_runtime(
+            row["center_x"].as_f64().unwrap(),
+            row["center_z"].as_f64().unwrap(),
+            row["size"].as_f64().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            border.center_x(),
+            row["resolved"]["center_x"].as_i64().unwrap() as i32
+        );
+        assert_eq!(
+            border.center_z(),
+            row["resolved"]["center_z"].as_i64().unwrap() as i32
+        );
+        assert_eq!(
+            border.radius(),
+            row["resolved"]["radius"].as_i64().unwrap() as i32
+        );
+        for vector in row_array(row, "blocks") {
+            let (x, z) = query(vector);
+            assert_eq!(
+                border.contains_block(x, z),
+                vector["result"].as_bool().unwrap()
+            );
+        }
+        for vector in row_array(row, "chunks") {
+            let (x, z) = query(vector);
+            assert_eq!(
+                border.contains_chunk(x, z),
+                vector["result"].as_bool().unwrap()
+            );
+        }
+        for vector in row_array(row, "regions") {
+            let (x, z) = query(vector);
+            assert_eq!(
+                border.contains_region(x, z),
+                vector["result"].as_bool().unwrap()
+            );
+        }
+        for vector in row_array(row, "count_chunks") {
+            let (x, z) = query(vector);
+            assert_eq!(
+                visibility::VisibilityLimit::new(vec![visibility::VisibilityShape::WorldBorder(
+                    border
+                )])
+                .unwrap()
+                .count_chunks_in_region(x, z)
+                .unwrap(),
+                vector["result"].as_u64().unwrap() as u16
+            );
+        }
     }
 }
 
 #[test]
 fn java_degenerate_polygon_rows_are_java_accepted_but_rust_rejects() {
     for row in row_array(&fixture()["visibility"], "degenerate") {
-        let params: Vec<i32> = row_array(row, "params").iter().map(|v| v.as_i64().unwrap() as i32).collect();
+        let params: Vec<i32> = row_array(row, "params")
+            .iter()
+            .map(|v| v.as_i64().unwrap() as i32)
+            .collect();
         assert_eq!(
             visibility::Polygon::new(params.chunks_exact(2).map(|p| (p[0], p[1])).collect()),
             Err(visibility::VisibilityError::InvalidPolygon)
@@ -195,19 +296,45 @@ fn visibility_validation_and_wire_contract() {
         }
         let case = row["case"].as_str().unwrap_or("runtime_required");
         let result = match (kind, case) {
-            ("rectangle", _) => visibility::Rectangle::new(1, 1, 1, 2).map(visibility::VisibilityShape::Rectangle),
-            ("circle", _) => visibility::Circle::new(0, 0, 0).map(visibility::VisibilityShape::Circle),
-            ("polygon", _) => visibility::Polygon::new(vec![(0, 0), (1, 1)]).map(visibility::VisibilityShape::Polygon),
+            ("rectangle", _) => {
+                visibility::Rectangle::new(1, 1, 1, 2).map(visibility::VisibilityShape::Rectangle)
+            }
+            ("circle", _) => {
+                visibility::Circle::new(0, 0, 0).map(visibility::VisibilityShape::Circle)
+            }
+            ("polygon", _) => visibility::Polygon::new(vec![(0, 0), (1, 1)])
+                .map(visibility::VisibilityShape::Polygon),
             ("world_border", "runtime_required") => {
-                let wire = Wire { kind: VisibilityLimitKind::WorldBorder as i32, ..Wire::default() };
-                visibility::VisibilityLimit::from_wire(&[wire], None).map(|_| visibility::VisibilityShape::Rectangle(visibility::Rectangle::new(0, 0, 1, 1).unwrap()))
-            },
+                let wire = Wire {
+                    kind: VisibilityLimitKind::WorldBorder as i32,
+                    ..Wire::default()
+                };
+                visibility::VisibilityLimit::from_wire(&[wire], None).map(|_| {
+                    visibility::VisibilityShape::Rectangle(
+                        visibility::Rectangle::new(0, 0, 1, 1).unwrap(),
+                    )
+                })
+            }
             ("world_border", "wire_extra_fields") => {
-                let wire = Wire { kind: VisibilityLimitKind::WorldBorder as i32, points: vec![Point { x: 1, z: 1 }], ..Wire::default() };
-                visibility::VisibilityLimit::from_wire(&[wire], None).map(|_| visibility::VisibilityShape::Rectangle(visibility::Rectangle::new(0, 0, 1, 1).unwrap()))
-            },
-            ("world_border", "runtime_overflow") => visibility::WorldBorderSnapshot::new(i32::MAX, 0, 1).map(visibility::VisibilityShape::WorldBorder),
-            ("world_border", "runtime_nan") => visibility::WorldBorderSnapshot::from_runtime(f64::NAN, 0.0, 1.0).map(visibility::VisibilityShape::WorldBorder),
+                let wire = Wire {
+                    kind: VisibilityLimitKind::WorldBorder as i32,
+                    points: vec![Point { x: 1, z: 1 }],
+                    ..Wire::default()
+                };
+                visibility::VisibilityLimit::from_wire(&[wire], None).map(|_| {
+                    visibility::VisibilityShape::Rectangle(
+                        visibility::Rectangle::new(0, 0, 1, 1).unwrap(),
+                    )
+                })
+            }
+            ("world_border", "runtime_overflow") => {
+                visibility::WorldBorderSnapshot::new(i32::MAX, 0, 1)
+                    .map(visibility::VisibilityShape::WorldBorder)
+            }
+            ("world_border", "runtime_nan") => {
+                visibility::WorldBorderSnapshot::from_runtime(f64::NAN, 0.0, 1.0)
+                    .map(visibility::VisibilityShape::WorldBorder)
+            }
             other => panic!("unknown invalid shape {other:?}"),
         };
         let expected = match row["rust_error"].as_str().unwrap() {
@@ -221,10 +348,24 @@ fn visibility_validation_and_wire_contract() {
         };
         assert_eq!(result.unwrap_err(), expected);
     }
-    let malformed_border = Wire { kind: VisibilityLimitKind::WorldBorder as i32, points: vec![Point { x: 1, z: 1 }], ..Wire::default() };
-    assert_eq!(visibility::VisibilityLimit::from_wire(&[malformed_border], None).unwrap_err(), visibility::VisibilityError::InvalidWorldBorder);
-    let circle = Wire { kind: VisibilityLimitKind::Circle as i32, radius: 12.5, ..Wire::default() };
-    assert_eq!(visibility::VisibilityLimit::from_wire(&[circle], None).unwrap_err(), visibility::VisibilityError::InvalidCircle);
+    let malformed_border = Wire {
+        kind: VisibilityLimitKind::WorldBorder as i32,
+        points: vec![Point { x: 1, z: 1 }],
+        ..Wire::default()
+    };
+    assert_eq!(
+        visibility::VisibilityLimit::from_wire(&[malformed_border], None).unwrap_err(),
+        visibility::VisibilityError::InvalidWorldBorder
+    );
+    let circle = Wire {
+        kind: VisibilityLimitKind::Circle as i32,
+        radius: 12.5,
+        ..Wire::default()
+    };
+    assert_eq!(
+        visibility::VisibilityLimit::from_wire(&[circle], None).unwrap_err(),
+        visibility::VisibilityError::InvalidCircle
+    );
 }
 
 #[test]
@@ -238,32 +379,74 @@ fn every_color_fixture_vector_matches() {
             "abgr_to_argb" => color::abgr_to_argb(i32v(object, "input") as u32),
             "argb_to_rgba" => color::argb_to_rgba(i32v(object, "input") as u32),
             "rgba_to_argb" => color::rgba_to_argb(i32v(object, "input") as u32),
-            "mix" => color::mix(hex(object["c1"].as_str().unwrap()), hex(object["c2"].as_str().unwrap()), f32::from_bits(i32v(object, "ratio_bits") as u32)).unwrap(),
-            "shade_level" => color::shade_level(i32v(object, "color") as u32, i32v(object, "level") as u8).unwrap(),
-            "shade_factor" => color::shade_factor(i32v(object, "color") as u32, f32::from_bits(i32v(object, "factor_bits") as u32)).unwrap(),
-            "checkerboard_parity" => color::checkerboard_parity(i32v(object, "x"), i32v(object, "z")) as u32,
-            "terrain" => color::terrain(i32v(object, "current"), i32v(object, "previous"), i32v(object, "color") as u32, i32v(object, "odd") != 0),
-            "depth_checkerboard" => color::depth_checkerboard(i32v(object, "depth") as u8, i32v(object, "color") as u32, i32v(object, "odd") != 0),
-            "glass" => color::glass_composite(i32v(object, "under") as u32, i32v(object, "glass") as u32, f32::from_bits(i32v(object, "alpha_bits") as u32)).unwrap(),
-            "average_argb" => color::average_argb(&row_array(row, "values").iter().map(|v| v.as_i64().unwrap() as u32).collect::<Vec<_>>()).unwrap(),
+            "mix" => color::mix(
+                hex(object["c1"].as_str().unwrap()),
+                hex(object["c2"].as_str().unwrap()),
+                f32::from_bits(i32v(object, "ratio_bits") as u32),
+            )
+            .unwrap(),
+            "shade_level" => {
+                color::shade_level(i32v(object, "color") as u32, i32v(object, "level") as u8)
+                    .unwrap()
+            }
+            "shade_factor" => color::shade_factor(
+                i32v(object, "color") as u32,
+                f32::from_bits(i32v(object, "factor_bits") as u32),
+            )
+            .unwrap(),
+            "checkerboard_parity" => {
+                color::checkerboard_parity(i32v(object, "x"), i32v(object, "z")) as u32
+            }
+            "terrain" => color::terrain(
+                i32v(object, "current"),
+                i32v(object, "previous"),
+                i32v(object, "color") as u32,
+                i32v(object, "odd") != 0,
+            ),
+            "depth_checkerboard" => color::depth_checkerboard(
+                i32v(object, "depth") as u8,
+                i32v(object, "color") as u32,
+                i32v(object, "odd") != 0,
+            ),
+            "glass" => color::glass_composite(
+                i32v(object, "under") as u32,
+                i32v(object, "glass") as u32,
+                f32::from_bits(i32v(object, "alpha_bits") as u32),
+            )
+            .unwrap(),
+            "average_argb" => color::average_argb(
+                &row_array(row, "values")
+                    .iter()
+                    .map(|v| v.as_i64().unwrap() as u32)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap(),
             "water_biome_blend" => {
                 let values = row_array(row, "values");
                 let base = values[0].as_i64().unwrap() as u32;
-                let samples: Vec<u32> = values[1..].iter().map(|v| v.as_i64().unwrap() as u32).collect();
+                let samples: Vec<u32> = values[1..]
+                    .iter()
+                    .map(|v| v.as_i64().unwrap() as u32)
+                    .collect();
                 color::water_biome_blend(base, &samples).unwrap()
-            },
+            }
             "fluid" => color::compose_fluid(
                 i32v(object, "depth") as u8,
                 i32v(object, "color") as u32,
                 i32v(object, "under") as u32,
-                if boolv(object, "water") { color::FluidKind::Water } else { color::FluidKind::Lava },
+                if boolv(object, "water") {
+                    color::FluidKind::Water
+                } else {
+                    color::FluidKind::Lava
+                },
                 i32v(object, "odd") != 0,
                 color::FluidFlags {
                     water_checkerboard: boolv(object, "water_checker"),
                     water_clear: boolv(object, "water_clear"),
                     lava_checkerboard: boolv(object, "lava_checker"),
                 },
-            ).unwrap(),
+            )
+            .unwrap(),
             other => panic!("unhandled color fixture operation {other}"),
         };
         let expected = if op == "checkerboard_parity" {
@@ -277,11 +460,19 @@ fn every_color_fixture_vector_matches() {
         let object = row.as_object().unwrap();
         let op = object["op"].as_str().unwrap();
         if op == "average_empty" {
-            let java_exception = object["java_exception"].as_str().expect("recorded Java exception");
+            let java_exception = object["java_exception"]
+                .as_str()
+                .expect("recorded Java exception");
             assert!(!java_exception.is_empty());
-            assert!(java_exception.chars().all(|character| character.is_ascii_alphanumeric()));
+            assert!(
+                java_exception
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric())
+            );
         } else {
-            let java_result = object["java_result"].as_str().expect("recorded Java color result");
+            let java_result = object["java_result"]
+                .as_str()
+                .expect("recorded Java color result");
             assert_eq!(java_result.len(), 10);
             let _ = hex(java_result);
         }
@@ -292,7 +483,10 @@ fn every_color_fixture_vector_matches() {
             "shade_nan" => color::shade_factor(0, f32::NAN).map(|_| ()),
             "shade_out_of_range" => color::shade_factor(0, 1.1).map(|_| ()),
             "average_empty" => color::average_argb(&[]).map(|_| ()),
-            "fluid_depth_zero" => color::compose_fluid(0, 0, 0, color::FluidKind::Water, false, Default::default()).map(|_| ()),
+            "fluid_depth_zero" => {
+                color::compose_fluid(0, 0, 0, color::FluidKind::Water, false, Default::default())
+                    .map(|_| ())
+            }
             other => panic!("unhandled invalid color operation {other}"),
         };
         let expected = match object["rust_error"].as_str().unwrap() {
@@ -310,7 +504,11 @@ fn every_color_fixture_vector_matches() {
 fn every_fluid_classification_fixture_vector_matches() {
     for row in row_array(&fixture(), "fluid_classification") {
         let color_value = row["color"].as_i64().unwrap() as u32;
-        let actual = color::classify_unknown_fluid(color_value, row["native_water"].as_bool().unwrap(), row["native_lava"].as_bool().unwrap());
+        let actual = color::classify_unknown_fluid(
+            color_value,
+            row["native_water"].as_bool().unwrap(),
+            row["native_lava"].as_bool().unwrap(),
+        );
         let expected = match row["result"].as_str().unwrap() {
             "water" => color::FluidKind::Water,
             "lava" => color::FluidKind::Lava,
@@ -323,19 +521,28 @@ fn every_fluid_classification_fixture_vector_matches() {
 #[test]
 fn render_boundary_invariants() {
     let border = visibility::WorldBorderSnapshot::from_runtime(16.9, -16.9, 32.0).unwrap();
-    assert_eq!((border.center_x(), border.center_z(), border.radius()), (16, -16, 16));
+    assert_eq!(
+        (border.center_x(), border.center_z(), border.radius()),
+        (16, -16, 16)
+    );
     assert!(border.contains_block(0, -1));
     assert!(!border.contains_block(-1, -1));
-    let border_limit = visibility::VisibilityLimit::new(vec![visibility::VisibilityShape::WorldBorder(visibility::WorldBorderSnapshot::new(0, 0, 16).unwrap())]).unwrap();
+    let border_limit =
+        visibility::VisibilityLimit::new(vec![visibility::VisibilityShape::WorldBorder(
+            visibility::WorldBorderSnapshot::new(0, 0, 16).unwrap(),
+        )])
+        .unwrap();
     assert_eq!(border_limit.count_chunks_in_region(0, 0).unwrap(), 4);
     assert!(visibility::Circle::new(0, 0, 46_340).is_ok());
-    assert_eq!(visibility::Circle::new(0, 0, 46_341), Err(visibility::VisibilityError::InvalidCircle));
+    assert_eq!(
+        visibility::Circle::new(0, 0, 46_341),
+        Err(visibility::VisibilityError::InvalidCircle)
+    );
     assert_eq!(
         visibility::Polygon::new(vec![(i32::MIN, 0), (i32::MAX, 0), (0, 1)]),
         Err(visibility::VisibilityError::InvalidPolygon)
     );
 }
-
 
 proptest! {
     #[test]
@@ -528,16 +735,37 @@ fn floor_coordinate_extremes_fit_half_open_i64_bounds() {
 #[test]
 fn accumulation_overflow_is_named_error() {
     let colors = vec![u32::MAX; (i32::MAX as usize / 255) + 1];
-    assert_eq!(color::average_argb(&colors), Err(color::ColorError::AccumulationOverflow));
+    assert_eq!(
+        color::average_argb(&colors),
+        Err(color::ColorError::AccumulationOverflow)
+    );
 }
 
 #[test]
 fn malformed_named_errors_remain_typed() {
-    assert_eq!(coordinates::region_to_block(i32::MAX), Err(coordinates::CoordinateError::Overflow));
-    assert_eq!(coordinates::tile_for_region(0, 0, 10, 10), Err(coordinates::CoordinateError::InvalidZoom));
-    assert_eq!(color::shade_level(0, 3), Err(color::ColorError::InvalidShade));
-    assert_eq!(color::shade_factor(0x12345678, 1.1), Err(color::ColorError::OutOfRangeFactor));
+    assert_eq!(
+        coordinates::region_to_block(i32::MAX),
+        Err(coordinates::CoordinateError::Overflow)
+    );
+    assert_eq!(
+        coordinates::tile_for_region(0, 0, 10, 10),
+        Err(coordinates::CoordinateError::InvalidZoom)
+    );
+    assert_eq!(
+        color::shade_level(0, 3),
+        Err(color::ColorError::InvalidShade)
+    );
+    assert_eq!(
+        color::shade_factor(0x12345678, 1.1),
+        Err(color::ColorError::OutOfRangeFactor)
+    );
     assert_eq!(color::average_argb(&[]), Err(color::ColorError::EmptyBlend));
-    assert_eq!(visibility::WorldBorderSnapshot::from_runtime(f64::NAN, 0.0, 1.0), Err(visibility::VisibilityError::QueryOverflow));
-    assert_eq!(visibility::WorldBorderSnapshot::from_runtime(0.0, 0.0, -1.0), Err(visibility::VisibilityError::QueryOverflow));
+    assert_eq!(
+        visibility::WorldBorderSnapshot::from_runtime(f64::NAN, 0.0, 1.0),
+        Err(visibility::VisibilityError::QueryOverflow)
+    );
+    assert_eq!(
+        visibility::WorldBorderSnapshot::from_runtime(0.0, 0.0, -1.0),
+        Err(visibility::VisibilityError::QueryOverflow)
+    );
 }

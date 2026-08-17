@@ -133,58 +133,32 @@ static CORPUS: LazyLock<Vec<PreparedCase>> = LazyLock::new(|| {
 // ---------------------------------------------------------------------------
 
 fn bench_render_v2_corpus(c: &mut Criterion) {
-    // Force load + predecode outside any warm-up or measurement.
     let cases: &[PreparedCase] = &*CORPUS;
     assert_eq!(
         cases.len(),
         26,
         "benchmark denominator is exactly 26 valid cases"
     );
-
     let mut group = c.benchmark_group("chunk_render/v2");
     group.throughput(Throughput::Elements(26));
     group.bench_function("strict-corpus", |b| {
         b.iter_custom(|iters| {
-            // Reset counters *before* the clock starts: only allocations made
-            // inside the timed render loop are attributed.
             CountingAllocator::reset();
             let start = Instant::now();
             for _ in 0..iters {
                 for case in cases {
-                    let output = fixtures::render_case(case)
-                        .unwrap_or_else(|error| panic!("{}: {error:?}", case.row.id));
+                    let output = fixtures::render_case(case).unwrap_or_else(|error| panic!("{}: {error:?}", case.row.id));
                     black_box(output);
                 }
             }
-            // Capture elapsed *before* reading counters: counter reads must
-            // never appear in the timed section.
             let elapsed = start.elapsed();
             let counters = CountingAllocator::snapshot();
-
-            let rendered = iters * 26; // exact denominator: 26 cases per iteration
+            let rendered = iters * 26;
             let secs = elapsed.as_secs_f64();
             let chunks_per_sec = rendered as f64 / secs;
-            let allocation_events = counters.alloc_events
-                + counters.realloc_events
-                + counters.alloc_zeroed_events;
-            let requested_bytes = counters.alloc_bytes
-                + counters.realloc_bytes
-                + counters.alloc_zeroed_bytes;
-            eprintln!(
-                "chunk_render/v2: render_denominator=26 samples={rendered} chunks/s={chunks_per_sec:.1} \
-                 allocation_events/chunk={:.3} requested_bytes/chunk={:.1} \
-                 alloc_events/chunk={:.3} alloc_bytes/chunk={:.1} \
-                 realloc_events/chunk={:.3} realloc_bytes/chunk={:.1} \
-                 alloc_zeroed_events/chunk={:.3} alloc_zeroed_bytes/chunk={:.1}",
-                allocation_events as f64 / rendered as f64,
-                requested_bytes as f64 / rendered as f64,
-                counters.alloc_events as f64 / rendered as f64,
-                counters.alloc_bytes as f64 / rendered as f64,
-                counters.realloc_events as f64 / rendered as f64,
-                counters.realloc_bytes as f64 / rendered as f64,
-                counters.alloc_zeroed_events as f64 / rendered as f64,
-                counters.alloc_zeroed_bytes as f64 / rendered as f64,
-            );
+            let allocation_events = counters.alloc_events + counters.realloc_events + counters.alloc_zeroed_events;
+            let requested_bytes = counters.alloc_bytes + counters.realloc_bytes + counters.alloc_zeroed_bytes;
+            eprintln!("chunk_render/v2: render_denominator=26 samples={rendered} chunks/s={chunks_per_sec:.1} allocation_events/chunk={:.3} requested_bytes/chunk={:.1}", allocation_events as f64 / rendered as f64, requested_bytes as f64 / rendered as f64);
             elapsed
         })
     });

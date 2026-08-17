@@ -131,6 +131,7 @@ pub struct MalformedRow {
     pub classifier: String,
 }
 
+#[allow(dead_code)]
 pub struct PreparedCase {
     pub row: ValidRow,
     pub context: RenderContext,
@@ -142,6 +143,7 @@ pub struct PreparedCase {
     pub expected_edge: [i32; 16],
 }
 
+#[allow(dead_code)]
 pub struct FixtureCorpus {
     pub root: PathBuf,
     pub manifest: Manifest,
@@ -707,6 +709,7 @@ impl FixtureCorpus {
     }
 }
 
+#[allow(dead_code)]
 pub fn malformed_error(
     row: &MalformedRow,
     corpus: &FixtureCorpus,

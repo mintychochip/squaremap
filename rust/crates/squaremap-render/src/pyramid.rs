@@ -19,6 +19,10 @@ pub struct TileWarning {
     pub message: String,
 }
 
+#[derive(Clone)]
+pub struct StagedRegion {
+    tiles: Vec<(PathBuf, Vec<u8>)>,
+}
 pub struct TilePyramid {
     store: Arc<dyn TileStore>,
     max_zoom: u8,
@@ -59,6 +63,100 @@ impl TilePyramid {
         region: RegionCoord,
         pixels: &RegionPixels,
     ) -> Result<ApplyResult, TileError> {
+        self.apply_region_with_publish(region, pixels, true).await
+    }
+
+    pub async fn stage_region(
+        &self,
+        region: RegionCoord,
+        pixels: &RegionPixels,
+    ) -> Result<StagedRegion, TileError> {
+        let mut tiles = Vec::new();
+        for zoom in 0..=self.max_zoom {
+            let coordinate = tile_for_region(region.x, region.z, zoom, self.max_zoom)
+                .map_err(|_| TileError::InvalidZoom(zoom))?;
+            let (origin_x, origin_z) =
+                tile_origin(region.x, region.z, zoom).map_err(|_| TileError::InvalidZoom(zoom))?;
+            let path = PathBuf::from(format!(
+                "{}/{}_{}.png",
+                coordinate.level, coordinate.x, coordinate.z
+            ));
+            let bytes = self
+                .encode_one(
+                    &path,
+                    pixels,
+                    zoom,
+                    usize::from(origin_x),
+                    usize::from(origin_z),
+                )
+                .await?;
+            tiles.push((path, bytes));
+        }
+        Ok(StagedRegion { tiles })
+    }
+
+    pub async fn publish_staged(&self, staged: StagedRegion) -> Result<ApplyResult, TileError> {
+        let mut result = ApplyResult::default();
+        for (path, bytes) in staged.tiles {
+            let registration = self.register_lock(&path);
+            let _guard = registration.lock.clone().lock_owned().await;
+            let warning = self
+                .store
+                .publish(&path, &bytes)
+                .await
+                .map(|published| published.warning)
+                .map_err(|error| TileError::Publish {
+                    path: path.clone(),
+                    message: error.message,
+                })?;
+            result.changed_paths.push(path.clone());
+            if let Some(message) = warning {
+                result.warnings.push(TileWarning { path, message });
+            }
+        }
+        Ok(result)
+    }
+    async fn encode_one(
+        &self,
+        path: &Path,
+        pixels: &RegionPixels,
+        zoom: u8,
+        origin_x: usize,
+        origin_z: usize,
+    ) -> Result<Vec<u8>, TileError> {
+        let existing = self
+            .store
+            .read(path)
+            .await
+            .map_err(|error| TileError::Store {
+                path: path.to_owned(),
+                message: error.message,
+            })?;
+        let mut rgba = match existing {
+            Some(encoded) => decode_for_path(path, &encoded)?,
+            None => vec![0_u8; TILE_RGBA_BYTES],
+        };
+        let step = 1_usize << zoom;
+        for x in (0..TILE_SIZE).step_by(step) {
+            for z in (0..TILE_SIZE).step_by(step) {
+                let Some(color) = pixels.sample(x, z) else {
+                    continue;
+                };
+                let offset = ((origin_z + z / step) * TILE_SIZE + origin_x + x / step) * 4;
+                rgba[offset..offset + 4].copy_from_slice(&color);
+            }
+        }
+        encode_rgba_png(&rgba, self.png_options).map_err(|error| TileError::Encode {
+            path: path.to_owned(),
+            message: error.to_string(),
+        })
+    }
+    async fn apply_region_with_publish(
+        &self,
+        region: RegionCoord,
+        pixels: &RegionPixels,
+        publish: bool,
+    ) -> Result<ApplyResult, TileError> {
         let mut result = ApplyResult::default();
         for zoom in 0..=self.max_zoom {
             let coordinate = tile_for_region(region.x, region.z, zoom, self.max_zoom)
@@ -72,14 +170,25 @@ impl TilePyramid {
             let tile_result = {
                 let registration = self.register_lock(&path);
                 let _guard = registration.lock.clone().lock_owned().await;
-                self.apply_one(
-                    &path,
-                    pixels,
-                    zoom,
-                    usize::from(origin_x),
-                    usize::from(origin_z),
-                )
-                .await
+                if publish {
+                    self.apply_one(
+                        &path,
+                        pixels,
+                        zoom,
+                        usize::from(origin_x),
+                        usize::from(origin_z),
+                    )
+                    .await
+                } else {
+                    self.apply_one(
+                        &path,
+                        pixels,
+                        zoom,
+                        usize::from(origin_x),
+                        usize::from(origin_z),
+                    )
+                    .await
+                }
             };
             let warning = tile_result?;
             result.changed_paths.push(path.clone());
@@ -141,7 +250,6 @@ impl TilePyramid {
                 message: error.message,
             })
     }
-
     fn register_lock(&self, path: &Path) -> LockRegistration<'_> {
         let mut locks = lock_unpoisoned(&self.locks);
         let entry = locks.entry(path.to_owned()).or_insert_with(|| LockEntry {

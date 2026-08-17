@@ -1,16 +1,16 @@
+use async_trait::async_trait;
 use squaremap_render::coordinates::RegionCoord;
 use squaremap_render::{
     MemoryTileStore, PngOptions, PublishResult, RegionPixels, TileError, TilePyramid, TileStore,
     TileStoreError, decode_rgba_png, encode_rgba_png,
 };
-use async_trait::async_trait;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::Notify;
-use std::pin::Pin;
 use std::task::{Context, Poll};
+use tokio::sync::Notify;
 
 const SIZE: usize = 512;
 const RGBA_BYTES: usize = SIZE * SIZE * 4;
@@ -236,10 +236,9 @@ async fn cancellation_while_waiting_reclaims_the_destination_lock() {
     };
     store.read_started.notified().await;
     CancelAfterPending {
-        future: Box::pin(pyramid.apply_region(
-            RegionCoord { x: 0, z: 0 },
-            &solid(rgba(22, 0, 0, 255)),
-        )),
+        future: Box::pin(
+            pyramid.apply_region(RegionCoord { x: 0, z: 0 }, &solid(rgba(22, 0, 0, 255))),
+        ),
     }
     .await;
     assert_eq!(pyramid.live_lock_count(), 1);

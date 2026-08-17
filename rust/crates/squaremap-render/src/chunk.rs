@@ -386,11 +386,17 @@ fn is_air(ctx: &RenderContext, id: u32) -> bool {
 }
 fn is_invisible(ctx: &RenderContext, id: u32) -> bool {
     ctx.invisible_ids.binary_search(&id).is_ok()
-        || ctx.generation.block(id).is_some_and(|descriptor| descriptor.transparency == 3)
+        || ctx
+            .generation
+            .block(id)
+            .is_some_and(|descriptor| descriptor.transparency == 3)
 }
 fn is_iterate_up_base(ctx: &RenderContext, id: u32) -> bool {
     ctx.iterate_up_base_ids.binary_search(&id).is_ok()
-        || ctx.generation.block(id).is_some_and(|descriptor| descriptor.iterate_up_base)
+        || ctx
+            .generation
+            .block(id)
+            .is_some_and(|descriptor| descriptor.iterate_up_base)
 }
 fn fluid_kind(ctx: &RenderContext, id: u32, color: u32) -> Option<color::FluidKind> {
     ctx.generation.block(id).and_then(|d| match d.fluid {

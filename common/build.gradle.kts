@@ -35,6 +35,7 @@ tasks.test {
   useJUnitPlatform()
   systemProperty("squaremap.task11.root", rootProject.projectDir.absolutePath)
   providers.systemProperty("squaremap.regenerate").orNull?.let { systemProperty("squaremap.regenerate", it) }
+  providers.systemProperty("squaremap.renderBenchmark").orNull?.let { systemProperty("squaremap.renderBenchmark", it) }
 }
 
 configurations.testCompileClasspath {
