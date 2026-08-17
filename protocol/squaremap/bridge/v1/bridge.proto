@@ -16,6 +16,7 @@ message Envelope {
     HelloAck hello_ack = 11;
     Ready ready = 12;
     Heartbeat heartbeat = 13;
+    BridgeIdentityReplace bridge_identity_replace = 23;
     Ack ack = 14;
     ProtocolError protocol_error = 15;
     Shutdown shutdown = 16;
@@ -30,6 +31,15 @@ message Envelope {
     IconsReplace icons_replace = 42;
     ChunkDirty chunk_dirty = 50;
     WorldResyncRequired world_resync_required = 51;
+    // 55-58 are append-only dirty-resync payloads; existing tags remain stable.
+    ResumeWatermark resume_watermark = 55;
+    DirtyReplayRequest dirty_replay_request = 56;
+    DirtyReplayItem dirty_replay_item = 57;
+    DirtyResyncComplete dirty_resync_complete = 58;
+    // 71-73 are append-only authoritative full-render enumeration payloads.
+    WorldEnumerationRequest world_enumeration_request = 71;
+    WorldEnumerationItem world_enumeration_item = 72;
+    WorldEnumerationComplete world_enumeration_complete = 73;
     ChunkSnapshotRequest chunk_snapshot_request = 52;
     ChunkSnapshot chunk_snapshot = 53;
     ChunkMissing chunk_missing = 54;
@@ -53,6 +63,12 @@ message HelloAck {
   string backend_version = 3;
   bool accepted = 4;
   string rejection_reason = 5;
+}
+// BridgeIdentityReplace negotiates the stable durable bridge identity.
+// The identity is persisted by the bridge owner and MUST remain unchanged
+// across reconnects. A zero or missing identity is invalid for dirty recovery.
+message BridgeIdentityReplace {
+  bytes bridge_id = 1;
 }
 
 message Ready {
@@ -106,6 +122,112 @@ enum ShutdownReason {
 message Shutdown {
   ShutdownReason reason = 1;
   string message = 2;
+}
+// ResumeWatermark is emitted after a fresh authenticated session is ready.
+// bridge_id is stable across reconnects; session_id is the current authenticated
+// connection. Existing legacy checkpoints keyed only by session_id MUST NOT be
+// assigned an inferred bridge_id; they require an explicit migration or legacy
+// lookup before fresh-session replay is allowed.
+message ResumeWatermark {
+  bytes session_id = 1;
+  uint64 config_revision = 2;
+  uint64 last_durable_sequence = 3;
+  bytes bridge_id = 4;
+}
+
+// ReplayStart is the first-page cursor. It carries no state; the page begins
+// at the first owned dirty row for the world.
+message ReplayStart {}
+
+// DirtyReplayRequest asks for current durable dirty work for one world epoch.
+// bridge_id identifies the durable stream across reconnects; session_id identifies
+// the current authenticated connection. replay_id is unique within that stream.
+// max_items is negotiated and bounded by the receiver; it MUST NOT exceed 1024.
+// The cursor is a keyset over (x, z) and is never an OFFSET.
+message DirtyReplayRequest {
+  bytes session_id = 1;
+  uint64 config_revision = 2;
+  uint64 replay_id = 3;
+  WorldIdentity world = 4;
+  uint32 max_items = 5;
+  bytes bridge_id = 6;
+  oneof cursor {
+    ReplayStart start = 7;
+    ChunkCoordinate continuation = 8;
+  }
+}
+// DirtyReplayItem is one durable dirty row. Replay items are contiguous and
+// ordered from item_index 0; duplicate or out-of-order items are rejected.
+message DirtyReplayItem {
+  bytes session_id = 1;
+  uint64 config_revision = 2;
+  uint64 replay_id = 3;
+  uint32 item_index = 4;
+  WorldIdentity world = 5;
+  ChunkCoordinate coordinate = 6;
+  uint64 revision = 7;
+  bytes bridge_id = 8;
+}
+
+enum DirtyResyncStatus {
+  DIRTY_RESYNC_STATUS_UNSPECIFIED = 0;
+  DIRTY_RESYNC_STATUS_COMPLETE = 1;
+  DIRTY_RESYNC_STATUS_FAILED = 2;
+}
+
+// DirtyResyncComplete terminates one replay page. COMPLETE means all items through
+// item_count were accepted. has_more and last_coordinate are set when additional
+// pages remain; the next request must use last_coordinate as the keyset cursor.
+message DirtyResyncComplete {
+  bytes session_id = 1;
+  uint64 config_revision = 2;
+  uint64 replay_id = 3;
+  uint32 item_count = 4;
+  DirtyResyncStatus status = 5;
+  string failure_reason = 6;
+  bytes bridge_id = 7;
+  bool has_more = 8;
+  ChunkCoordinate last_coordinate = 9;
+}
+
+// WorldEnumerationRequest asks the authoritative bridge owner for one bounded
+// page of full-render chunk coordinates for a world epoch.
+message WorldEnumerationRequest {
+  bytes session_id = 1;
+  uint64 config_revision = 2;
+  uint64 enumeration_id = 3;
+  WorldIdentity world = 4;
+  uint32 max_items = 5;
+  bytes bridge_id = 6;
+  uint32 page_index = 7;
+}
+// WorldEnumerationItem is an ordered, contiguous authoritative coordinate.
+message WorldEnumerationItem {
+  bytes session_id = 1;
+  uint64 config_revision = 2;
+  uint64 enumeration_id = 3;
+  uint32 item_index = 4;
+  WorldIdentity world = 5;
+  ChunkCoordinate coordinate = 6;
+  bytes bridge_id = 7;
+  uint32 page_index = 8;
+}
+enum WorldEnumerationStatus {
+  WORLD_ENUMERATION_STATUS_UNSPECIFIED = 0;
+  WORLD_ENUMERATION_STATUS_COMPLETE = 1;
+  WORLD_ENUMERATION_STATUS_FAILED = 2;
+}
+// WorldEnumerationComplete terminates one enumeration page.
+message WorldEnumerationComplete {
+  bytes session_id = 1;
+  uint64 config_revision = 2;
+  uint64 enumeration_id = 3;
+  uint32 item_count = 4;
+  WorldEnumerationStatus status = 5;
+  string failure_reason = 6;
+  bytes bridge_id = 7;
+  uint32 page_index = 8;
+  bool has_more = 9;
 }
 
 message ConfigReplace {

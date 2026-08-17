@@ -120,3 +120,16 @@ fn exposes_complete_typed_state_contract() {
     assert_i32(point.x);
     assert_i32(VisibilityLimit::default().center_x);
 }
+
+#[test]
+fn world_enumeration_page_fields_round_trip() {
+    use squaremap_protocol::wire::{WorldEnumerationComplete, WorldEnumerationItem, WorldEnumerationRequest, WorldEnumerationStatus};
+    let request = WorldEnumerationRequest { page_index: 7, max_items: 1024, enumeration_id: 9, ..Default::default() };
+    let item = WorldEnumerationItem { page_index: 7, item_index: 1023, ..Default::default() };
+    let complete = WorldEnumerationComplete { page_index: 7, has_more: true, status: WorldEnumerationStatus::Complete as i32, ..Default::default() };
+    assert_eq!(WorldEnumerationRequest::decode(request.encode_to_vec().as_slice()).unwrap().page_index, 7);
+    assert_eq!(WorldEnumerationItem::decode(item.encode_to_vec().as_slice()).unwrap().item_index, 1023);
+    let decoded = WorldEnumerationComplete::decode(complete.encode_to_vec().as_slice()).unwrap();
+    assert!(decoded.has_more);
+    assert_eq!(decoded.status, WorldEnumerationStatus::Complete as i32);
+}

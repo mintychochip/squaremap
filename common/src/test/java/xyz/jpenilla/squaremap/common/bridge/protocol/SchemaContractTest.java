@@ -40,6 +40,11 @@ import xyz.jpenilla.squaremap.bridge.v1.World;
 import xyz.jpenilla.squaremap.bridge.v1.WorldIdentity;
 import xyz.jpenilla.squaremap.bridge.v1.WorldSettings;
 import xyz.jpenilla.squaremap.bridge.v1.ZoomSettings;
+import xyz.jpenilla.squaremap.bridge.v1.DirtyReplayItem;
+import xyz.jpenilla.squaremap.bridge.v1.DirtyReplayRequest;
+import xyz.jpenilla.squaremap.bridge.v1.DirtyResyncComplete;
+import xyz.jpenilla.squaremap.bridge.v1.DirtyResyncStatus;
+import xyz.jpenilla.squaremap.bridge.v1.ResumeWatermark;
 
 class SchemaContractTest {
     @Test
@@ -128,5 +133,45 @@ class SchemaContractTest {
         assertTrue(polyline.hasPolyline());
         assertTrue(polygon.hasPolygon());
         assertTrue(multipolygon.hasMultiPolygon());
+    }
+    @Test
+    void exposesDirtyResyncWatermarkReplayAndCompletionMessages() {
+        final ByteString bridge = ByteString.copyFrom(new byte[16]);
+        final ByteString session = ByteString.copyFrom(new byte[16]);
+        final ResumeWatermark watermark = ResumeWatermark.newBuilder()
+            .setBridgeId(bridge).setSessionId(session).setConfigRevision(7).setLastDurableSequence(19).build();
+        final DirtyReplayRequest request = DirtyReplayRequest.newBuilder()
+            .setBridgeId(bridge).setSessionId(session).setConfigRevision(7).setReplayId(3)
+            .setWorld(WorldIdentity.newBuilder().setNamespace("minecraft").setValue("overworld").setEpoch(4))
+            .setMaxItems(64).build();
+        final DirtyReplayItem item = DirtyReplayItem.newBuilder()
+            .setBridgeId(bridge).setSessionId(session).setConfigRevision(7).setReplayId(3).setItemIndex(0)
+            .setWorld(request.getWorld()).setCoordinate(xyz.jpenilla.squaremap.bridge.v1.ChunkCoordinate.newBuilder().setX(1).setZ(2))
+            .setRevision(9).build();
+        final DirtyResyncComplete complete = DirtyResyncComplete.newBuilder()
+            .setBridgeId(bridge).setSessionId(session).setConfigRevision(7).setReplayId(3).setItemCount(1)
+            .setStatus(DirtyResyncStatus.DIRTY_RESYNC_STATUS_COMPLETE).build();
+        final Envelope replayEnvelope = Envelope.newBuilder().setDirtyReplayItem(item).build();
+        assertEquals(19, watermark.getLastDurableSequence());
+        assertEquals(bridge, request.getBridgeId());
+        assertEquals(4, request.getWorld().getEpoch());
+        assertEquals(0, item.getItemIndex());
+        assertEquals(DirtyResyncStatus.DIRTY_RESYNC_STATUS_COMPLETE, complete.getStatus());
+        assertTrue(replayEnvelope.hasDirtyReplayItem());
+    }
+    @Test
+    void preservesCompatibilityWhenBridgeIdentityIsAbsent() throws Exception {
+        final DirtyReplayRequest legacy = DirtyReplayRequest.newBuilder()
+            .setSessionId(ByteString.copyFrom(new byte[16]))
+            .setConfigRevision(7)
+            .setReplayId(3)
+            .setWorld(WorldIdentity.newBuilder().setNamespace("minecraft").setValue("overworld").setEpoch(4))
+            .setMaxItems(64)
+            .build();
+        final DirtyReplayRequest decoded = DirtyReplayRequest.parseFrom(legacy.toByteArray());
+        assertTrue(decoded.getBridgeId().isEmpty());
+        assertEquals(legacy.getSessionId(), decoded.getSessionId());
+        assertEquals(legacy.getWorld(), decoded.getWorld());
+        assertEquals(64, decoded.getMaxItems());
     }
 }
