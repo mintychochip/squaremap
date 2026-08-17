@@ -1,12 +1,17 @@
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use serde::Serialize;
-use squaremap_render::{fixture::FixtureCorpus, MemoryTileStore, PngOptions, RenderSettings};
-use squaremap_server::scheduler::{InstallRequest, RenderTileInstaller, TileInstaller, WorldRenderConfig};
+use squaremap_render::{MemoryTileStore, PngOptions, RenderSettings, fixture::FixtureCorpus};
+use squaremap_server::scheduler::{
+    InstallRequest, RenderTileInstaller, TileInstaller, WorldRenderConfig,
+};
 use squaremap_state::{ChunkCoordinate, WorldId};
 use std::{path::Path, sync::Arc, time::Instant};
 use tokio::runtime::Runtime;
 
-const CORPUS_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../testdata/bridge/v2/render");
+const CORPUS_ROOT: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../testdata/bridge/v2/render"
+);
 const WORKLOAD_THRESHOLD: f64 = 100.0;
 
 #[derive(Serialize)]
@@ -26,7 +31,11 @@ fn benchmark_backend_workload(c: &mut Criterion) {
     assert_eq!(corpus.cases.len(), 26, "fixed backend workload denominator");
     let store = Arc::new(MemoryTileStore::new());
     let installer = Arc::new(RenderTileInstaller::new(store.clone()));
-    let world = WorldId { namespace: "minecraft".into(), value: "overworld".into(), epoch: 1 };
+    let world = WorldId {
+        namespace: "minecraft".into(),
+        value: "overworld".into(),
+        epoch: 1,
+    };
     let runtime = Runtime::new().expect("runtime");
     let mut group = c.benchmark_group("backend_workload/v2");
     group.throughput(Throughput::Elements(corpus.cases.len() as u64));
@@ -60,7 +69,7 @@ fn benchmark_backend_workload(c: &mut Criterion) {
                             tile_prefix: "world".into(),
                         }).expect("configure production installer");
                         let biome_sources = case.biome_source.as_ref().map(|source| source.snapshots()).unwrap_or_default();
-                        installer.install(InstallRequest {
+                        let staged = installer.stage(InstallRequest {
                             world: world.clone(),
                             coordinate: ChunkCoordinate { x: index as i32, z: 0 },
                             revision: 1,
@@ -77,7 +86,8 @@ fn benchmark_backend_workload(c: &mut Criterion) {
                                     sample.resolved_grass_argb as u32,
                                 )).collect(),
                             },
-                        }).await.unwrap_or_else(|error| panic!("production tile installation case {}: {}", row.id, error));
+                        }).await.unwrap_or_else(|error| panic!("production tile staging case {}: {}", row.id, error));
+                        staged.publish().await.unwrap_or_else(|error| panic!("production tile publication case {}: {}", row.id, error));
                     }
                 }
             });

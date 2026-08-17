@@ -20,13 +20,24 @@ pub struct MetricsSnapshot {
 }
 
 impl Metrics {
-    pub fn set_queue_depth(&self, value: u64) { self.queue_depth.store(value, Ordering::Relaxed); }
-    pub fn observe_render_latency(&self, value: Duration) {
-        self.render_latency_nanos.store(value.as_nanos().min(u128::from(u64::MAX)) as u64, Ordering::Relaxed);
+    pub fn set_queue_depth(&self, value: u64) {
+        self.queue_depth.store(value, Ordering::Relaxed);
     }
-    pub fn inc_http_requests(&self) { self.http_requests.fetch_add(1, Ordering::Relaxed); }
-    pub fn inc_restarts(&self) { self.restarts.fetch_add(1, Ordering::Relaxed); }
-    pub fn inc_protocol_errors(&self) { self.protocol_errors.fetch_add(1, Ordering::Relaxed); }
+    pub fn observe_render_latency(&self, value: Duration) {
+        self.render_latency_nanos.store(
+            value.as_nanos().min(u128::from(u64::MAX)) as u64,
+            Ordering::Relaxed,
+        );
+    }
+    pub fn inc_http_requests(&self) {
+        self.http_requests.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_restarts(&self) {
+        self.restarts.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn inc_protocol_errors(&self) {
+        self.protocol_errors.fetch_add(1, Ordering::Relaxed);
+    }
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
             queue_depth: self.queue_depth.load(Ordering::Relaxed),

@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use squaremap_protocol::wire::ChunkMissingReason;
 use squaremap_render::{Registry, Snapshot};
 use squaremap_server::scheduler::{
     BridgeError, InstallRequest, Scheduler, SchedulerConfig, SnapshotBridge, SnapshotReply,
@@ -36,7 +37,9 @@ fn empty_snapshot(request: &SnapshotRequest) -> Arc<Snapshot> {
         ceiling: false,
         revision: request.revision,
         sections: Vec::new(),
-        surface: squaremap_render::SurfaceHeightmap { heightmap: vec![0; 256] },
+        surface: squaremap_render::SurfaceHeightmap {
+            heightmap: vec![0; 256],
+        },
         registry_generation: generation,
     })
 }
@@ -46,7 +49,7 @@ struct FakeBridge {
     requests: Mutex<Vec<SnapshotRequest>>,
     attempts: Mutex<HashMap<(String, i32, i32), usize>>,
     transient_once: Mutex<HashSet<(String, i32, i32)>>,
-    missing: Mutex<HashSet<(String, i32, i32)>>,
+    missing: Mutex<HashMap<(String, i32, i32), ChunkMissingReason>>,
     active: AtomicUsize,
     high_water: AtomicUsize,
     hold: Mutex<bool>,
@@ -56,16 +59,29 @@ struct FakeBridge {
 }
 impl FakeBridge {
     fn transient_once(&self, world: &str, x: i32, z: i32) {
-        self.transient_once.lock().unwrap().insert((world.into(), x, z));
+        self.transient_once
+            .lock()
+            .unwrap()
+            .insert((world.into(), x, z));
     }
     fn missing(&self, world: &str, x: i32, z: i32) {
-        self.missing.lock().unwrap().insert((world.into(), x, z));
+        self.missing_reason(world, x, z, ChunkMissingReason::Unloaded);
     }
-    fn hold(&self) { *self.hold.lock().unwrap() = true; }
+    fn missing_reason(&self, world: &str, x: i32, z: i32, reason: ChunkMissingReason) {
+        self.missing
+            .lock()
+            .unwrap()
+            .insert((world.into(), x, z), reason);
+    }
+    fn hold(&self) {
+        *self.hold.lock().unwrap() = true;
+    }
     async fn wait_entered(&self) {
         loop {
             let entered = !self.requests.lock().unwrap().is_empty();
-            if entered { return; }
+            if entered {
+                return;
+            }
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
     }
@@ -84,13 +100,19 @@ impl SnapshotBridge for FakeBridge {
         if *self.hold.lock().unwrap() {
             while !self.released.load(Ordering::Acquire) {
                 let notified = self.release.notified();
-                if self.released.load(Ordering::Acquire) { break; }
+                if self.released.load(Ordering::Acquire) {
+                    break;
+                }
                 notified.await;
             }
         }
         tokio::task::yield_now().await;
         self.active.fetch_sub(1, Ordering::SeqCst);
-        let key = (request.world.value.clone(), request.coordinate.x, request.coordinate.z);
+        let key = (
+            request.world.value.clone(),
+            request.coordinate.x,
+            request.coordinate.z,
+        );
         let attempt = {
             let mut attempts = self.attempts.lock().unwrap();
             let entry = attempts.entry(key.clone()).or_default();
@@ -100,31 +122,114 @@ impl SnapshotBridge for FakeBridge {
         if attempt == 1 && self.transient_once.lock().unwrap().contains(&key) {
             return Err(BridgeError::Transient("disconnect".into()));
         }
-        if self.missing.lock().unwrap().contains(&key) {
-            return Ok(SnapshotReply::Missing);
+        if let Some(reason) = self.missing.lock().unwrap().get(&key).copied() {
+            return Ok(SnapshotReply::Missing(reason));
         }
         Ok(SnapshotReply::Snapshot(empty_snapshot(&request)))
+    }
+    async fn enumerate_world(&self, world: &WorldId) -> Result<Vec<ChunkCoordinate>, BridgeError> {
+        Ok(self
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| &request.world == world)
+            .map(|request| request.coordinate)
+            .collect())
+    }
+}
+#[derive(Default)]
+struct AlwaysTransientBridge;
+#[async_trait]
+impl SnapshotBridge for AlwaysTransientBridge {
+    async fn request(&self, _request: SnapshotRequest) -> Result<SnapshotReply, BridgeError> {
+        Err(BridgeError::Transient("disconnect".into()))
+    }
+    async fn enumerate_world(&self, _world: &WorldId) -> Result<Vec<ChunkCoordinate>, BridgeError> {
+        Ok(Vec::new())
     }
 }
 
 #[derive(Default)]
-struct FakeInstaller { installed: Mutex<Vec<(WorldId, ChunkCoordinate)>> }
+struct FakeInstaller {
+    installed: Arc<Mutex<Vec<(WorldId, ChunkCoordinate)>>>,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    blocked: AtomicBool,
+}
+struct FakeStagedInstall {
+    installed: Arc<Mutex<Vec<(WorldId, ChunkCoordinate)>>>,
+    world: WorldId,
+    coordinate: ChunkCoordinate,
+}
+
 #[async_trait]
-impl TileInstaller for FakeInstaller {
-    async fn install(&self, request: InstallRequest) -> Result<(), String> {
-        self.installed.lock().unwrap().push((request.world, request.coordinate));
+impl squaremap_server::scheduler::StagedInstall for FakeStagedInstall {
+    async fn publish(self: Box<Self>) -> Result<(), String> {
+        self.installed
+            .lock()
+            .unwrap()
+            .push((self.world, self.coordinate));
         Ok(())
     }
 }
 
+#[async_trait]
+impl TileInstaller for FakeInstaller {
+    async fn stage(
+        &self,
+        request: InstallRequest,
+    ) -> Result<Box<dyn squaremap_server::scheduler::StagedInstall>, String> {
+        self.entered.notify_waiters();
+        if self.blocked.load(Ordering::Acquire) {
+            self.release.notified().await;
+        }
+        Ok(Box::new(FakeStagedInstall {
+            installed: self.installed.clone(),
+            world: request.world,
+            coordinate: request.coordinate,
+        }))
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancel_during_install_does_not_count_or_publish_old_generation() {
+    let (_dir, repository) = repository().await;
+    let overworld = world("overworld", 1);
+    repository.apply_world(overworld.clone()).await.unwrap();
+    let bridge = Arc::new(FakeBridge::default());
+    let installer = Arc::new(FakeInstaller::default());
+    installer.blocked.store(true, Ordering::Release);
+    let scheduler = Arc::new(scheduler(repository.clone(), bridge, installer.clone(), 8));
+    let job = scheduler
+        .start_job(overworld.id(), JobKind::Full, vec![coordinate(7, 7)])
+        .await
+        .unwrap();
+    let running = {
+        let scheduler = scheduler.clone();
+        let id = job.id.clone();
+        tokio::spawn(async move { scheduler.run_job(&id).await.unwrap() })
+    };
+    installer.entered.notified().await;
+    scheduler.cancel_job(&job.id).await.unwrap();
+    installer.release.notify_waiters();
+    let report = running.await.unwrap();
+    assert!(report.cancelled);
+    assert_eq!(report.completed, 0);
+    assert_eq!(installer.installed.lock().unwrap().len(), 0);
+}
+
 async fn repository() -> (tempfile::TempDir, Arc<Repository>) {
     let dir = tempdir().unwrap();
-    let repository = Arc::new(Repository::open(dir.path().join("state.sqlite")).await.unwrap());
+    let repository = Arc::new(
+        Repository::open(dir.path().join("state.sqlite"))
+            .await
+            .unwrap(),
+    );
     (dir, repository)
 }
 fn scheduler(
     repository: Arc<Repository>,
-    bridge: Arc<FakeBridge>,
+    bridge: Arc<dyn SnapshotBridge>,
     installer: Arc<FakeInstaller>,
     page_size: usize,
 ) -> Scheduler {
@@ -138,7 +243,8 @@ fn scheduler(
             background_interval: Duration::from_millis(10),
             transient_retry_delay: Duration::from_millis(1),
         },
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -146,8 +252,14 @@ async fn dirty_coalesces_retries_missing_and_requests_both_shading_neighbors() {
     let (_dir, repository) = repository().await;
     let overworld = world("overworld", 1);
     repository.apply_world(overworld.clone()).await.unwrap();
-    repository.mark_dirty(&overworld.id(), coordinate(4, 8), 1, &[1; 16], 1).await.unwrap();
-    repository.mark_dirty(&overworld.id(), coordinate(4, 8), 2, &[1; 16], 2).await.unwrap();
+    repository
+        .mark_dirty(&overworld.id(), coordinate(4, 8), 1, &[1; 16], &[1; 16], 1)
+        .await
+        .unwrap();
+    repository
+        .mark_dirty(&overworld.id(), coordinate(4, 8), 2, &[1; 16], &[1; 16], 2)
+        .await
+        .unwrap();
     let bridge = Arc::new(FakeBridge::default());
     bridge.transient_once("overworld", 4, 8);
     let installer = Arc::new(FakeInstaller::default());
@@ -158,13 +270,31 @@ async fn dirty_coalesces_retries_missing_and_requests_both_shading_neighbors() {
     assert_eq!(report.completed, 1);
     assert!(repository.recover().await.unwrap().dirty.is_empty());
     assert_eq!(installer.installed.lock().unwrap().len(), 1);
-    let requested: HashSet<_> = bridge.requests.lock().unwrap().iter().map(|r| (r.coordinate.x, r.coordinate.z)).collect();
+    let requested: HashSet<_> = bridge
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| (r.coordinate.x, r.coordinate.z))
+        .collect();
     assert!(requested.contains(&(4, 7)));
     assert!(requested.contains(&(4, 8)));
     assert!(requested.contains(&(4, 9)));
-    assert!(bridge.attempts.lock().unwrap().get(&("overworld".into(), 4, 8)).copied().unwrap() >= 2);
+    assert!(
+        bridge
+            .attempts
+            .lock()
+            .unwrap()
+            .get(&("overworld".into(), 4, 8))
+            .copied()
+            .unwrap()
+            >= 2
+    );
 
-    repository.mark_dirty(&overworld.id(), coordinate(9, 9), 3, &[1; 16], 3).await.unwrap();
+    repository
+        .mark_dirty(&overworld.id(), coordinate(9, 9), 3, &[1; 16], &[1; 16], 3)
+        .await
+        .unwrap();
     bridge.missing("overworld", 9, 9);
     let report = scheduler.run_dirty_page().await.unwrap();
     assert_eq!(report.completed, 0);
@@ -172,11 +302,58 @@ async fn dirty_coalesces_retries_missing_and_requests_both_shading_neighbors() {
     assert!(!report.cancelled);
     assert_eq!(repository.recover().await.unwrap().dirty.len(), 1);
     assert_eq!(installer.installed.lock().unwrap().len(), 1);
-    repository.mark_dirty(&overworld.id(), coordinate(10, 10), 4, &[1; 16], 4).await.unwrap();
-    repository.defer_dirty(&overworld.id(), coordinate(9, 9), 3, 0).await.unwrap();
+    repository
+        .mark_dirty(
+            &overworld.id(),
+            coordinate(10, 10),
+            4,
+            &[1; 16],
+            &[1; 16],
+            4,
+        )
+        .await
+        .unwrap();
+    repository
+        .defer_dirty(&overworld.id(), coordinate(9, 9), 3, 0)
+        .await
+        .unwrap();
     let page = repository.dirty_page_at(1, 0).await.unwrap();
     assert_eq!(page.len(), 1);
     assert_eq!(page[0].coordinate, coordinate(10, 10));
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn permanent_missing_center_is_stale_without_retry_backoff() {
+    let (_dir, repository) = repository().await;
+    let overworld = world("overworld", 1);
+    repository.apply_world(overworld.clone()).await.unwrap();
+    let coordinate = coordinate(12, 12);
+    repository
+        .mark_dirty(&overworld.id(), coordinate, 5, &[1; 16], &[1; 16], 5)
+        .await
+        .unwrap();
+    let bridge = Arc::new(FakeBridge::default());
+    bridge.missing_reason(
+        "overworld",
+        coordinate.x,
+        coordinate.z,
+        ChunkMissingReason::Unavailable,
+    );
+    let scheduler = scheduler(
+        repository.clone(),
+        bridge,
+        Arc::new(FakeInstaller::default()),
+        1,
+    );
+
+    let report = scheduler.run_dirty_page().await.unwrap();
+
+    assert_eq!(report.selected, 1);
+    assert_eq!(report.completed, 0);
+    assert_eq!(report.stale, 1);
+    assert_eq!(
+        repository.dirty_page_at(1, i64::MAX).await.unwrap().len(),
+        1
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -185,10 +362,25 @@ async fn snapshot_credit_ceiling_is_96() {
     let overworld = world("overworld", 1);
     repository.apply_world(overworld.clone()).await.unwrap();
     for x in 0..130 {
-        repository.mark_dirty(&overworld.id(), coordinate(x, 0), x as u64 + 1, &[2; 16], x as u64 + 1).await.unwrap();
+        repository
+            .mark_dirty(
+                &overworld.id(),
+                coordinate(x, 0),
+                x as u64 + 1,
+                &[2; 16],
+                &[2; 16],
+                x as u64 + 1,
+            )
+            .await
+            .unwrap();
     }
     let bridge = Arc::new(FakeBridge::default());
-    let scheduler = scheduler(repository, bridge.clone(), Arc::new(FakeInstaller::default()), 130);
+    let scheduler = scheduler(
+        repository,
+        bridge.clone(),
+        Arc::new(FakeInstaller::default()),
+        130,
+    );
     scheduler.run_dirty_page().await.unwrap();
     assert!(bridge.high_water.load(Ordering::SeqCst) <= 96);
     assert!(bridge.high_water.load(Ordering::SeqCst) > 1);
@@ -202,12 +394,39 @@ async fn bounded_page_is_fair_between_worlds() {
     repository.apply_world(first.clone()).await.unwrap();
     repository.apply_world(second.clone()).await.unwrap();
     for x in 0..8 {
-        repository.mark_dirty(&first.id(), coordinate(x, 0), x as u64 + 1, &[3; 16], x as u64 + 1).await.unwrap();
+        repository
+            .mark_dirty(
+                &first.id(),
+                coordinate(x, 0),
+                x as u64 + 1,
+                &[3; 16],
+                &[3; 16],
+                x as u64 + 1,
+            )
+            .await
+            .unwrap();
     }
-    repository.mark_dirty(&second.id(), coordinate(99, 0), 1, &[4; 16], 1).await.unwrap();
+    repository
+        .mark_dirty(&second.id(), coordinate(99, 0), 1, &[4; 16], &[4; 16], 1)
+        .await
+        .unwrap();
     let installer = Arc::new(FakeInstaller::default());
-    scheduler(repository, Arc::new(FakeBridge::default()), installer.clone(), 2).run_dirty_page().await.unwrap();
-    let worlds: HashSet<_> = installer.installed.lock().unwrap().iter().map(|(world, _)| world.value.clone()).collect();
+    scheduler(
+        repository,
+        Arc::new(FakeBridge::default()),
+        installer.clone(),
+        2,
+    )
+    .run_dirty_page()
+    .await
+    .unwrap();
+    let worlds: HashSet<_> = installer
+        .installed
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(world, _)| world.value.clone())
+        .collect();
     assert_eq!(worlds, HashSet::from(["a".into(), "b".into()]));
 }
 
@@ -218,10 +437,22 @@ async fn pause_blocks_progress_and_cancel_fences_late_snapshot() {
     repository.apply_world(overworld.clone()).await.unwrap();
     let bridge = Arc::new(FakeBridge::default());
     let installer = Arc::new(FakeInstaller::default());
-    let first_scheduler = Arc::new(scheduler(repository.clone(), bridge.clone(), installer.clone(), 8));
-    let job = first_scheduler.start_job(overworld.id(), JobKind::Full, vec![coordinate(1, 1)]).await.unwrap();
+    let first_scheduler = Arc::new(scheduler(
+        repository.clone(),
+        bridge.clone(),
+        installer.clone(),
+        8,
+    ));
+    let job = first_scheduler
+        .start_job(overworld.id(), JobKind::Full, vec![coordinate(1, 1)])
+        .await
+        .unwrap();
     first_scheduler.pause(&overworld.id);
-    let running = { let scheduler = first_scheduler.clone(); let id = job.id.clone(); tokio::spawn(async move { scheduler.run_job(&id).await }) };
+    let running = {
+        let scheduler = first_scheduler.clone();
+        let id = job.id.clone();
+        tokio::spawn(async move { scheduler.run_job(&id).await })
+    };
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(installer.installed.lock().unwrap().is_empty());
     first_scheduler.resume(&overworld.id);
@@ -231,16 +462,169 @@ async fn pause_blocks_progress_and_cancel_fences_late_snapshot() {
     let bridge = Arc::new(FakeBridge::default());
     bridge.hold();
     let installer = Arc::new(FakeInstaller::default());
-    let scheduler = Arc::new(scheduler(repository.clone(), bridge.clone(), installer.clone(), 8));
-    let job = scheduler.start_job(overworld.id(), JobKind::Radius, vec![coordinate(2, 2)]).await.unwrap();
-    let running = { let scheduler = scheduler.clone(); let id = job.id.clone(); tokio::spawn(async move { scheduler.run_job(&id).await }) };
+    let scheduler = Arc::new(scheduler(
+        repository.clone(),
+        bridge.clone(),
+        installer.clone(),
+        8,
+    ));
+    let job = scheduler
+        .start_job(overworld.id(), JobKind::Radius, vec![coordinate(2, 2)])
+        .await
+        .unwrap();
+    let running = {
+        let scheduler = scheduler.clone();
+        let id = job.id.clone();
+        tokio::spawn(async move { scheduler.run_job(&id).await })
+    };
     bridge.wait_entered().await;
     scheduler.cancel_job(&job.id).await.unwrap();
     bridge.release();
     let report = running.await.unwrap().unwrap();
     assert!(report.cancelled);
     assert!(installer.installed.lock().unwrap().is_empty());
-    assert_eq!(repository.load_render_job(&job.id).await.unwrap().unwrap().state, JobState::Cancelled);
+    assert_eq!(
+        repository
+            .load_render_job(&job.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        JobState::Cancelled
+    );
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_job_interrupts_transient_snapshot_retry() {
+    let (_dir, repository) = repository().await;
+    let overworld = world("overworld", 1);
+    repository.apply_world(overworld.clone()).await.unwrap();
+    let bridge = Arc::new(AlwaysTransientBridge::default());
+    let scheduler = Arc::new(scheduler(
+        repository.clone(),
+        bridge,
+        Arc::new(FakeInstaller::default()),
+        8,
+    ));
+    let job = scheduler
+        .start_job(overworld.id(), JobKind::Full, vec![coordinate(3, 3)])
+        .await
+        .unwrap();
+    let running = {
+        let scheduler = scheduler.clone();
+        let id = job.id.clone();
+        tokio::spawn(async move { scheduler.run_job(&id).await })
+    };
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    scheduler.cancel_job(&job.id).await.unwrap();
+    let report = tokio::time::timeout(Duration::from_secs(1), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(report.cancelled);
+    assert_eq!(
+        repository
+            .load_render_job(&job.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        JobState::Cancelled
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_job_unblocks_while_paused() {
+    let (_dir, repository) = repository().await;
+    let overworld = world("overworld", 1);
+    repository.apply_world(overworld.clone()).await.unwrap();
+    let scheduler = Arc::new(scheduler(
+        repository.clone(),
+        Arc::new(FakeBridge::default()),
+        Arc::new(FakeInstaller::default()),
+        8,
+    ));
+    scheduler.pause(&overworld.id);
+    let job = scheduler
+        .start_job(overworld.id(), JobKind::Full, vec![coordinate(4, 4)])
+        .await
+        .unwrap();
+    let running = {
+        let scheduler = scheduler.clone();
+        let id = job.id.clone();
+        tokio::spawn(async move { scheduler.run_job(&id).await })
+    };
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    scheduler.cancel_job(&job.id).await.unwrap();
+    let report = tokio::time::timeout(Duration::from_secs(1), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(report.cancelled);
+    assert_eq!(
+        repository
+            .load_render_job(&job.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        JobState::Cancelled
+    );
+}
+#[tokio::test]
+async fn live_dispatcher_cancellation_releases_pending_capacity() {
+    use squaremap_render::Limits;
+    use squaremap_server::scheduler::live::{LiveSnapshotBridge, SnapshotDispatcher};
+    use squaremap_server::snapshot_client::SnapshotClient;
+    let client = SnapshotClient::new([7; 16], Limits::default()).unwrap();
+    let dispatcher = Arc::new(SnapshotDispatcher::new(client));
+    let (bridge, mut requests) = LiveSnapshotBridge::channel(128);
+    let dispatching = {
+        let dispatcher = dispatcher.clone();
+        tokio::spawn(async move {
+            while let Some(request) = requests.recv().await {
+                dispatcher.begin(request).await.unwrap();
+            }
+        })
+    };
+    let world = world("overworld", 1);
+    let mut tasks = Vec::new();
+    for index in 0..96 {
+        let request = SnapshotRequest {
+            world: world.id(),
+            coordinate: coordinate(index, 0),
+            revision: index as u64 + 1,
+        };
+        let bridge_clone = bridge.clone();
+        tasks.push(tokio::spawn(async move {
+            let _ = bridge_clone.request(request).await;
+        }));
+    }
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if dispatcher.in_flight().await == 96 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    for task in tasks {
+        task.abort();
+    }
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if dispatcher.in_flight().await == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    dispatching.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -253,24 +637,47 @@ async fn persisted_cursor_resumes_after_reopen_and_epoch_invalidates_late_work()
     let bridge = Arc::new(FakeBridge::default());
     let installer = Arc::new(FakeInstaller::default());
     let initial_scheduler = scheduler(repository.clone(), bridge, installer.clone(), 8);
-    let job = initial_scheduler.start_job(overworld.id(), JobKind::Full, vec![coordinate(1, 1), coordinate(2, 2)]).await.unwrap();
+    let job = initial_scheduler
+        .start_job(
+            overworld.id(),
+            JobKind::Full,
+            vec![coordinate(1, 1), coordinate(2, 2)],
+        )
+        .await
+        .unwrap();
     initial_scheduler.run_job_steps(&job.id, 1).await.unwrap();
     drop(initial_scheduler);
     drop(repository);
 
     let reopened = Arc::new(Repository::open(&db).await.unwrap());
-    let reopened_scheduler = scheduler(reopened.clone(), Arc::new(FakeBridge::default()), installer.clone(), 8);
+    let reopened_scheduler = scheduler(
+        reopened.clone(),
+        Arc::new(FakeBridge::default()),
+        installer.clone(),
+        8,
+    );
     reopened_scheduler.resume_jobs().await.unwrap();
     let completed = reopened.load_render_job(&job.id).await.unwrap().unwrap();
     assert_eq!(completed.state, JobState::Completed);
     assert_eq!(completed.completed_chunks, 2);
 
-    reopened.mark_dirty(&overworld.id(), coordinate(7, 7), 9, &[5; 16], 1).await.unwrap();
+    reopened
+        .mark_dirty(&overworld.id(), coordinate(7, 7), 9, &[5; 16], &[5; 16], 1)
+        .await
+        .unwrap();
     let bridge = Arc::new(FakeBridge::default());
     bridge.hold();
     let installer = Arc::new(FakeInstaller::default());
-    let scheduler = Arc::new(scheduler(reopened.clone(), bridge.clone(), installer.clone(), 8));
-    let running = { let scheduler = scheduler.clone(); tokio::spawn(async move { scheduler.run_dirty_page().await }) };
+    let scheduler = Arc::new(scheduler(
+        reopened.clone(),
+        bridge.clone(),
+        installer.clone(),
+        8,
+    ));
+    let running = {
+        let scheduler = scheduler.clone();
+        tokio::spawn(async move { scheduler.run_dirty_page().await })
+    };
     bridge.wait_entered().await;
     reopened.apply_world(world("overworld", 2)).await.unwrap();
     bridge.release();

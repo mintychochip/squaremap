@@ -1,17 +1,23 @@
 use async_trait::async_trait;
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use reqwest::StatusCode;
 use serde::Serialize;
-use squaremap_render::{fixture::FixtureCorpus, PngOptions, RenderSettings, Snapshot};
+use squaremap_render::{PngOptions, RenderSettings, Snapshot, fixture::FixtureCorpus};
 use squaremap_server::http::{HttpConfig, HttpServer};
 use squaremap_server::output::OutputRoot;
-use squaremap_server::scheduler::{BridgeError, RenderTileInstaller, Scheduler, SchedulerConfig, SnapshotBridge, SnapshotReply, SnapshotRequest, WorldRenderConfig};
+use squaremap_server::scheduler::{
+    BridgeError, RenderTileInstaller, Scheduler, SchedulerConfig, SnapshotBridge, SnapshotReply,
+    SnapshotRequest, WorldRenderConfig,
+};
 use squaremap_state::{ChunkCoordinate, JobKind, Repository, World, WorldId};
 use std::{path::Path, sync::Arc, time::Instant};
 use tempfile::tempdir;
 use tokio::runtime::Runtime;
 
-const CORPUS_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../testdata/bridge/v2/render");
+const CORPUS_ROOT: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../testdata/bridge/v2/render"
+);
 const WORKLOAD_THRESHOLD: f64 = 100.0;
 
 #[derive(Serialize)]
@@ -27,7 +33,12 @@ struct WorkloadReport {
 }
 
 struct CorpusBridge {
-    cases: Vec<(ChunkCoordinate, Arc<Snapshot>, Option<Arc<Snapshot>>, Option<Arc<Snapshot>>)>,
+    cases: Vec<(
+        ChunkCoordinate,
+        Arc<Snapshot>,
+        Option<Arc<Snapshot>>,
+        Option<Arc<Snapshot>>,
+    )>,
 }
 #[async_trait]
 impl SnapshotBridge for CorpusBridge {
@@ -36,15 +47,35 @@ impl SnapshotBridge for CorpusBridge {
         for (expected, center, north, south) in &self.cases {
             if *expected == coordinate {
                 if coordinate.z < 0 {
-                    return Ok(north.clone().map(SnapshotReply::Snapshot).unwrap_or(SnapshotReply::Missing));
+                    return Ok(north.clone().map(SnapshotReply::Snapshot).unwrap_or(
+                        SnapshotReply::Missing(
+                            squaremap_protocol::wire::ChunkMissingReason::Unloaded,
+                        ),
+                    ));
                 }
                 if coordinate.z > 0 {
-                    return Ok(south.clone().map(SnapshotReply::Snapshot).unwrap_or(SnapshotReply::Missing));
+                    return Ok(south.clone().map(SnapshotReply::Snapshot).unwrap_or(
+                        SnapshotReply::Missing(
+                            squaremap_protocol::wire::ChunkMissingReason::Unloaded,
+                        ),
+                    ));
                 }
                 return Ok(SnapshotReply::Snapshot(center.clone()));
             }
         }
-        Ok(SnapshotReply::Missing)
+        Ok(SnapshotReply::Missing(
+            squaremap_protocol::wire::ChunkMissingReason::Unloaded,
+        ))
+    }
+    async fn enumerate_world(
+        &self,
+        _world: &squaremap_state::WorldId,
+    ) -> Result<Vec<ChunkCoordinate>, BridgeError> {
+        Ok(self
+            .cases
+            .iter()
+            .map(|(coordinate, _, _, _)| *coordinate)
+            .collect())
     }
 }
 
@@ -55,21 +86,90 @@ fn benchmark_backend_end_to_end(c: &mut Criterion) {
     let setup = runtime.block_on(async {
         let directory = tempdir().expect("temporary output root");
         let output = OutputRoot::new(directory.path()).expect("output root");
-        let repository = Arc::new(Repository::open(directory.path().join("state.sqlite")).await.expect("repository"));
+        let repository = Arc::new(
+            Repository::open(directory.path().join("state.sqlite"))
+                .await
+                .expect("repository"),
+        );
         let world = WorldId::new("minecraft", "overworld", 1);
-        repository.apply_world(World::new(world.namespace.clone(), world.value.clone(), world.epoch, Vec::new())).await.expect("world");
+        repository
+            .apply_world(World::new(
+                world.namespace.clone(),
+                world.value.clone(),
+                world.epoch,
+                Vec::new(),
+            ))
+            .await
+            .expect("world");
         let tile_store: Arc<dyn squaremap_render::TileStore> = Arc::new(output.clone());
         let installer = Arc::new(RenderTileInstaller::new(tile_store));
-        let cases = corpus.cases.iter().enumerate().map(|(index, case)| (ChunkCoordinate { x: index as i32, z: 0 }, case.center.clone(), case.north.clone(), case.south.clone())).collect();
+        let cases = corpus
+            .cases
+            .iter()
+            .enumerate()
+            .map(|(index, case)| {
+                (
+                    ChunkCoordinate {
+                        x: index as i32,
+                        z: 0,
+                    },
+                    case.center.clone(),
+                    case.north.clone(),
+                    case.south.clone(),
+                )
+            })
+            .collect();
         let bridge = Arc::new(CorpusBridge { cases });
         for (index, case) in corpus.cases.iter().enumerate() {
-            installer.configure_world(world.clone(), WorldRenderConfig {
-                settings: RenderSettings { iterate_up: case.row.iterate_up, map_max_height: case.row.max_height, biomes_enabled: case.row.biome_enabled, biome_blend: case.row.biome_blend, glass_clear: case.row.glass_clear, water_clear: case.row.water_clear, water_checkerboard: case.row.water_checkerboard, lava_checkerboard: case.row.lava_checkerboard },
-                invisible_ids: [case.row.invisible_id].into_iter().filter(|id| *id != 0).collect::<Vec<_>>().into(), iterate_up_base_ids: [case.row.iterate_up_base_id].into_iter().filter(|id| *id != 0).collect::<Vec<_>>().into(), biome_zoom_seed: corpus.manifest.biome_zoom_seed, max_zoom: 3, png_options: PngOptions::default(), tile_prefix: format!("tiles/minecraft_overworld/{index}").into(),
-            }).expect("configure installer");
+            installer
+                .configure_world(
+                    world.clone(),
+                    WorldRenderConfig {
+                        settings: RenderSettings {
+                            iterate_up: case.row.iterate_up,
+                            map_max_height: case.row.max_height,
+                            biomes_enabled: case.row.biome_enabled,
+                            biome_blend: case.row.biome_blend,
+                            glass_clear: case.row.glass_clear,
+                            water_clear: case.row.water_clear,
+                            water_checkerboard: case.row.water_checkerboard,
+                            lava_checkerboard: case.row.lava_checkerboard,
+                        },
+                        invisible_ids: [case.row.invisible_id]
+                            .into_iter()
+                            .filter(|id| *id != 0)
+                            .collect::<Vec<_>>()
+                            .into(),
+                        iterate_up_base_ids: [case.row.iterate_up_base_id]
+                            .into_iter()
+                            .filter(|id| *id != 0)
+                            .collect::<Vec<_>>()
+                            .into(),
+                        biome_zoom_seed: corpus.manifest.biome_zoom_seed,
+                        max_zoom: 3,
+                        png_options: PngOptions::default(),
+                        tile_prefix: format!("tiles/minecraft_overworld/{index}").into(),
+                    },
+                )
+                .expect("configure installer");
         }
-        let scheduler = Arc::new(Scheduler::new(repository, bridge, installer, SchedulerConfig { max_active_snapshots: 96, dirty_page_size: 64, background_interval: std::time::Duration::from_secs(60), transient_retry_delay: std::time::Duration::from_millis(1) }).expect("scheduler"));
-        let server = HttpServer::bind(HttpConfig::loopback(), output.clone()).await.expect("http server");
+        let scheduler = Arc::new(
+            Scheduler::new(
+                repository,
+                bridge,
+                installer,
+                SchedulerConfig {
+                    max_active_snapshots: 96,
+                    dirty_page_size: 64,
+                    background_interval: std::time::Duration::from_secs(60),
+                    transient_retry_delay: std::time::Duration::from_millis(1),
+                },
+            )
+            .expect("scheduler"),
+        );
+        let server = HttpServer::bind(HttpConfig::loopback(), output.clone())
+            .await
+            .expect("http server");
         let address = server.local_addr().expect("http address");
         (directory, output, world, scheduler, server, address)
     });
@@ -127,7 +227,9 @@ fn benchmark_backend_end_to_end(c: &mut Criterion) {
         });
     });
     group.finish();
-    runtime.block_on(async { server.shutdown().await.expect("http shutdown"); });
+    runtime.block_on(async {
+        server.shutdown().await.expect("http shutdown");
+    });
     drop(directory);
 }
 

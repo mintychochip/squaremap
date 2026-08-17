@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 pub const MAX_IN_FLIGHT: usize = 96;
+pub const MAX_CANCELLED: usize = MAX_IN_FLIGHT * 2;
 
 #[derive(Debug)]
 pub enum SnapshotClientError {
@@ -55,6 +56,8 @@ pub struct SnapshotClient {
     next_request_id: u64,
     next_correlation: u64,
     pending: HashMap<u64, Pending>,
+    cancelled: HashMap<u64, ()>,
+    cancelled_before: u64,
     registries: HashMap<String, Registry>,
     registry_replacements: HashMap<String, RegistryReplace>,
     limits: Limits,
@@ -69,13 +72,14 @@ impl SnapshotClient {
             next_sequence: 1,
             next_request_id: 1,
             next_correlation: 1,
+            cancelled_before: 0,
             pending: HashMap::new(),
+            cancelled: HashMap::new(),
             registries: HashMap::new(),
             registry_replacements: HashMap::new(),
             limits,
         })
     }
-
     pub fn request_once(
         &mut self,
         world: WorldIdentity,
@@ -133,7 +137,37 @@ impl SnapshotClient {
         self.next_sequence = self.next_sequence.saturating_add(1);
         value
     }
-
+    pub fn cancel(&mut self, correlation_id: u64) -> bool {
+        let removed = self.pending.remove(&correlation_id).is_some();
+        if removed {
+            self.cancelled.insert(correlation_id, ());
+            while self.cancelled.len() > MAX_CANCELLED {
+                let Some(oldest_pending) = self.pending.keys().copied().min() else {
+                    self.cancelled.clear();
+                    self.cancelled_before = self.next_correlation;
+                    break;
+                };
+                let safe_floor = oldest_pending;
+                self.cancelled
+                    .retain(|correlation, _| *correlation >= safe_floor);
+                self.cancelled_before = self.cancelled_before.max(safe_floor);
+                if self.cancelled.len() <= MAX_CANCELLED {
+                    break;
+                }
+                let Some(removable) = self
+                    .cancelled
+                    .keys()
+                    .copied()
+                    .filter(|correlation| *correlation > safe_floor)
+                    .max()
+                else {
+                    break;
+                };
+                self.cancelled.remove(&removable);
+            }
+        }
+        removed
+    }
     pub fn accept(
         &mut self,
         envelope: &Envelope,
@@ -195,15 +229,18 @@ impl SnapshotClient {
         correlation_id: u64,
         replacement: &RegistryReplace,
     ) -> Result<Option<SnapshotOutcome>, SnapshotClientError> {
+        if correlation_id < self.cancelled_before || self.cancelled.contains_key(&correlation_id) {
+            return Ok(None);
+        }
+        let Some(pending) = self.pending.get(&correlation_id) else {
+            return Ok(None);
+        };
         let world = replacement
             .world
             .as_ref()
             .ok_or(SnapshotClientError::InvalidResponse(
                 "registry missing world",
             ))?;
-        let Some(pending) = self.pending.get(&correlation_id) else {
-            return Ok(None);
-        };
         if pending.revision != replacement.revision || pending.world != *world {
             return Ok(None);
         }
@@ -247,6 +284,8 @@ impl SnapshotClient {
     pub fn abort_pending(&mut self) -> usize {
         let count = self.pending.len();
         self.pending.clear();
+        self.cancelled.clear();
+        self.cancelled_before = self.next_correlation;
         count
     }
 }
@@ -390,7 +429,81 @@ mod tests {
             Some(SnapshotOutcome::Missing(ChunkMissingReason::Unloaded))
         ));
     }
+    #[test]
+    fn cancelled_request_does_not_poison_later_registry_generation() {
+        let mut client = SnapshotClient::new([9; 16], Limits::default()).unwrap();
+        let first = client.request_once(world(), 1, 1, 42).unwrap();
+        client.cancel(first.correlation_id);
+        let second = client.request_once(world(), 2, 2, 42).unwrap();
+        let mut registry = RegistryReplace::decode(
+            &include_bytes!("../../../../testdata/bridge/v1/registry_replace_valid.bin")[..],
+        )
+        .unwrap();
+        registry.world = Some(world());
+        registry.revision = 42;
+        assert!(
+            client
+                .accept(&Envelope {
+                    session_id: second.session_id.clone(),
+                    correlation_id: second.correlation_id,
+                    payload: Some(envelope::Payload::RegistryReplace(registry)),
+                    ..Default::default()
+                })
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(client.in_flight(), 1);
+    }
 
+    #[test]
+    fn cancel_then_delayed_registry_preserves_next_request() {
+        let mut client = SnapshotClient::new([9; 16], Limits::default()).unwrap();
+        let first = client.request_once(world(), 1, 1, 42).unwrap();
+        let second = client.request_once(world(), 2, 2, 42).unwrap();
+        assert!(client.cancel(first.correlation_id));
+        push_registry(&mut client, first.correlation_id, &world(), 42);
+        assert_eq!(client.in_flight(), 1);
+        push_registry(&mut client, second.correlation_id, &world(), 42);
+        let mut snapshot = ChunkSnapshot::decode(
+            &include_bytes!("../../../../testdata/bridge/v1/chunk_snapshot_valid.bin")[..],
+        )
+        .unwrap();
+        snapshot.world = Some(world());
+        snapshot.coordinate = Some(squaremap_protocol::wire::ChunkCoordinate { x: 2, z: 2 });
+        snapshot.revision = 42;
+        let outcome = client
+            .accept(&Envelope {
+                session_id: second.session_id,
+                correlation_id: second.correlation_id,
+                payload: Some(envelope::Payload::ChunkSnapshot(snapshot)),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(matches!(outcome, Some(SnapshotOutcome::Snapshot(_))));
+        assert_eq!(client.in_flight(), 0);
+    }
+
+    #[test]
+    fn cancelled_tombstones_are_bounded() {
+        let mut client = SnapshotClient::new([9; 16], Limits::default()).unwrap();
+        let request = client.request_once(world(), 0, 0, 42).unwrap();
+        for i in 0..(MAX_CANCELLED + 7) {
+            let extra = client.request_once(world(), i as i32 + 1, 0, 42).unwrap();
+            assert!(client.cancel(extra.correlation_id));
+        }
+        assert!(client.cancelled.len() <= MAX_CANCELLED);
+        assert!(client.pending.contains_key(&request.correlation_id));
+        assert!(client.cancel(request.correlation_id));
+    }
+
+    #[test]
+    fn delayed_registry_then_cancel_leaves_no_pending_request() {
+        let mut client = SnapshotClient::new([9; 16], Limits::default()).unwrap();
+        let request = client.request_once(world(), 1, 1, 42).unwrap();
+        push_registry(&mut client, request.correlation_id, &world(), 42);
+        assert!(client.cancel(request.correlation_id));
+        assert_eq!(client.in_flight(), 0);
+    }
     #[test]
     fn registry_replace_requires_matching_pending_correlation() {
         let mut client = SnapshotClient::new([9; 16], Limits::default()).unwrap();
@@ -425,6 +538,22 @@ mod tests {
             })
             .unwrap();
         assert!(matches!(response, Some(SnapshotOutcome::Snapshot(_))));
+    }
+
+    #[test]
+    fn malformed_delayed_registry_for_cancelled_request_is_ignored() {
+        let mut client = SnapshotClient::new([9; 16], Limits::default()).unwrap();
+        let request = client.request_once(world(), 1, 1, 42).unwrap();
+        assert!(client.cancel(request.correlation_id));
+        let result = client.accept(&Envelope {
+            session_id: request.session_id,
+            correlation_id: request.correlation_id,
+            payload: Some(envelope::Payload::RegistryReplace(
+                RegistryReplace::default(),
+            )),
+            ..Default::default()
+        });
+        assert!(result.unwrap().is_none());
     }
 
     #[test]
