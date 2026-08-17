@@ -16,7 +16,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import xyz.jpenilla.squaremap.api.WorldIdentifier;
-import xyz.jpenilla.squaremap.common.bridge.process.BackendMode;
 
 final class BackendControllerTest {
     private final WorldIdentifier world = WorldIdentifier.create("minecraft", "overworld");

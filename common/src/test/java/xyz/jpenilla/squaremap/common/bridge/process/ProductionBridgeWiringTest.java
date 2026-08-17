@@ -1,8 +1,6 @@
 package xyz.jpenilla.squaremap.common.bridge.process;
 
 import java.time.Duration;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -19,7 +17,6 @@ import xyz.jpenilla.squaremap.common.config.Config;
 final class ProductionBridgeWiringTest {
     @Test
     void productionEquivalentGraphLazilyLoadsConfiguredModeAndScopesBridgeObjects() throws Exception {
-        final String oldMode = Config.BRIDGE_BACKEND_MODE;
         final var oldCommand = Config.BRIDGE_SIDECAR_COMMAND;
         final String oldRoot = Config.BRIDGE_RUST_OUTPUT_ROOT;
         try {
@@ -37,7 +34,6 @@ final class ProductionBridgeWiringTest {
             assertTrue(SidecarSupervisor.class.isAnnotationPresent(Singleton.class));
             assertTrue(IconRegistry.class.isAnnotationPresent(Singleton.class));
         } finally {
-            Config.BRIDGE_BACKEND_MODE = oldMode;
             Config.BRIDGE_SIDECAR_COMMAND = oldCommand;
             Config.BRIDGE_RUST_OUTPUT_ROOT = oldRoot;
         }
@@ -63,13 +59,11 @@ final class ProductionBridgeWiringTest {
 
     @Test
     void configuredSupervisorCarriesFramedReplacementToStartedSidecar() throws Exception {
-        final String oldMode = Config.BRIDGE_BACKEND_MODE;
         final var oldCommand = Config.BRIDGE_SIDECAR_COMMAND;
         final String oldRoot = Config.BRIDGE_RUST_OUTPUT_ROOT;
         final Path data = Files.createTempDirectory("squaremap-wiring-sidecar");
         SidecarSupervisor supervisor = null;
         try {
-            Config.BRIDGE_BACKEND_MODE = "RUST";
             final Path rustRoot = data.resolve("rust").toAbsolutePath();
             Config.BRIDGE_RUST_OUTPUT_ROOT = rustRoot.toString();
             final var command = java.util.List.of(
@@ -78,7 +72,6 @@ final class ProductionBridgeWiringTest {
             );
             Config.BRIDGE_SIDECAR_COMMAND = command;
             final BridgeBootstrapConfig config = new BridgeBootstrapConfig(
-                BackendMode.RUST,
                 "fixture-version",
                 new SidecarCommand(command),
                 Duration.ofSeconds(10),
@@ -101,14 +94,8 @@ final class ProductionBridgeWiringTest {
             if (supervisor != null) {
                 supervisor.close();
             }
-            Config.BRIDGE_BACKEND_MODE = oldMode;
             Config.BRIDGE_SIDECAR_COMMAND = oldCommand;
             Config.BRIDGE_RUST_OUTPUT_ROOT = oldRoot;
         }
-    }
-    @Test
-    void rustIsTheDefaultWebBackend() {
-        assertEquals("RUST", Config.BRIDGE_BACKEND_MODE);
-        assertTrue(BackendLifecyclePolicy.rustHttpOwner(BackendLifecyclePolicy.configuredMode()));
     }
 }

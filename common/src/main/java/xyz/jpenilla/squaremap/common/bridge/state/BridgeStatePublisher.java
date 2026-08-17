@@ -5,8 +5,6 @@ import com.google.inject.Singleton;
 import com.google.inject.Inject;
 import com.google.inject.Provider;
 import xyz.jpenilla.squaremap.bridge.v1.Envelope;
-import xyz.jpenilla.squaremap.common.bridge.process.BackendMode;
-import xyz.jpenilla.squaremap.common.bridge.process.BridgeBootstrapConfig;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -24,7 +22,6 @@ import xyz.jpenilla.squaremap.common.data.MapWorldInternal;
 
 @Singleton
 public final class BridgeStatePublisher {
-    private final BackendMode mode;
     private final Supplier<WorldStateReplace> worlds;
     private final Supplier<PlayersReplace> players;
     private final MarkerRouter markers;
@@ -40,7 +37,6 @@ public final class BridgeStatePublisher {
     private final Map<String, MarkerLayersReplace> publishedMarkers = new HashMap<>();
     private IconsReplace publishedIcons;
     public BridgeStatePublisher(
-        final BackendMode mode,
         final Supplier<WorldStateReplace> worlds,
         final Supplier<PlayersReplace> players,
         final FunctionWorld<MarkerLayersReplace> markers,
@@ -51,7 +47,6 @@ public final class BridgeStatePublisher {
         final Consumer<PlayersReplace> bridgePlayers,
         final Consumer<MarkerLayersReplace> bridgeMarkers
     ) {
-        this.mode = Objects.requireNonNull(mode, "mode");
         this.worlds = Objects.requireNonNull(worlds, "worlds");
         this.players = Objects.requireNonNull(players, "players");
         this.markers = markers instanceof MarkerRouter router ? router : MarkerRouter.wrap(Objects.requireNonNull(markers, "markers"));
@@ -67,12 +62,11 @@ public final class BridgeStatePublisher {
     public BridgeStatePublisher(
         final Provider<WorldStateExporter> worlds,
         final Provider<PlayerStateExporter> players,
-        final BridgeBootstrapConfig config,
         final SidecarSupervisor supervisor,
         final WorldEpochRegistry epochs,
         final BridgeRevisionClock revisions
     ) {
-        this(config.backendMode(), worlds.get()::export, players.get()::export, markerExporter(epochs, revisions),
+        this(worlds.get()::export, players.get()::export, markerExporter(epochs, revisions),
             ignored -> {}, ignored -> {}, (world, snapshot) -> {},
             payload -> supervisor.publish(new BridgeEvent.ReplaceState("worlds", Envelope.newBuilder().setWorldStateReplace(payload).build())),
             payload -> supervisor.publish(new BridgeEvent.ReplaceState("players", Envelope.newBuilder().setPlayersReplace(payload).build())),
@@ -96,7 +90,7 @@ public final class BridgeStatePublisher {
         this.bridgeIcons.accept(snapshot);
     }
     public static BridgeStatePublisher forTesting(final Supplier<PlayersReplace> players, final Consumer<PlayersReplace> bridge) {
-        return new BridgeStatePublisher(BackendMode.RUST, WorldStateReplace::getDefaultInstance, players, world -> MarkerLayersReplace.getDefaultInstance(),
+        return new BridgeStatePublisher(WorldStateReplace::getDefaultInstance, players, world -> MarkerLayersReplace.getDefaultInstance(),
             ignored -> {}, ignored -> {}, (world, value) -> {}, ignored -> {}, bridge, ignored -> {});
     }
 

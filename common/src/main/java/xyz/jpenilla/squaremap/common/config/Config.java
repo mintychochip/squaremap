@@ -56,7 +56,6 @@ public final class Config extends AbstractConfig {
         UPDATE_CHECKER = config.getBoolean("settings.update-checker", UPDATE_CHECKER);
         WEB_ADDRESS = config.getString("settings.web-address", WEB_ADDRESS);
     }
-    public static String BRIDGE_BACKEND_MODE = "RUST";
     public static List<String> BRIDGE_SIDECAR_COMMAND = List.of();
     public static String BRIDGE_RUST_OUTPUT_ROOT = "";
     public static int BRIDGE_STARTUP_TIMEOUT_SECONDS = 30;
@@ -64,7 +63,6 @@ public final class Config extends AbstractConfig {
     public static boolean BRIDGE_EVENT_CAPTURE_ENABLED = true;
 
     private static void bridgeSettings() {
-        BRIDGE_BACKEND_MODE = config.getString("settings.bridge.backend-mode", BRIDGE_BACKEND_MODE);
         BRIDGE_SIDECAR_COMMAND = config.getList(String.class, "settings.bridge.sidecar-command", BRIDGE_SIDECAR_COMMAND);
         BRIDGE_RUST_OUTPUT_ROOT = config.getString("settings.bridge.rust-output-root", BRIDGE_RUST_OUTPUT_ROOT);
         BRIDGE_STARTUP_TIMEOUT_SECONDS = config.getInt("settings.bridge.startup-timeout-seconds", BRIDGE_STARTUP_TIMEOUT_SECONDS);

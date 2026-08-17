@@ -6,7 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import xyz.jpenilla.squaremap.bridge.v1.PlayersReplace;
-import xyz.jpenilla.squaremap.common.bridge.process.BackendMode;
 
 final class BridgeStatePublisherTest {
     @Test

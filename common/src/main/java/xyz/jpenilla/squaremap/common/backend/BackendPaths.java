@@ -6,7 +6,6 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import xyz.jpenilla.squaremap.common.bridge.process.BackendMode;
 
 /**
  * Resolves the isolated output roots used by the Java and Rust backends and
@@ -85,27 +84,20 @@ public final class BackendPaths {
     }
 
     /**
-     * Resolves the root for one backend mode and verifies it is isolated from
-     * the other active backend's root. The Java backend owns the legacy web
-     * output tree; shadow and rust backends must use a separate tree.
+     * Resolves the Rust backend's output root and verifies it is isolated from
+     * the Java backend's web output tree.
      *
-     * @param mode backend mode; only {@link BackendMode#RUST} is supported
      * @param javaRoot root used by the Java backend (uncanonicalized)
      * @param configuredRustRoot configured root for the rust backend
-     * @return canonicalized root for {@code mode}
+     * @return canonicalized Rust output root
      * @throws IllegalArgumentException when roots overlap or the configured
-     *         rust root is missing for a non-Java mode
+     *         rust root is missing
      */
     public static Path resolve(
-        final BackendMode mode,
         final Path javaRoot,
         final Path configuredRustRoot
     ) {
-        Objects.requireNonNull(mode, "mode");
         Objects.requireNonNull(javaRoot, "javaRoot");
-        if (mode != BackendMode.RUST) {
-            throw new IllegalArgumentException("squaremap only supports the Rust map backend");
-        }
         if (configuredRustRoot == null || !configuredRustRoot.isAbsolute()) {
             throw new IllegalArgumentException("Rust backend requires an absolute output root distinct from Java web output");
         }

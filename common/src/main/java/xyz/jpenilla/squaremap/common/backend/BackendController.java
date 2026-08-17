@@ -48,7 +48,7 @@ public final class BackendController implements AutoCloseable {
     CompletionStage<BackendResult> publishConfig() {
         return this.configExporter == null
             ? CompletableFuture.completedFuture(BackendResult.of(BackendResult.Code.INVALID_CONFIG))
-            : route(new ConfigSync(this.configExporter.export(xyz.jpenilla.squaremap.common.bridge.process.BackendMode.RUST)));
+            : route(new ConfigSync(this.configExporter.export()));
     }
 
     CompletionStage<BackendResult> restartProgressLogging() { return route(new RestartProgressLogging()); }
