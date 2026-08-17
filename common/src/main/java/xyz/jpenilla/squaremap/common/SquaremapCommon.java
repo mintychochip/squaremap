@@ -100,8 +100,7 @@ public final class SquaremapCommon {
     private void startSidecar() {
         final BridgeBootstrapConfig bootstrapConfig = this.bootstrapConfig.get();
         Logging.logger().info(
-            "Configured bridge backend mode {} with sidecar command {} and output root {}",
-            bootstrapConfig.backendMode(),
+            "Configured Rust bridge backend with sidecar command {} and output root {}",
             bootstrapConfig.sidecarCommand() == null ? List.of() : bootstrapConfig.sidecarCommand().command(),
             bootstrapConfig.rustOutputRoot()
         );

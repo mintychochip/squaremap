@@ -44,7 +44,6 @@ import xyz.jpenilla.squaremap.common.SquaremapCommon;
 import xyz.jpenilla.squaremap.common.WorldManager;
 import xyz.jpenilla.squaremap.common.bridge.outbox.BridgeEvent;
 import xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher;
-import xyz.jpenilla.squaremap.common.bridge.process.BackendMode;
 import xyz.jpenilla.squaremap.common.bridge.process.BridgeBootstrapConfig;
 import xyz.jpenilla.squaremap.common.bridge.process.BridgeConnection;
 import xyz.jpenilla.squaremap.common.bridge.process.SidecarSupervisor;
@@ -65,7 +64,6 @@ public final class BridgeBackendController implements AutoCloseable {
     private final SidecarSupervisor supervisor;
     private final ScheduledExecutorService scheduler;
     private final Duration requestTimeout;
-    private final BackendMode mode;
     private final ConfigBridgeExporter configExporter;
     private final Provider<SquaremapCommon> common;
     private final Provider<WorldManager> worldManager;
@@ -103,7 +101,6 @@ public final class BridgeBackendController implements AutoCloseable {
             supervisor,
             defaultScheduler(),
             REQUEST_TIMEOUT,
-            config.backendMode(),
             configExporter,
             common,
             worldManager,
@@ -124,7 +121,7 @@ public final class BridgeBackendController implements AutoCloseable {
     }
 
     public BridgeBackendController(final SidecarSupervisor supervisor, final ScheduledExecutorService scheduler) {
-        this(supervisor, scheduler, REQUEST_TIMEOUT, BackendMode.RUST, null, null, null, world -> 0L, null);
+        this(supervisor, scheduler, REQUEST_TIMEOUT, null, null, null, world -> 0L, null);
     }
 
     public BridgeBackendController(final BridgeConnection connection, final ScheduledExecutorService scheduler) {
@@ -137,7 +134,7 @@ public final class BridgeBackendController implements AutoCloseable {
         final Duration requestTimeout,
         final EpochResolver epochs
     ) {
-        this(null, scheduler, requestTimeout, BackendMode.RUST, null, null, null, epochs, null);
+        this(null, scheduler, requestTimeout, null, null, null, epochs, null);
         this.attach(connection);
     }
 
@@ -148,7 +145,7 @@ public final class BridgeBackendController implements AutoCloseable {
         final EpochResolver epochs,
         final Provider<WorldManager> worldManager
     ) {
-        this(null, scheduler, requestTimeout, BackendMode.RUST, null, null, worldManager, epochs, null);
+        this(null, scheduler, requestTimeout, null, null, worldManager, epochs, null);
         this.attach(connection);
     }
 
@@ -156,7 +153,6 @@ public final class BridgeBackendController implements AutoCloseable {
         final SidecarSupervisor supervisor,
         final ScheduledExecutorService scheduler,
         final Duration requestTimeout,
-        final BackendMode mode,
         final ConfigBridgeExporter configExporter,
         final Provider<SquaremapCommon> common,
         final Provider<WorldManager> worldManager,
@@ -167,7 +163,6 @@ public final class BridgeBackendController implements AutoCloseable {
         this.snapshotHandler = snapshotHandler;
         this.scheduler = Objects.requireNonNull(scheduler);
         this.requestTimeout = Objects.requireNonNull(requestTimeout);
-        this.mode = Objects.requireNonNull(mode);
         this.configExporter = configExporter;
         this.common = common;
         this.worldManager = worldManager;

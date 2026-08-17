@@ -14,7 +14,6 @@ public final class BridgeBootstrapConfig {
     public static final Duration DEFAULT_READINESS_TIMEOUT = Duration.ofSeconds(30);
     public static final Duration DEFAULT_SHUTDOWN_GRACE = Duration.ofSeconds(10);
 
-    private final BackendMode backendMode;
     private final String pluginVersion;
     private final SidecarCommand sidecarCommand;
     private final Duration readinessTimeout;
@@ -22,39 +21,32 @@ public final class BridgeBootstrapConfig {
     private final Path rustOutputRoot;
 
     public BridgeBootstrapConfig(
-        final BackendMode backendMode,
         final String pluginVersion,
         final SidecarCommand sidecarCommand
     ) {
-        this(backendMode, pluginVersion, sidecarCommand, DEFAULT_READINESS_TIMEOUT, DEFAULT_SHUTDOWN_GRACE, null);
+        this(pluginVersion, sidecarCommand, DEFAULT_READINESS_TIMEOUT, DEFAULT_SHUTDOWN_GRACE, null);
     }
 
     public BridgeBootstrapConfig(
-        final BackendMode backendMode,
         final String pluginVersion,
         final SidecarCommand sidecarCommand,
         final Duration readinessTimeout,
         final Duration shutdownGrace
     ) {
-        this(backendMode, pluginVersion, sidecarCommand, readinessTimeout, shutdownGrace, null);
+        this(pluginVersion, sidecarCommand, readinessTimeout, shutdownGrace, null);
     }
 
     public BridgeBootstrapConfig(
-        final BackendMode backendMode,
         final String pluginVersion,
         final SidecarCommand sidecarCommand,
         final Duration readinessTimeout,
         final Duration shutdownGrace,
         final Path rustOutputRoot
     ) {
-        this.backendMode = Objects.requireNonNull(backendMode, "backendMode");
         if (pluginVersion == null || pluginVersion.isBlank()) {
             throw new IllegalArgumentException("plugin version must not be blank");
         }
         this.pluginVersion = pluginVersion;
-        if (backendMode != BackendMode.RUST) {
-            throw new IllegalArgumentException("squaremap only supports the Rust map backend");
-        }
         if (sidecarCommand == null) {
             throw new IllegalArgumentException("Rust backend requires a sidecar command");
         }
@@ -114,7 +106,6 @@ public final class BridgeBootstrapConfig {
         throw new IllegalArgumentException("unsupported operating system: " + operatingSystem);
     }
     public static BridgeBootstrapConfig configured(final String pluginVersion) {
-        final BackendMode mode = BackendMode.parse(Config.BRIDGE_BACKEND_MODE);
         try {
             final BackendManifest manifest = BackendManifest.load().requireVersion(pluginVersion);
             final String triple = targetTriple(System.getProperty("os.name", ""), System.getProperty("os.arch", ""));
@@ -124,7 +115,7 @@ public final class BridgeBootstrapConfig {
                 ? null : Path.of(System.getProperty("squaremap.backendBinary"));
             final Path cacheRoot = Path.of(System.getProperty("squaremap.backendCache", Path.of("rust-backend-cache").toAbsolutePath().toString()));
             final Path verified = BinaryResolver.resolve(cacheRoot, pluginVersion, triple, expected, configuredBinary);
-            return new BridgeBootstrapConfig(mode, pluginVersion, new SidecarCommand(verified),
+            return new BridgeBootstrapConfig(pluginVersion, new SidecarCommand(verified),
                 Duration.ofSeconds(Config.BRIDGE_STARTUP_TIMEOUT_SECONDS), DEFAULT_SHUTDOWN_GRACE,
                 Path.of(System.getProperty("squaremap.backendOutputRoot", Path.of("rust-backend").toAbsolutePath().toString())));
         } catch (final IOException error) {
@@ -134,12 +125,6 @@ public final class BridgeBootstrapConfig {
 
     public static BridgeBootstrapConfig configured() {
         return configured("unknown");
-    }
-
-
-
-    public BackendMode backendMode() {
-        return this.backendMode;
     }
 
     public String pluginVersion() {

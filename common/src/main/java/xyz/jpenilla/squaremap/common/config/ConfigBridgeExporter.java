@@ -14,8 +14,6 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.biome.BiomeManager;
 import xyz.jpenilla.squaremap.api.WorldIdentifier;
 import xyz.jpenilla.squaremap.bridge.v1.AdvancedSettings;
-import xyz.jpenilla.squaremap.common.bridge.process.BackendLifecyclePolicy;
-import xyz.jpenilla.squaremap.common.bridge.process.BackendMode;
 import xyz.jpenilla.squaremap.bridge.v1.ColorOverride;
 import xyz.jpenilla.squaremap.bridge.v1.ConfigReplace;
 import xyz.jpenilla.squaremap.bridge.v1.GlobalSettings;
@@ -48,10 +46,6 @@ public final class ConfigBridgeExporter {
     }
 
     public ConfigReplace export() {
-        throw new IllegalStateException("backend mode must be supplied by the immutable bootstrap configuration");
-    }
-
-    public ConfigReplace export(final BackendMode mode) {
         final long revision = this.revisions.next();
         final List<ServerLevel> levels = this.serverAccess.levels().stream()
             .sorted(Comparator.comparing(level -> Util.worldIdentifier(level).asString())).toList();
@@ -61,7 +55,7 @@ public final class ConfigBridgeExporter {
             .setUpdateChecker(Config.UPDATE_CHECKER).setWebAddress(Config.WEB_ADDRESS)
             .setWebDirectory(Config.WEB_DIR).setUpdateWebDirectory(Config.UPDATE_WEB_DIR)
             .setCompressImages(Config.COMPRESS_IMAGES).setCompressionRatio(Config.COMPRESSION_RATIO)
-            .setHttpEnabled(BackendLifecyclePolicy.rustHttpOwner(mode) && Config.HTTPD_ENABLED)
+            .setHttpEnabled(Config.HTTPD_ENABLED)
             .setHttpBind(Config.HTTPD_BIND).setHttpPort(Config.HTTPD_PORT)
             .setFlushJsonImmediately(Config.FLUSH_JSON_IMMEDIATELY)
             .setMainCommandLabel(Config.MAIN_COMMAND_LABEL).addAllMainCommandAliases(Config.MAIN_COMMAND_ALIASES)
