@@ -212,7 +212,7 @@ public final class BackendManifest {
                 "native backend manifest target '%s' is missing string field '%s'".formatted(triple, field)
             );
         }
-        final String value = element.getAsString().trim();
+        final String value = element.getAsString();
         if (value.isEmpty()) {
             throw new BackendManifestException(
                 "native backend manifest target '%s' field '%s' must not be blank".formatted(triple, field)
@@ -222,14 +222,13 @@ public final class BackendManifest {
     }
 
     private static String normalizeSha256(final String value, final String triple) {
-        final String lower = NON_HEX.matcher(value).replaceAll("").toLowerCase(Locale.ROOT);
-        if (!SHA256_PATTERN.matcher(lower).matches()) {
+        if (!SHA256_PATTERN.matcher(value).matches()) {
             throw new BackendManifestException(
                 "native backend manifest target '%s' has invalid 'sha256' '%s'; expected 64 lowercase hex characters"
                     .formatted(triple, value)
             );
         }
-        return lower;
+        return value;
     }
 
     /** A single released backend binary: download URL, byte length, lowercase SHA-256. */

@@ -1,10 +1,14 @@
 package xyz.jpenilla.squaremap.common.bridge.process;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.SecureRandom;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import xyz.jpenilla.squaremap.bridge.v1.Envelope;
@@ -14,6 +18,22 @@ import xyz.jpenilla.squaremap.common.bridge.outbox.BridgeEvent;
 import static org.junit.jupiter.api.Assertions.*;
 
 class SidecarSupervisorTest {
+    @Test
+    void closeAfterFailurePreservesOriginalThrowableAndLateListenerReplaysOnce() throws Exception {
+        final SidecarSupervisor supervisor = new SidecarSupervisor();
+        final BridgeConnection connection = supervisor.startDetachedForTests();
+        final var failures = new ArrayList<Throwable>();
+        final RuntimeException original = new RuntimeException("original");
+        connection.setFailureListener(failures::add);
+        final var signal = connection.getClass().getDeclaredMethod("signalFailure", Throwable.class);
+        signal.setAccessible(true);
+        signal.invoke(connection, original);
+        connection.close();
+        connection.setFailureListener(failures::add);
+        assertEquals(1, failures.size());
+        assertSame(original, failures.get(0));
+        supervisor.close();
+    }
     @Test
     void validHandshakeReturnsConnectionAndCloseIsIdempotent() throws Exception {
         final SidecarSupervisor supervisor = new SidecarSupervisor();
@@ -31,6 +51,7 @@ class SidecarSupervisorTest {
         final SidecarSupervisor supervisor = new SidecarSupervisor();
         final BridgeConnection connection = supervisor.start(config("ack-publish", Duration.ofSeconds(5)))
             .toCompletableFuture().get(6, TimeUnit.SECONDS);
+
         final Envelope payload = Envelope.newBuilder()
             .setPlayersReplace(PlayersReplace.newBuilder().setMaxPlayers(20))
             .build();
@@ -38,6 +59,22 @@ class SidecarSupervisorTest {
         assertTrue(connection.publish(event) == xyz.jpenilla.squaremap.common.bridge.outbox.BridgePublisher.PublishResult.ACCEPTED);
         Thread.sleep(100L);
         assertFalse(connection.isClosed());
+        connection.close();
+        supervisor.close();
+    }
+    @Test
+    void routesWorldEnumerationRequestsToSnapshotListenerOnly() throws Exception {
+        final SidecarSupervisor supervisor = new SidecarSupervisor();
+        final BridgeConnection connection = supervisor.start(config("world-enumeration", Duration.ofSeconds(5)))
+            .toCompletableFuture().get(6, TimeUnit.SECONDS);
+        final CountDownLatch snapshot = new CountDownLatch(1);
+        final CountDownLatch response = new CountDownLatch(1);
+        connection.setSnapshotRequestListener(envelope -> {
+            if (envelope.hasWorldEnumerationRequest()) snapshot.countDown();
+        });
+        connection.setResponseListener(envelope -> response.countDown());
+        assertTrue(snapshot.await(3, TimeUnit.SECONDS));
+        assertFalse(response.await(200, TimeUnit.MILLISECONDS));
         connection.close();
         supervisor.close();
     }
@@ -72,7 +109,10 @@ class SidecarSupervisorTest {
     void protocolMajorMismatchRejectsAndTerminatesChild() {
         assertRejected("major-mismatch");
     }
-
+    @Test
+    void protocolMinorMismatchRejectsAndTerminatesChild() {
+        assertRejected("minor-mismatch");
+    }
     @Test
     void readinessTimeoutCleansUpChildAndListener() {
         final SidecarSupervisor supervisor = new SidecarSupervisor();
@@ -99,6 +139,81 @@ class SidecarSupervisorTest {
         supervisor.close();
         assertTrue(supervisor.isClosed());
     }
+    @Test
+    void reconnectPublishesOneStableBridgeIdentity() throws Exception {
+        final Path data = Files.createTempDirectory("bridge-identity");
+        final SidecarSupervisor first = new SidecarSupervisor(new SecureRandom(), data);
+        try {
+            final byte[] expected = Files.readAllBytes(data.resolve("bridge-identity.bin"));
+            assertEquals(SidecarSupervisor.SESSION_ID_BYTES, expected.length);
+            final SidecarSupervisor second = new SidecarSupervisor(new SecureRandom(), data);
+            try {
+                assertArrayEquals(expected, Files.readAllBytes(data.resolve("bridge-identity.bin")));
+            } finally {
+                second.close();
+            }
+        } finally {
+            first.close();
+        }
+    }
+    @Test
+    void authenticatedFailureDuringRestartStopsAfterFailedReauthentication() throws Exception {
+        final SidecarSupervisor supervisor = new SidecarSupervisor();
+        final CountDownLatch failure = new CountDownLatch(1);
+        supervisor.setReconnectListener(connection -> connection.setFailureListener(ignored -> failure.countDown()));
+        final Path state = Files.createTempFile("squaremap-fault-sequence", ".txt");
+        Files.deleteIfExists(state);
+        try {
+            final BridgeBootstrapConfig config = config("auth-fails-after-restart", Duration.ofSeconds(5), Duration.ofMillis(200), state);
+            supervisor.start(config).toCompletableFuture().get(6, TimeUnit.SECONDS);
+            assertTrue(failure.await(3, TimeUnit.SECONDS));
+            assertTimeoutPreemptively(Duration.ofSeconds(20), () -> {
+                while (Files.readString(state).trim().equals("1")) {
+                    Thread.sleep(25L);
+                }
+                assertEquals("2", Files.readString(state).trim());
+                while (!supervisor.isClosed()) {
+                    Thread.sleep(25L);
+                }
+            });
+            assertTrue(supervisor.currentConnection() == null);
+        } finally {
+            supervisor.close();
+            Files.deleteIfExists(state);
+        }
+    }
+    @Test
+    void duplicateInboundSequenceFailsAuthenticatedConnection() throws Exception {
+        final SidecarSupervisor supervisor = new SidecarSupervisor();
+        final BridgeConnection connection = supervisor.start(config("duplicate-inbound-sequence", Duration.ofSeconds(5)))
+            .toCompletableFuture().get(6, TimeUnit.SECONDS);
+        final CountDownLatch failure = new CountDownLatch(1);
+        connection.setFailureListener(ignored -> failure.countDown());
+        assertTrue(failure.await(3, TimeUnit.SECONDS));
+        assertTimeoutPreemptively(Duration.ofSeconds(3), () -> {
+            while (!connection.isClosed()) {
+                Thread.sleep(10L);
+            }
+        });
+        supervisor.close();
+    }
+
+    @Test
+    void gapInboundSequenceFailsAuthenticatedConnection() throws Exception {
+        final SidecarSupervisor supervisor = new SidecarSupervisor();
+        final BridgeConnection connection = supervisor.start(config("gap-inbound-sequence", Duration.ofSeconds(5)))
+            .toCompletableFuture().get(6, TimeUnit.SECONDS);
+        final CountDownLatch failure = new CountDownLatch(1);
+        connection.setFailureListener(ignored -> failure.countDown());
+        assertTrue(failure.await(3, TimeUnit.SECONDS));
+        assertTimeoutPreemptively(Duration.ofSeconds(3), () -> {
+            while (!connection.isClosed()) {
+                Thread.sleep(10L);
+            }
+        });
+        supervisor.close();
+    }
+
 
     @Test
     void failedSupervisorIsTerminalBeforeAuthentication() {
@@ -201,7 +316,7 @@ class SidecarSupervisorTest {
     }
 
     private static BridgeBootstrapConfig config(final String behavior, final Duration timeout) {
-        return config(behavior, timeout, Duration.ofMillis(200));
+        return config(behavior, timeout, Duration.ofMillis(200), null);
     }
 
     private static BridgeBootstrapConfig config(
@@ -209,17 +324,28 @@ class SidecarSupervisorTest {
         final Duration timeout,
         final Duration shutdownGrace
     ) {
+        return config(behavior, timeout, shutdownGrace, null);
+    }
+
+    private static BridgeBootstrapConfig config(
+        final String behavior,
+        final Duration timeout,
+        final Duration shutdownGrace,
+        final Path stateFile
+    ) {
+        final List<String> command = new ArrayList<>(List.of(
+            javaExecutable().toString(),
+            "-cp",
+            System.getProperty("java.class.path"),
+            FakeSidecar.class.getName(),
+            "--behavior=" + behavior,
+            "--expected-root=" + rustOutputRoot()
+        ));
+        if (stateFile != null) command.add("--state-file=" + stateFile);
         return new BridgeBootstrapConfig(
             BackendMode.RUST,
             "fixture",
-            new SidecarCommand(List.of(
-                javaExecutable().toString(),
-                "-cp",
-                System.getProperty("java.class.path"),
-                FakeSidecar.class.getName(),
-                "--behavior=" + behavior,
-                "--expected-root=" + rustOutputRoot()
-            )),
+            new SidecarCommand(command),
             timeout,
             shutdownGrace,
             Path.of(System.getProperty("java.io.tmpdir"), "squaremap-rust-fixture")
@@ -230,7 +356,6 @@ class SidecarSupervisorTest {
     }
 
     private static Path javaExecutable() {
-        final String executable = System.getProperty("java.home") + "/bin/java";
-        return Path.of(executable);
+        return Path.of(System.getProperty("java.home"), "bin", "java");
     }
 }

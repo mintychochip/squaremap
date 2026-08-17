@@ -9,6 +9,7 @@ final class InboundSequenceTracker {
     }
 
     InboundSequenceTracker(final long expected) {
+        if (expected <= 0L) throw new IllegalArgumentException("sequence must be positive");
         this.last = expected - 1L;
         this.initialized = true;
     }
@@ -18,7 +19,7 @@ final class InboundSequenceTracker {
             this.initialized = true;
             return true;
         }
-        if (sequence != this.last + 1L) return false;
+        if (this.last == Long.MAX_VALUE || sequence != this.last + 1L) return false;
         this.last = sequence;
         return true;
     }

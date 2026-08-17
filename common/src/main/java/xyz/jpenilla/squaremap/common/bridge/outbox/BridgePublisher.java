@@ -18,6 +18,7 @@ import xyz.jpenilla.squaremap.bridge.v1.Envelope;
 import xyz.jpenilla.squaremap.bridge.v1.ResyncReason;
 import xyz.jpenilla.squaremap.bridge.v1.WorldIdentity;
 import xyz.jpenilla.squaremap.bridge.v1.WorldResyncRequired;
+import xyz.jpenilla.squaremap.common.bridge.process.SidecarSupervisor;
 
 /** Owns the only bridge writer worker and keeps durable values until acknowledgement. */
 public final class BridgePublisher implements AutoCloseable {
@@ -126,6 +127,15 @@ public final class BridgePublisher implements AutoCloseable {
             return dispatched ? ControlDisposition.DISPATCHED : ControlDisposition.RECALLED;
         }
     }
+    public void rejectConfig(final long revision) {
+        synchronized (this.lock) {
+            final BridgeEvent event = this.current.get("state:config");
+            if (!(event instanceof BridgeEvent.ReplaceState state) || !state.payload().hasConfigReplace()
+                || state.payload().getConfigReplace().getRevision() != revision) return;
+            this.current.remove("state:config");
+            this.outbox.removeReplacement("config");
+        }
+    }
     public void applyPolicy(final xyz.jpenilla.squaremap.bridge.v1.BridgePolicyReplace policy) {
         this.policyMaxDirtyKeys = Math.max(1, policy.getMaxPendingDirtyChunks());
         this.policyMaxReplacementKeys = Math.max(1, policy.getSnapshotCredits());
@@ -166,7 +176,8 @@ public final class BridgePublisher implements AutoCloseable {
             if (sent == null || sent.generation() != this.generation) return;
             final Object identity = identity(sent.event());
             if (Objects.equals(this.current.get(identity), sent.event())) this.current.remove(identity);
-            final Published published = sent.event() instanceof BridgeEvent.ReplaceState state ? new Published(state.payload()) : new Published(sent.event());
+            final Published published = sent.event() instanceof BridgeEvent.ReplaceState state ? new Published(state.payload())
+                : sent.event() instanceof BridgeEvent.Transient response ? new Published(response.payload()) : new Published(sent.event());
             acknowledged = new Sent(ack.getAcknowledgedSequence(), published, sent.envelope());
         }
         this.acknowledgementListener.accept(acknowledged);
@@ -253,6 +264,9 @@ public final class BridgePublisher implements AutoCloseable {
     }
 
     private PublishResult offerCurrent(final BridgeEvent event) {
+        if (event instanceof BridgeEvent.Transient response) {
+            return this.outbox.offer(response);
+        }
         if (event instanceof BridgeEvent.Control control) {
             this.current.put(identity(control), control);
             return this.outbox.offer(control);
@@ -368,7 +382,8 @@ public final class BridgePublisher implements AutoCloseable {
             batch = new ArrayList<>(events.size());
             for (final BridgeEvent event : events) {
                 final long sequence = ++this.nextSequence;
-                final Sent sent = new Sent(sequence, new Published(event instanceof BridgeEvent.ReplaceState state ? state.payload() : event),
+                final Sent sent = new Sent(sequence, new Published(event instanceof BridgeEvent.ReplaceState state ? state.payload()
+                    : event instanceof BridgeEvent.Transient response ? response.payload() : event),
                     toEnvelope(event, sequence, this.sessionId));
                 this.inFlight.put(sequence, new InFlight(event, sent.envelope(), batchGeneration));
                 batch.add(sent);
@@ -423,6 +438,7 @@ public final class BridgePublisher implements AutoCloseable {
     private static Object identity(final BridgeEvent event) {
         return switch (event) {
             case BridgeEvent.ReplaceState state -> "state:" + state.key();
+            case BridgeEvent.Transient ignored -> new Object();
             case BridgeEvent.Control control -> "control:" + control.correlationId();
             case BridgeEvent.DirtyChunk dirty -> new DirtyIdentity(dirty.world(), dirty.epoch(), dirty.x(), dirty.z());
             case BridgeEvent.ResyncWorld resync -> new WorldIdentityKey(resync.world(), resync.epoch());
@@ -432,26 +448,34 @@ public final class BridgePublisher implements AutoCloseable {
         final byte[] session = sessionId.clone();
         if (event instanceof BridgeEvent.Control control) {
             return control.payload().toBuilder()
-                .setProtocolMajor(1)
-                .setProtocolMinor(0)
+                .setProtocolMajor(SidecarSupervisor.PROTOCOL_MAJOR)
+                .setProtocolMinor(SidecarSupervisor.PROTOCOL_MINOR)
                 .setSessionId(com.google.protobuf.ByteString.copyFrom(session))
                 .setSequence(sequence)
                 .setCorrelationId(control.correlationId())
                 .build();
         }
-        final Envelope.Builder builder = Envelope.newBuilder()
-            .setProtocolMajor(1)
-            .setProtocolMinor(0)
-            .setSessionId(com.google.protobuf.ByteString.copyFrom(session))
-            .setSequence(sequence);
-        if (event instanceof BridgeEvent.ReplaceState state) {
-            return state.payload().toBuilder()
-                .setProtocolMajor(1)
-                .setProtocolMinor(0)
+        if (event instanceof BridgeEvent.Transient response) {
+            return response.payload().toBuilder()
+                .setProtocolMajor(SidecarSupervisor.PROTOCOL_MAJOR)
+                .setProtocolMinor(SidecarSupervisor.PROTOCOL_MINOR)
                 .setSessionId(com.google.protobuf.ByteString.copyFrom(session))
                 .setSequence(sequence)
                 .build();
         }
+        if (event instanceof BridgeEvent.ReplaceState state) {
+            return state.payload().toBuilder()
+                .setProtocolMajor(SidecarSupervisor.PROTOCOL_MAJOR)
+                .setProtocolMinor(SidecarSupervisor.PROTOCOL_MINOR)
+                .setSessionId(com.google.protobuf.ByteString.copyFrom(session))
+                .setSequence(sequence)
+                .build();
+        }
+        final Envelope.Builder builder = Envelope.newBuilder()
+            .setProtocolMajor(SidecarSupervisor.PROTOCOL_MAJOR)
+            .setProtocolMinor(SidecarSupervisor.PROTOCOL_MINOR)
+            .setSessionId(com.google.protobuf.ByteString.copyFrom(session))
+            .setSequence(sequence);
         final WorldIdentity world = WorldIdentity.newBuilder()
             .setNamespace(event instanceof BridgeEvent.DirtyChunk dirty ? dirty.world().namespace() : ((BridgeEvent.ResyncWorld) event).world().namespace())
             .setValue(event instanceof BridgeEvent.DirtyChunk dirty ? dirty.world().value() : ((BridgeEvent.ResyncWorld) event).world().value())

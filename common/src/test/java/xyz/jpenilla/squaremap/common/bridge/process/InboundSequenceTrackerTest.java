@@ -3,6 +3,7 @@ package xyz.jpenilla.squaremap.common.bridge.process;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class InboundSequenceTrackerTest {
@@ -20,5 +21,16 @@ final class InboundSequenceTrackerTest {
         final InboundSequenceTracker tracker = new InboundSequenceTracker(8L);
         assertFalse(tracker.accept(7L));
         assertTrue(tracker.accept(8L));
+    }
+
+    @Test
+    void rejectsOverflowAfterMaximumSequence() {
+        final InboundSequenceTracker tracker = new InboundSequenceTracker(Long.MAX_VALUE);
+        assertFalse(tracker.accept(Long.MIN_VALUE));
+    }
+
+    @Test
+    void rejectsHandshakeSequenceOverflow() {
+        assertThrows(IllegalArgumentException.class, () -> new InboundSequenceTracker(-1L));
     }
 }

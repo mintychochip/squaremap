@@ -15,12 +15,13 @@ public final class CoalescingOutbox {
     private final int maxDirtyKeys;
     private final int maxReplacementKeys;
     private static final int MAX_CONTROL_REQUESTS = 1_024;
+    private static final int MAX_TRANSIENT_RESPONSES = 4_096;
     private final Object lock = new Object();
     private final Map<String, BridgeEvent.ReplaceState> states = new TreeMap<>();
+    private final List<BridgeEvent.Transient> transientResponses = new ArrayList<>();
     private final Map<DirtyKey, BridgeEvent.DirtyChunk> dirty = new TreeMap<>();
     private final Map<WorldEpoch, BridgeEvent.ResyncWorld> resyncs = new TreeMap<>();
     private final Map<Long, BridgeEvent.Control> controls = new TreeMap<>();
-
     public CoalescingOutbox() {
         this(MAX_DIRTY_KEYS, BridgePublisher.DEFAULT_MAX_REPLACEMENT_KEYS);
     }
@@ -51,15 +52,17 @@ public final class CoalescingOutbox {
 
     public List<BridgeEvent> drain() {
         synchronized (this.lock) {
-            final List<BridgeEvent> result = new ArrayList<>(this.states.size() + this.dirty.size() + this.resyncs.size() + this.controls.size());
+            final List<BridgeEvent> result = new ArrayList<>(this.states.size() + this.transientResponses.size() + this.dirty.size() + this.resyncs.size() + this.controls.size());
             this.states.values().stream()
                 .sorted(Comparator.comparingInt((BridgeEvent.ReplaceState state) -> replacementPriority(state.key()))
                     .thenComparing(BridgeEvent.ReplaceState::key))
                 .forEach(result::add);
+            result.addAll(this.transientResponses);
             result.addAll(this.controls.values());
             result.addAll(this.dirty.values());
             result.addAll(this.resyncs.values());
             this.states.clear();
+            this.transientResponses.clear();
             this.controls.clear();
             this.dirty.clear();
             this.resyncs.clear();
@@ -69,6 +72,12 @@ public final class CoalescingOutbox {
     public boolean removeControl(final long correlationId) {
         synchronized (this.lock) {
             return this.controls.remove(correlationId) != null;
+        }
+    }
+    public boolean removeReplacement(final String key) {
+        Objects.requireNonNull(key, "key");
+        synchronized (this.lock) {
+            return this.states.remove(key) != null;
         }
     }
 
@@ -92,13 +101,14 @@ public final class CoalescingOutbox {
 
     public boolean isEmpty() {
         synchronized (this.lock) {
-            return this.states.isEmpty() && this.controls.isEmpty() && this.dirty.isEmpty() && this.resyncs.isEmpty();
+            return this.states.isEmpty() && this.transientResponses.isEmpty() && this.controls.isEmpty() && this.dirty.isEmpty() && this.resyncs.isEmpty();
         }
     }
 
     void replaceWith(final Collection<BridgeEvent> events) {
         synchronized (this.lock) {
             this.states.clear();
+            this.transientResponses.clear();
             this.controls.clear();
             this.dirty.clear();
             this.resyncs.clear();
@@ -112,6 +122,7 @@ public final class CoalescingOutbox {
     }
 
     private static int replacementPriority(final String key) {
+        if ("bridge-identity".equals(key)) return -1;
         if ("worlds".equals(key)) return 0;
         if (key.startsWith("markers:")) return 1;
         if ("players".equals(key)) return 2;
@@ -120,6 +131,11 @@ public final class CoalescingOutbox {
     }
 
     private BridgePublisher.PublishResult offerLocked(final BridgeEvent event) {
+        if (event instanceof BridgeEvent.Transient response) {
+            if (this.transientResponses.size() >= MAX_TRANSIENT_RESPONSES) throw new IllegalStateException("transient-response bound exceeded");
+            this.transientResponses.add(response);
+            return BridgePublisher.PublishResult.ACCEPTED;
+        }
         if (event instanceof BridgeEvent.Control control) {
             if (!this.controls.containsKey(control.correlationId()) && this.controls.size() >= MAX_CONTROL_REQUESTS) {
                 throw new IllegalStateException("control-request bound exceeded");

@@ -37,3 +37,27 @@ final class ProofFixtureTest {
   private static String replaceAllHashes(String x,String hash){return x.replaceAll("\"sha256\": \"[0-9a-f]+\"","\"sha256\": \""+hash+"\"");}
   private static Path stageManifest(Path d)throws Exception {Files.copy(MANIFEST,d.resolve("manifest.json"));for(String name:new String[]{"paper.jar","plugin.jar","squaremap-server"})Files.copy(Path.of("../testdata/bridge/v1/"+name),d.resolve(name));Files.copy(Path.of("../testdata/bridge/v1/world-fixture.json"),d.resolve("world-fixture.json"));return d.resolve("manifest.json");}
 }
+
+final class QuiescenceProbeTest {
+  @Test
+  void returnsOnlyAfterTwoEqualCompleteSamples() {
+    final var sample = QuiescenceSnapshot.complete("hash", 7L);
+    final var calls = new java.util.concurrent.atomic.AtomicInteger();
+    final var observed = new java.util.concurrent.atomic.AtomicLong();
+    final var probe = new QuiescenceProbe(() -> {
+      if (calls.incrementAndGet() == 2) observed.set(System.nanoTime());
+      return sample;
+    });
+    final long start = System.nanoTime();
+    assertEquals(sample, probe.await(java.time.Duration.ofSeconds(1), java.time.Duration.ofMillis(10)));
+    assertTrue(observed.get() - start >= java.time.Duration.ofMillis(10).toNanos());
+    assertTrue(calls.get() >= 2);
+  }
+
+  @Test
+  void rejectsMissingObservation() {
+    final var probe = new QuiescenceProbe(() -> QuiescenceSnapshot.incomplete("metrics unavailable"));
+    assertThrows(IllegalStateException.class,
+        () -> probe.await(java.time.Duration.ofMillis(10), java.time.Duration.ZERO));
+  }
+}

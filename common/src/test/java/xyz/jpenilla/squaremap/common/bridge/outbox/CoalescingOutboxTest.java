@@ -48,6 +48,28 @@ class CoalescingOutboxTest {
             outbox.offer(new BridgeEvent.ReplaceState("players", latest)));
         assertEquals(List.of(new BridgeEvent.ReplaceState("players", latest)), outbox.drain());
     }
+
+    @Test
+    void transientResponsesPreserveOrderWithoutReplacementInventory() {
+        final CoalescingOutbox outbox = new CoalescingOutbox();
+        final BridgeEvent.Transient item = new BridgeEvent.Transient(Envelope.newBuilder().setSequence(10).build());
+        final BridgeEvent.Transient complete = new BridgeEvent.Transient(Envelope.newBuilder().setSequence(11).build());
+        outbox.offer(item);
+        outbox.offer(complete);
+        final List<BridgeEvent> drained = outbox.drain();
+        assertEquals(List.of(item, complete), drained);
+        assertTrue(drained.stream().noneMatch(BridgeEvent.ReplaceState.class::isInstance));
+    }
+
+    @Test
+    void transientResponsesHaveBoundedExplicitSaturation() {
+        final CoalescingOutbox outbox = new CoalescingOutbox();
+        for (int index = 0; index < 4_096; index++) {
+            outbox.offer(new BridgeEvent.Transient(Envelope.newBuilder().setSequence(index).build()));
+        }
+        assertThrows(IllegalStateException.class,
+            () -> outbox.offer(new BridgeEvent.Transient(Envelope.getDefaultInstance())));
+    }
     @Test
     void replacementBaselineDrainsWorldsBeforeEpochDependentViews() {
         final CoalescingOutbox outbox = new CoalescingOutbox();
@@ -405,6 +427,7 @@ class CoalescingOutboxTest {
     void unacknowledgedOverflowMarkerSuppressesPostOverflowDirtiesOnReconnect() throws Exception {
         final CountDownLatch entered = new CountDownLatch(1);
         final CountDownLatch release = new CountDownLatch(1);
+        final CountDownLatch reconnectedMarkerSent = new CountDownLatch(1);
         final List<BridgePublisher.Sent> sent = new CopyOnWriteArrayList<>();
         final BridgePublisher publisher = new BridgePublisher(SESSION, new BridgePublisher.Writer() {
             @Override
@@ -413,6 +436,10 @@ class CoalescingOutboxTest {
                 if (value.sequence() == 1) {
                     entered.countDown();
                     release.await();
+                }
+                if (value.event().payload() instanceof BridgeEvent.ResyncWorld
+                    && Arrays.equals(value.envelope().getSessionId().toByteArray(), bytes(7))) {
+                    reconnectedMarkerSent.countDown();
                 }
             }
             @Override
@@ -437,7 +464,7 @@ class CoalescingOutboxTest {
             release.countDown();
             reconnect.join(2000L);
             assertFalse(reconnect.isAlive());
-            assertTrue(publisher.awaitSent(3, Duration.ofSeconds(2)));
+            assertTrue(reconnectedMarkerSent.await(2, TimeUnit.SECONDS));
             assertTrue(sent.get(sent.size() - 1).event().payload() instanceof BridgeEvent.ResyncWorld);
         } finally {
             publisher.close();

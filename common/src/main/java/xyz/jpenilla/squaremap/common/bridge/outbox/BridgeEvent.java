@@ -4,7 +4,7 @@ import java.util.Objects;
 import xyz.jpenilla.squaremap.bridge.v1.Envelope;
 
 /** Immutable bridge updates that can be coalesced without losing durable state. */
-public sealed interface BridgeEvent permits BridgeEvent.ReplaceState, BridgeEvent.DirtyChunk, BridgeEvent.ResyncWorld, BridgeEvent.Control {
+public sealed interface BridgeEvent permits BridgeEvent.ReplaceState, BridgeEvent.Transient, BridgeEvent.DirtyChunk, BridgeEvent.ResyncWorld, BridgeEvent.Control {
     record WorldKey(String namespace, String value) implements Comparable<WorldKey> {
         public WorldKey {
             Objects.requireNonNull(namespace, "namespace");
@@ -21,6 +21,13 @@ public sealed interface BridgeEvent permits BridgeEvent.ReplaceState, BridgeEven
     record ReplaceState(String key, Envelope payload) implements BridgeEvent {
         public ReplaceState {
             Objects.requireNonNull(key, "key");
+            Objects.requireNonNull(payload, "payload");
+        }
+    }
+
+    /** One-shot response that is never coalesced or retained as replacement state. */
+    record Transient(Envelope payload) implements BridgeEvent {
+        public Transient {
             Objects.requireNonNull(payload, "payload");
         }
     }
