@@ -120,22 +120,6 @@ jobs:
           else
             echo "STATUS=release" >> "$GITHUB_ENV"
           fi
-          PUBLISH_API="$(awk -F= '/^publishApi=/ { print $2; }' gradle.properties)"
-          echo "PUBLISH_API=${PUBLISH_API:-true}" >> "$GITHUB_ENV"
-      - name: "publish snapshot to sonatype snapshots"
-        if: "${{ env.STATUS != 'release' && github.event_name == 'push' && github.ref == 'refs/heads/master' }}"
-        run: ./gradlew publishAllPublicationsToSonatypeSnapshots
-        env:
-          ORG_GRADLE_PROJECT_sonatypeUsername: "${{ secrets.SONATYPE_USERNAME }}"
-          ORG_GRADLE_PROJECT_sonatypePassword: "${{ secrets.SONATYPE_PASSWORD }}"
-      - name: "publish release to maven central"
-        if: "${{ env.STATUS == 'release' && env.PUBLISH_API == 'true' && github.event_name == 'release' }}"
-        run: ./gradlew publishReleaseCentralPortalBundle
-        env:
-          ORG_GRADLE_PROJECT_sonatypeUsername: "${{ secrets.SONATYPE_USERNAME }}"
-          ORG_GRADLE_PROJECT_sonatypePassword: "${{ secrets.SONATYPE_PASSWORD }}"
-          ORG_GRADLE_PROJECT_signingKey: "${{ secrets.SIGNING_KEY }}"
-          ORG_GRADLE_PROJECT_signingPassword: "${{ secrets.SIGNING_PASSWORD }}"
       - name: "publish release to modrinth"
         if: "${{ env.STATUS == 'release' && github.event_name == 'release' }}"
         run: ./gradlew publishModrinth
