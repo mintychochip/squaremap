@@ -112,7 +112,7 @@ Context consumers:
 - `@types/react` `^19.0.0`
 - `@types/react-dom` `^19.0.0`
 - `typescript` `^7.0.2`
-- `@vitejs/plugin-react` `^4.3.0` (or latest compatible)
+- `@vitejs/plugin-react` `^6.0.5` (latest compatible)
 
 ### Existing dependencies to keep
 
