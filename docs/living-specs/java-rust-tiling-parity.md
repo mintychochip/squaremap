@@ -56,8 +56,8 @@ Pre-existing tile content:
 - [x] Direct Java `Image.save()` vs Rust `TilePyramid` decoded-RGBA probe, zero mismatches
 - [x] Sequential sparse chunk-sized updates to one region match
 - [x] Negative-region + zoom 0..=3 path/origin/pixel probe
-- [ ] Paired renderer A/B with per-pass samples and graphs
-- [ ] Paired pyramid A/B with per-pass samples and graphs
+- [x] Paired renderer A/B with per-pass samples and graphs
+- [x] Paired pyramid A/B with per-pass samples and graphs
 
 ## Next
 
@@ -72,6 +72,7 @@ Live Paper tile-tree comparison.
 - 2026-08-21: Keep Rust fail-closed on corrupt/wrong-type/wrong-size existing tiles; do not match Java overwrite.
 - 2026-08-21: A/B graphs use per-pass samples; no speedup published unless checksums match.
 - 2026-08-21: Java `Image.save()` vs Rust `TilePyramid` decoded-RGBA probe was zero-mismatch on first paired run (10 catalog cases). No pyramid compositing fix required.
+- 2026-08-21: Paired A/B checksums matched on all three repeats plus the 90-sample summaries. Renderer `chunk-render-v2` median 5619.63 Java vs 12540.46 Rust items/s (2.23×). Pyramid `pyramid-png-v2` median 59.054 Java vs 101.713 Rust items/s (1.72×). Not a universal backend speedup.
 
 ## Open questions
 

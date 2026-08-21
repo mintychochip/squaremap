@@ -1,0 +1,27 @@
+{
+  "workload": "chunk-render-v2",
+  "case_count": 26,
+  "warmup_passes": 10,
+  "measured_passes": 90,
+  "manifest_hash": "f71c9a0733d75a81a7a886d6ad6ffb2b019ba6c19723a8823134b253bdefc4f1",
+  "java_checksum": -5578976407213116928,
+  "rust_checksum": -5578976407213116928,
+  "passed": true,
+  "java": {
+    "backend": "java",
+    "min_nanos": 3971185,
+    "median_nanos": 4626641,
+    "p95_nanos": 7184998,
+    "max_nanos": 7825349,
+    "items_per_second_median": 5619.627716954914
+  },
+  "rust": {
+    "backend": "rust",
+    "min_nanos": 2040532,
+    "median_nanos": 2073289,
+    "p95_nanos": 2163312,
+    "max_nanos": 2819065,
+    "items_per_second_median": 12540.461074167662
+  },
+  "speedup": 2.231546590948006
+}

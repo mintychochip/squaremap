@@ -1,0 +1,27 @@
+{
+  "workload": "pyramid-png-v2",
+  "case_count": 10,
+  "warmup_passes": 10,
+  "measured_passes": 90,
+  "manifest_hash": "17d28344eba35387eb58f354125332e23950c6a248bc9e9c3599620e48b1684c",
+  "java_checksum": -4734813580563762388,
+  "rust_checksum": -4734813580563762388,
+  "passed": true,
+  "java": {
+    "backend": "java",
+    "min_nanos": 164149730,
+    "median_nanos": 169336166,
+    "p95_nanos": 177177624,
+    "max_nanos": 182457277,
+    "items_per_second_median": 59.054130232286
+  },
+  "rust": {
+    "backend": "rust",
+    "min_nanos": 96457584,
+    "median_nanos": 98315695,
+    "p95_nanos": 102449980,
+    "max_nanos": 113474859,
+    "items_per_second_median": 101.71315983678903
+  },
+  "speedup": 1.722371651850704
+}
