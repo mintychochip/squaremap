@@ -1,5 +1,8 @@
 package xyz.jpenilla.squaremap.common.bridge.protocol;
 
+import java.util.Objects;
+import xyz.jpenilla.squaremap.bridge.v1.BridgePolicyReplace;
+
 /** Bounded sizes shared by the Java and Rust bridge codecs. */
 public final class FrameLimits {
     public static final long MAX_CONTROL_BYTES = 1_048_576L;
@@ -15,6 +18,23 @@ public final class FrameLimits {
         MAX_SNAPSHOT_BYTES,
         MAX_UNCOMPRESSED_SNAPSHOT_BYTES
     );
+
+    /** Adopts peer-advertised budgets, clamped to the codec maxima; zero means the codec maximum. */
+    public static FrameLimits fromPeerPolicy(final BridgePolicyReplace policy) {
+        Objects.requireNonNull(policy, "policy");
+        return new FrameLimits(
+            clampPeerBudget(policy.getMaxControlFrameBytes(), MAX_CONTROL_BYTES),
+            clampPeerBudget(policy.getMaxSnapshotFrameBytes(), MAX_SNAPSHOT_BYTES),
+            clampPeerBudget(policy.getMaxUncompressedSnapshotBytes(), MAX_UNCOMPRESSED_SNAPSHOT_BYTES)
+        );
+    }
+
+    private static long clampPeerBudget(final long peerValue, final long maximum) {
+        if (peerValue == 0) {
+            return maximum;
+        }
+        return Math.min(peerValue, maximum);
+    }
 
     private final long maxControlBytes;
     private final long maxSnapshotBytes;

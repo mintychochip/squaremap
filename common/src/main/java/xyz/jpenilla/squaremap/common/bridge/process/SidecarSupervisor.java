@@ -618,7 +618,7 @@ public final class SidecarSupervisor implements AutoCloseable {
         @Override public BridgePublisher.ControlDisposition cancelControl(final long correlationId) { return this.publisher.cancelControl(correlationId); }
         @Override public void rejectConfig(final long revision) { this.publisher.rejectConfig(revision); }
         @Override public void applyPolicy(final BridgePolicyReplace policy) {
-            this.frameLimits = new FrameLimits(policy.getMaxControlFrameBytes(), policy.getMaxSnapshotFrameBytes(), policy.getMaxUncompressedSnapshotBytes());
+            this.frameLimits = FrameLimits.fromPeerPolicy(policy);
             this.publisher.applyPolicy(policy);
         }
         @Override public void setReadyListener(final Consumer<Envelope> listener) {
