@@ -58,7 +58,7 @@ final class HtmlComponentSerializerImpl implements HtmlComponentSerializer {
                 text.codePoints().forEach($ ->
                     this.sb.append(OBFUSCATED_CHARS[ThreadLocalRandom.current().nextInt(OBFUSCATED_CHARS.length)]));
             } else {
-                this.sb.append(text);
+                this.sb.append(escapeHtml(text));
             }
             this.close(i);
         }
@@ -117,6 +117,21 @@ final class HtmlComponentSerializerImpl implements HtmlComponentSerializer {
                 return "<span style='" + inner + "'>";
             }
             throw new IllegalArgumentException("Cannot handle format: " + format + " (" + format.getClass().getTypeName() + ")");
+        }
+
+        private static String escapeHtml(final String text) {
+            final StringBuilder result = new StringBuilder(text.length());
+            for (final char c : text.toCharArray()) {
+                switch (c) {
+                    case '&' -> result.append("&amp;");
+                    case '<' -> result.append("&lt;");
+                    case '>' -> result.append("&gt;");
+                    case '"' -> result.append("&#34;");
+                    case '\'' -> result.append("&#39;");
+                    default -> result.append(c);
+                }
+            }
+            return result.toString();
         }
     }
 
