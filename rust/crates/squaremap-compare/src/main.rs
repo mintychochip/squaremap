@@ -77,7 +77,15 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
             println!("evidence gate passed");
             Ok(true)
         }
-        _ => Err("usage: compare-output --java DIR --rust DIR [--report FILE] [--normalize-live] | replay --recording FILE [--output FILE] | benchmark --iterations N --threshold N [--java DIR --rust DIR] | report --input FILE --output FILE | gate --evidence FILE [--matrix FILE]".into())
+        Some("ab-report") => {
+            let java = flag_value(&args[1..], "--java")?;
+            let rust = flag_value(&args[1..], "--rust")?;
+            let output = flag_value(&args[1..], "--output")?;
+            let report = squaremap_compare::ab::generate_ab_report(java, rust, output)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(report.passed)
+        }
+        _ => Err("usage: compare-output --java DIR --rust DIR [--report FILE] [--normalize-live] | replay --recording FILE [--output FILE] | benchmark --iterations N --threshold N [--java DIR --rust DIR] | report --input FILE --output FILE | gate --evidence FILE [--matrix FILE] | ab-report --java FILE --rust FILE --output DIR".into())
     }
 }
 
