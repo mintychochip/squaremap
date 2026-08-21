@@ -217,14 +217,18 @@ pub async fn apply_case(
     Ok(paths)
 }
 
+pub async fn apply_case_to(
+    store: Arc<dyn TileStore>,
+    manifest: &Manifest,
+    case: &TileCase,
+) -> Result<Vec<String>, TileError> {
+    let pyramid = TilePyramid::new(store, manifest.max_zoom, PngOptions { compression: false })?;
+    apply_case(&pyramid, manifest, case).await
+}
+
 pub async fn run_case(manifest: &Manifest, case: &TileCase) -> Result<CaseOutput, TileError> {
     let store = Arc::new(MemoryTileStore::new());
-    let pyramid = TilePyramid::new(
-        store.clone(),
-        manifest.max_zoom,
-        PngOptions { compression: false },
-    )?;
-    let paths = apply_case(&pyramid, manifest, case).await?;
+    let paths = apply_case_to(store.clone(), manifest, case).await?;
     Ok(CaseOutput { store, paths })
 }
 

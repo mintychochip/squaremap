@@ -36,6 +36,7 @@ tasks.test {
   systemProperty("squaremap.task11.root", rootProject.projectDir.absolutePath)
   providers.systemProperty("squaremap.regenerate").orNull?.let { systemProperty("squaremap.regenerate", it) }
   providers.systemProperty("squaremap.renderBenchmark").orNull?.let { systemProperty("squaremap.renderBenchmark", it) }
+  providers.systemProperty("squaremap.tileBenchmark").orNull?.let { systemProperty("squaremap.tileBenchmark", it) }
 }
 
 configurations.testCompileClasspath {
