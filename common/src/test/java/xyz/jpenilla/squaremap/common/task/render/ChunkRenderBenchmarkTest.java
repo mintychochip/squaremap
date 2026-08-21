@@ -1,6 +1,10 @@
 package xyz.jpenilla.squaremap.common.task.render;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -12,7 +16,7 @@ final class ChunkRenderBenchmarkTest {
     private static final int MEASURED_PASSES = 30;
 
     @Test
-    void rendererWorkload() {
+    void rendererWorkload() throws Exception {
         if (!Boolean.getBoolean("squaremap.renderBenchmark")) return;
         final ChunkRenderFixtureCatalog catalog = ChunkRenderFixtureCatalog.create();
         final List<ChunkRenderEngine> engines = new ArrayList<>();
@@ -28,13 +32,16 @@ final class ChunkRenderBenchmarkTest {
         }
         final long start = System.nanoTime();
         long checksum = 0;
+        final long[] passNanos = new long[MEASURED_PASSES];
         for (int pass = 0; pass < MEASURED_PASSES; pass++) {
+            final long passStart = System.nanoTime();
             long passChecksum = 0;
             for (int index = 0; index < engines.size(); index++) {
                 final var result = render(engines.get(index), models.get(index));
                 passChecksum = checksum(passChecksum, result);
             }
             checksum = checksum * 31 + passChecksum;
+            passNanos[pass] = Math.max(1L, System.nanoTime() - passStart);
         }
         final long elapsed = Math.max(1L, System.nanoTime() - start);
         for (int index = 0; index < engines.size(); index++) {
@@ -49,7 +56,15 @@ final class ChunkRenderBenchmarkTest {
         for (int pass = 0; pass < MEASURED_PASSES; pass++) expectedSequenceChecksum = expectedSequenceChecksum * 31 + expectedPassChecksum;
         assertEquals(expectedSequenceChecksum, checksum, "deterministic renderer checksum");
         final double itemsPerSecond = items * 1_000_000_000.0 / elapsed;
-        System.out.printf("{\"backend\":\"java\",\"case_count\":%d,\"warmup_passes\":%d,\"measured_passes\":%d,\"elapsed_nanos\":%d,\"items_per_second\":%.6f,\"checksum\":%d}%n", models.size(), WARMUP_PASSES, MEASURED_PASSES, elapsed, itemsPerSecond, checksum);
+        final Path manifest = Path.of(System.getProperty("squaremap.task11.root"), "testdata/bridge/v2/render/manifest.json");
+        final String manifestHash = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(manifest)));
+        final StringBuilder passNanosJson = new StringBuilder("[");
+        for (int i = 0; i < passNanos.length; i++) {
+            if (i > 0) passNanosJson.append(',');
+            passNanosJson.append(passNanos[i]);
+        }
+        passNanosJson.append(']');
+        System.out.printf("{\"backend\":\"java\",\"workload\":\"chunk-render-v2\",\"case_count\":%d,\"warmup_passes\":%d,\"measured_passes\":%d,\"elapsed_nanos\":%d,\"items_per_second\":%.6f,\"checksum\":%d,\"manifest_hash\":\"%s\",\"pass_nanos\":%s}%n", models.size(), WARMUP_PASSES, MEASURED_PASSES, elapsed, itemsPerSecond, checksum, manifestHash, passNanosJson);
     }
 
     private static ChunkRenderEngine.PixelResult render(final ChunkRenderEngine engine, final ChunkRenderFixtureCatalog.CaseModel model) {
