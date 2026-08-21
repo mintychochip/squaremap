@@ -93,10 +93,25 @@ final class ImagePyramidBenchmarkTest {
                 passNanosJson.append(passNanos[i]);
             }
             passNanosJson.append(']');
-            System.out.printf("{\"backend\":\"java\",\"workload\":\"pyramid-png-v2\",\"case_count\":%d,\"warmup_passes\":%d,\"measured_passes\":%d,\"elapsed_nanos\":%d,\"items_per_second\":%.6f,\"checksum\":%d,\"manifest_hash\":\"%s\",\"pass_nanos\":%s}%n", cases.size(), WARMUP_PASSES, MEASURED_PASSES, elapsed, itemsPerSecond, checksum, manifestHash, passNanosJson);
+            final String json = String.format("{\"backend\":\"java\",\"workload\":\"pyramid-png-v2\",\"case_count\":%d,\"warmup_passes\":%d,\"measured_passes\":%d,\"elapsed_nanos\":%d,\"items_per_second\":%.6f,\"checksum\":%d,\"manifest_hash\":\"%s\",\"pass_nanos\":%s}", cases.size(), WARMUP_PASSES, MEASURED_PASSES, elapsed, itemsPerSecond, checksum, manifestHash, passNanosJson);
+            System.out.println(json);
+            writeAbOut(json);
         } finally {
             FileUtil.deleteRecursively(root);
         }
+    }
+
+    private static void writeAbOut(final String json) throws Exception {
+        final String abOut = System.getProperty("squaremap.abOut");
+        if (abOut == null || abOut.isBlank()) {
+            return;
+        }
+        final Path path = Path.of(abOut);
+        final Path parent = path.getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+        Files.writeString(path, json + System.lineSeparator());
     }
 
     private static void applyCase(final JsonObject testCase, final Path directory) {

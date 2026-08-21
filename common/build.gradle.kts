@@ -37,6 +37,7 @@ tasks.test {
   providers.systemProperty("squaremap.regenerate").orNull?.let { systemProperty("squaremap.regenerate", it) }
   providers.systemProperty("squaremap.renderBenchmark").orNull?.let { systemProperty("squaremap.renderBenchmark", it) }
   providers.systemProperty("squaremap.tileBenchmark").orNull?.let { systemProperty("squaremap.tileBenchmark", it) }
+  providers.systemProperty("squaremap.abOut").orNull?.let { systemProperty("squaremap.abOut", it) }
 }
 
 configurations.testCompileClasspath {

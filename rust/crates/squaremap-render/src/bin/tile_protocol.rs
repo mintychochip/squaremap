@@ -149,7 +149,7 @@ async fn async_main() {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(",");
-    println!(
+    let json = format!(
         "{{\"backend\":\"rust\",\"workload\":\"pyramid-png-v2\",\"case_count\":{},\"warmup_passes\":{},\"measured_passes\":{},\"elapsed_nanos\":{},\"items_per_second\":{:.6},\"checksum\":{},\"manifest_hash\":\"{}\",\"pass_nanos\":[{}]}}",
         manifest.cases.len(),
         WARMUP_PASSES,
@@ -160,4 +160,20 @@ async fn async_main() {
         manifest_hash,
         pass_nanos_json
     );
+    println!("{json}");
+    write_ab_out(&json);
+}
+
+fn write_ab_out(json: &str) {
+    let Ok(path) = std::env::var("SQUAREMAP_AB_OUT") else {
+        return;
+    };
+    if path.is_empty() {
+        return;
+    }
+    let path = Path::new(&path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("SQUAREMAP_AB_OUT parent");
+    }
+    fs::write(path, format!("{json}\n")).expect("SQUAREMAP_AB_OUT");
 }
