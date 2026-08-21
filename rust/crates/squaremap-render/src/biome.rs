@@ -207,10 +207,19 @@ impl BiomeSource for SnapshotBiomeSource {
         z: i32,
         selected_biome: u32,
     ) -> Result<u32, BiomeSourceError> {
-        self.grass
-            .get(&(x, y, z, selected_biome))
-            .copied()
-            .ok_or(BiomeSourceError::UnsupportedSelector)
+        if let Some(resolved) = self.grass.get(&(x, y, z, selected_biome)) {
+            return Ok(*resolved);
+        }
+        let descriptor = self
+            .generation
+            .biome(selected_biome)
+            .ok_or(BiomeSourceError::InvalidBiome(selected_biome))?;
+        Ok(crate::vanilla::resolve_grass(
+            descriptor.grass_color_modifier(),
+            descriptor.grass_color,
+            x,
+            z,
+        ))
     }
 }
 

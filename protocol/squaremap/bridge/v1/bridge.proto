@@ -424,6 +424,15 @@ message BiomeDescriptor {
   uint32 foliage_color = 3;
   uint32 water_color = 4;
   uint32 tint_index = 5;
+  // Vanilla BiomeSpecialEffects.GrassColorModifier applied on top of
+  // grass_color at render time; NONE leaves grass_color untouched.
+  GrassColorModifier grass_color_modifier = 6;
+}
+
+enum GrassColorModifier {
+  GRASS_COLOR_MODIFIER_NONE = 0;
+  GRASS_COLOR_MODIFIER_DARK_FOREST = 1;
+  GRASS_COLOR_MODIFIER_SWAMP = 2;
 }
 
 message RegistryReplace {

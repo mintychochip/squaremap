@@ -13,6 +13,7 @@ pub mod region;
 pub mod registry;
 pub mod snapshot;
 pub mod tile;
+pub mod vanilla;
 pub mod visibility;
 
 pub use biome::{

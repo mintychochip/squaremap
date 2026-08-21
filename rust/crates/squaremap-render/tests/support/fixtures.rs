@@ -650,13 +650,15 @@ impl FixtureCorpus {
                 if selected != sample.biome_id {
                     return Err(format!("grass selected biome mismatch {}", row.id));
                 }
-                source = source.with_grass_resolved(
+                let resolved = source.resolved_grass(
                     sample.block_x,
                     sample.block_y,
                     sample.block_z,
                     sample.biome_id,
-                    sample.resolved_grass_argb as u32,
-                );
+                ).map_err(|error| format!("grass resolve {}: {error}", row.id))?;
+                if resolved != sample.resolved_grass_argb as u32 {
+                    return Err(format!("grass oracle mismatch {}", row.id));
+                }
             }
 
             let settings = RenderSettings {

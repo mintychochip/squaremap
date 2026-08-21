@@ -116,7 +116,13 @@ final class ChunkRenderFixtureCatalog {
     private static FluidClass fluid(final BlockState state) { if (state.getFluidState().isEmpty()) return FluidClass.FLUID_CLASS_NONE; return state.getFluidState().getType() == net.minecraft.world.level.material.Fluids.LAVA ? FluidClass.FLUID_CLASS_LAVA : FluidClass.FLUID_CLASS_WATER; }
     private static RegistryDescriptorExporter.FixtureState state(final Block block, final int color) { final BlockState state = block.defaultBlockState(); final boolean glass = block == Blocks.GLASS || block instanceof net.minecraft.world.level.block.StainedGlassBlock; final int alpha = glass ? (block == Blocks.GLASS ? 25 : 50) : 0; final BlockTransparency transparency = glass || color == Colors.clearMapColor() ? BlockTransparency.BLOCK_TRANSPARENCY_TRANSLUCENT : state.isAir() ? BlockTransparency.BLOCK_TRANSPARENCY_INVISIBLE : BlockTransparency.BLOCK_TRANSPARENCY_OPAQUE; return new RegistryDescriptorExporter.FixtureState(state, new RegistryDescriptorExporter.BlockDescriptor(net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(block).toString(), List.of(state.toString()), color, transparency, glass, alpha, fluid(state), state.isAir(), xyz.jpenilla.squaremap.common.data.BiomeColors.tintIndex(block))); }
     private static RegistryDescriptorExporter.FixtureBiome biome(final Holder<Biome> holder, final LevelBiomeColorData colors) {
-        return new RegistryDescriptorExporter.FixtureBiome(holder, new RegistryDescriptorExporter.BiomeDescriptorInput(holder.unwrapKey().orElseThrow().identifier().toString(), colors.grassColor(holder.value()), colors.foliageColor(holder.value()), colors.waterColor(holder.value()), 0));
+        final Biome value = holder.value();
+        return new RegistryDescriptorExporter.FixtureBiome(holder, new RegistryDescriptorExporter.BiomeDescriptorInput(holder.unwrapKey().orElseThrow().identifier().toString(), colors.grassColor(value), colors.foliageColor(value), colors.waterColor(value), 0,
+            switch (value.getSpecialEffects().grassColorModifier()) {
+                case NONE -> xyz.jpenilla.squaremap.bridge.v1.GrassColorModifier.GRASS_COLOR_MODIFIER_NONE;
+                case DARK_FOREST -> xyz.jpenilla.squaremap.bridge.v1.GrassColorModifier.GRASS_COLOR_MODIFIER_DARK_FOREST;
+                case SWAMP -> xyz.jpenilla.squaremap.bridge.v1.GrassColorModifier.GRASS_COLOR_MODIFIER_SWAMP;
+            }));
     }
     private static ChunkSnapshot snapshot(final String name, final Holder<Biome> biome, final ChunkPos pos, final DimensionType dimension, final Holder<Biome> negativeDesert, final Holder<Biome> negativeSwamp) {
         final int minY = name.equals("NEG") ? -32 : 0;

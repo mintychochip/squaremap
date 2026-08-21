@@ -22,6 +22,7 @@ import xyz.jpenilla.squaremap.bridge.v1.BiomeDescriptor;
 import xyz.jpenilla.squaremap.bridge.v1.BlockStateDescriptor;
 import xyz.jpenilla.squaremap.bridge.v1.BlockTransparency;
 import xyz.jpenilla.squaremap.bridge.v1.FluidClass;
+import xyz.jpenilla.squaremap.bridge.v1.GrassColorModifier;
 import xyz.jpenilla.squaremap.bridge.v1.RegistryReplace;
 import xyz.jpenilla.squaremap.bridge.v1.WorldIdentity;
 import xyz.jpenilla.squaremap.common.data.BiomeColors;
@@ -61,7 +62,7 @@ public final class RegistryDescriptorExporter {
         final LevelBiomeColorData colors = world.levelBiomeColorData();
         for (final Biome biome : Util.biomeRegistry(world.serverLevel())) {
             biomes.add(new BiomeInput(biome, new BiomeDescriptorInput(Util.biomeRegistry(world.serverLevel()).getKey(biome).toString(),
-                colors.grassColor(biome), colors.foliageColor(biome), colors.waterColor(biome), 0)));
+                colors.grassColor(biome), colors.foliageColor(biome), colors.waterColor(biome), 0, wireModifier(biome))));
         }
         states.sort(Comparator.comparing((StateInput input) -> new BlockKey(input.descriptor.registryId(), input.descriptor.properties())));
         biomes.sort(Comparator.comparing(input -> input.descriptor.registryId()));
@@ -178,7 +179,7 @@ public final class RegistryDescriptorExporter {
         final int id = this.biomeId(biome);
         final BiomeDescriptor descriptor = this.exported.getBiomes(id - this.exported.getBlockStatesCount() - 1);
         return new BiomeDescriptorInput(biome.unwrapKey().orElseThrow().identifier().toString(), descriptor.getGrassColor(),
-            descriptor.getFoliageColor(), descriptor.getWaterColor(), descriptor.getTintIndex());
+            descriptor.getFoliageColor(), descriptor.getWaterColor(), descriptor.getTintIndex(), descriptor.getGrassColorModifier());
     }
     public static RegistryReplace export(final long revision, final List<BlockDescriptor> blocks, final List<BiomeDescriptorInput> biomes) {
         final TreeMap<BlockKey, BlockDescriptor> sortedBlocks = new TreeMap<>();
@@ -197,6 +198,14 @@ public final class RegistryDescriptorExporter {
         if (fluid.getType() == Fluids.WATER || fluid.getType() == Fluids.FLOWING_WATER) return FluidClass.FLUID_CLASS_WATER;
         if (fluid.getType() == Fluids.LAVA || fluid.getType() == Fluids.FLOWING_LAVA) return FluidClass.FLUID_CLASS_LAVA;
         return FluidClass.FLUID_CLASS_OTHER;
+    }
+
+    private static GrassColorModifier wireModifier(final Biome biome) {
+        return switch (biome.getSpecialEffects().grassColorModifier()) {
+            case NONE -> GrassColorModifier.GRASS_COLOR_MODIFIER_NONE;
+            case DARK_FOREST -> GrassColorModifier.GRASS_COLOR_MODIFIER_DARK_FOREST;
+            case SWAMP -> GrassColorModifier.GRASS_COLOR_MODIFIER_SWAMP;
+        };
     }
 
     private record BlockKey(String registryId, List<String> properties) implements Comparable<BlockKey> {
@@ -222,9 +231,10 @@ public final class RegistryDescriptorExporter {
         }
         BlockStateDescriptor toProto(final int id) { return BlockStateDescriptor.newBuilder().setId(id).setMapColor(mapColor).setTransparency(transparency).setGlass(glass).setGlassAlphaPercent(glassAlphaPercent).setFluid(fluid).setAir(air).setIterateUpBase(iterateUpBase).setTintIndex(tintIndex).build(); }
     }
-    public record BiomeDescriptorInput(String registryId, int grassColor, int foliageColor, int waterColor, int tintIndex) {
-        public BiomeDescriptorInput { Objects.requireNonNull(registryId); }
-        BiomeDescriptor toProto(final int id) { return BiomeDescriptor.newBuilder().setId(id).setGrassColor(grassColor).setFoliageColor(foliageColor).setWaterColor(waterColor).setTintIndex(tintIndex).build(); }
+    public record BiomeDescriptorInput(String registryId, int grassColor, int foliageColor, int waterColor, int tintIndex,
+                                       GrassColorModifier grassColorModifier) {
+        public BiomeDescriptorInput { Objects.requireNonNull(registryId); Objects.requireNonNull(grassColorModifier); }
+        BiomeDescriptor toProto(final int id) { return BiomeDescriptor.newBuilder().setId(id).setGrassColor(grassColor).setFoliageColor(foliageColor).setWaterColor(waterColor).setTintIndex(tintIndex).setGrassColorModifier(grassColorModifier).build(); }
     }
     public record RegistrySnapshot(long revision, List<BlockStateDescriptor> blocks, List<BiomeDescriptor> biomes, WorldIdentity world) {
         public RegistrySnapshot { blocks = List.copyOf(blocks); biomes = List.copyOf(biomes); }

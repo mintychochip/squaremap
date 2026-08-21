@@ -118,6 +118,7 @@ final class RegistryDescriptorExporterTest {
             BlockTransparency.BLOCK_TRANSPARENCY_OPAQUE, false, 0, FluidClass.FLUID_CLASS_NONE, false, 0);
     }
     private static RegistryDescriptorExporter.BiomeDescriptorInput biomeDescriptor(final String id) {
-        return new RegistryDescriptorExporter.BiomeDescriptorInput(id, 1, 2, 3, 0);
+        return new RegistryDescriptorExporter.BiomeDescriptorInput(id, 1, 2, 3, 0,
+            xyz.jpenilla.squaremap.bridge.v1.GrassColorModifier.GRASS_COLOR_MODIFIER_NONE);
     }
 }

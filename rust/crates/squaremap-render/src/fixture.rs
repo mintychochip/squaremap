@@ -214,13 +214,17 @@ impl FixtureCorpus {
                 if selected != sample.biome_id {
                     return Err(format!("grass selector mismatch {}", row.id));
                 }
-                source = source.with_grass_resolved(
-                    sample.block_x,
-                    sample.block_y,
-                    sample.block_z,
-                    sample.biome_id,
-                    sample.resolved_grass_argb as u32,
-                );
+                let resolved = source
+                    .resolved_grass(
+                        sample.block_x,
+                        sample.block_y,
+                        sample.block_z,
+                        sample.biome_id,
+                    )
+                    .map_err(|error| error.to_string())?;
+                if resolved != sample.resolved_grass_argb as u32 {
+                    return Err(format!("grass oracle mismatch {}", row.id));
+                }
             }
             let settings = RenderSettings {
                 iterate_up: row.iterate_up,
