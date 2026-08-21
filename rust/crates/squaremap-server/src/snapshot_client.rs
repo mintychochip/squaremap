@@ -45,6 +45,7 @@ struct Pending {
     coordinate: squaremap_protocol::wire::ChunkCoordinate,
     revision: u64,
     generation: Option<GenerationToken>,
+    generation_from_cache: bool,
 }
 fn world_key(world: &WorldIdentity) -> String {
     format!("{}\0{}\0{}", world.namespace, world.value, world.epoch)
@@ -98,13 +99,20 @@ impl SnapshotClient {
             revision,
             request_id,
         };
+        let generation = self
+            .registries
+            .get(&world_key(&world))
+            .filter(|registry| registry.revision() == revision)
+            .map(Registry::generation);
+        let generation_from_cache = generation.is_some();
         self.pending.insert(
             correlation,
             Pending {
                 world,
                 coordinate: squaremap_protocol::wire::ChunkCoordinate { x, z },
                 revision,
-                generation: None,
+                generation,
+                generation_from_cache,
             },
         );
         Ok(Envelope {
@@ -266,8 +274,9 @@ impl SnapshotClient {
         let registry = self.registries.entry(key.clone()).or_default();
         registry.replace(replacement.clone())?;
         if let Some(pending) = self.pending.get_mut(&correlation_id) {
-            if pending.generation.is_none() {
+            if pending.generation.is_none() || pending.generation_from_cache {
                 pending.generation = Some(registry.generation());
+                pending.generation_from_cache = false;
             }
         }
         self.registry_replacements.insert(key, replacement.clone());
@@ -554,6 +563,27 @@ mod tests {
             ..Default::default()
         });
         assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn cached_registry_is_bound_to_later_request() {
+        let mut client = SnapshotClient::new([9; 16], Limits::default()).unwrap();
+        let first = client.request_once(world(), -7, 5, 42).unwrap();
+        push_registry(&mut client, first.correlation_id, &world(), 42);
+        let second = client.request_once(world(), -7, 5, 42).unwrap();
+        let snapshot = ChunkSnapshot::decode(
+            &include_bytes!("../../../../testdata/bridge/v1/chunk_snapshot_valid.bin")[..],
+        )
+        .unwrap();
+        let outcome = client
+            .accept(&Envelope {
+                session_id: second.session_id,
+                correlation_id: second.correlation_id,
+                payload: Some(envelope::Payload::ChunkSnapshot(snapshot)),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(matches!(outcome, Some(SnapshotOutcome::Snapshot(_))));
     }
 
     #[test]
