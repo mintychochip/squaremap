@@ -1,52 +1,34 @@
 # Rust backend migration verification
 
-Current branch: `rust-backend-migration`
+## Current evidence (2026-08-20)
 
-- `cargo test --manifest-path rust/Cargo.toml --workspace`: **272 tests passed across 34 suites** (fresh current run).
-- `cargo test --manifest-path rust/crates/squaremap-state/Cargo.toml --test recovery`: **18 tests passed**.
-- `cargo test --manifest-path rust/crates/squaremap-server/Cargo.toml --lib`: **30 tests passed**, including the production-linked pre-session dirty/identity rejection boundary.
-- `cargo test --manifest-path rust/crates/squaremap-server/Cargo.toml --test dirty_resync_contract`: **7 tests passed**.
-- `cargo check --manifest-path rust/Cargo.toml --workspace`: passed.
-- `./gradlew :squaremap-common:test --no-daemon`: **passed**; full common test suite green.
-- `./gradlew build --no-daemon`: **passed**; 83 actionable tasks completed with the full Gradle build green.
-- `cargo test --manifest-path rust/crates/squaremap-compare/Cargo.toml --test replay -q`: **12 tests passed**.
-- Rust bridge HTTP lifecycle tests: 2 passed.
-- Rust configuration compatibility tests: 2 passed, including atomic rejection retaining the prior active revision.
-- Web verification: `cd web && bun run lint && bun run build`; build passed and lint completed with three warnings.
-- Comparator CLI produced `mismatch_count: 0` for the checked-in bridge view fixture roots across 6 paths; this validates independent fixture parity, not production shadow behavior. The narrower live-shadow artifact compared 2 captured paths with zero mismatches and explicitly does not cover full block/player/reload/fault parity.
-- Renderer workload benchmark: passed at 10.8 K chunks/s with 0 allocations/chunk in the timed renderer path; excludes Scheduler, bridge, repository, and HTTP.
-- Real Rust sidecar restart smoke: passed with supervisor-owned child termination, a distinct replacement connection, and SQLite repository state persisted.
-- Backend manifest generation: **passed** locally for all five target entries; this does not establish release publication or remote URL resolution.
-- Paper fixture validation: **passed** for the fail-closed metadata/placeholder contract; real Paper execution remains blocked by placeholder artifacts and unavailable production-equivalent runtime inputs.
+- Rust workspace: `cargo test --manifest-path rust/Cargo.toml --workspace` passed with exit 0.
+- Snapshot client regression `cached_registry_is_bound_to_later_request` now passes: later requests bind to the already-cached registry generation, matching Java's `RegistryGate` (commit 7b9195e; 16/16 snapshot-client tests green).
+- Grass parity: Rust now ports vanilla `BiomeSpecialEffects.GrassColorModifier` (NONE/DARK_FOREST/SWAMP) plus the `Biome.BIOME_INFO_NOISE` simplex chain bit-exactly (`squaremap-render/src/vanilla.rs`). The bridge carries the modifier per biome (`BiomeDescriptor.grass_color_modifier`), the live renderer computes resolved grass from descriptors instead of requiring injected resolutions, and the regenerated Java corpus (`testdata/bridge/v2/render/registry/registry.bin`) asserts Rust-computed grass equals the Java oracle on every sample with full pixel equality across all 26 cases (commit 43ec941). Previously every grass-tinted block errored under default `MAP_BIOMES=true`, producing map holes.
+- Java common suite: `./gradlew :squaremap-common:test` BUILD SUCCESSFUL (exit 0), including the regenerated-corpus oracle test, `FrameLimitsTest` (`fromPeerPolicy` clamp implemented and adopted by `SidecarSupervisor`, commit 029b207), and `HtmlComponentSerializerImplTest` (component text is now HTML-escaped before sanitization, commit 0be07bd).
+- Java/Rust fixture comparator: 0 mismatches across 6 paths (deterministic fixture parity, not live shadow parity).
+- Fresh Paper run (prior session): Paper 26.2 and the Rust sidecar reached readiness; live HTTP served the frontend root, favicon, JavaScript, CSS, source map, tile JSON, and icons.
 
-## Fail-closed replay boundary
+## Authoritative live failure
 
-- Workflowz gate refresh: the four next recovery implementation gates remain blocked. Bootstrap still constructs a zero bridge identity and rejects `BridgeIdentityReplace` and `ChunkDirty`; no runtime branch consumes `ResumeWatermark` or `DirtyReplay*`; unsupported view payloads still return `Unsupported`, while identity replacement is rejected by the bootstrap gate; Java response dispatch filters replay messages; `bridge_checkpoints` stores checkpoint metadata only; dirty page/complete/defer remain global.
-- Replay remains unwired because fresh sessions restart sequence numbering, no checkpoint continuity handshake exists, and `dirty_chunks` has no bridge owner or world-scoped replay cursor.
-- Enabling replay without those contracts would permit cross-bridge or cross-world data exposure; Java remains the default backend.
-- Current source audit found no new stable identity persistence, reconnect watermark negotiation, durable dirty owner, or production replay dispatcher. A fresh workflowz refresh was attempted but cancelled after stalling without producing an independent disposition; the prior workflowz review remains the available external review evidence. No recovery gate is safe to advance from the current source.
-- Historical completion-plan checkboxes remain intentionally unchecked where their acceptance scope exceeds current evidence. The checked-in comparator and shadow artifacts satisfy only their documented narrow scopes; they do not satisfy full replay parity, Paper lifecycle shadowing, fault/replay recovery, isolated end-to-end performance, release publication, or clean cutover.
+A clean isolated Paper run using the current plugin and Rust sidecar executed:
 
-## Workflowz ownership disposition
+```text
+squaremap radiusrender minecraft:overworld 1 0 0
+```
 
-The scoped workflowz review confirmed that no complete bridge-owned dirty persistence contract is source-supported yet. Before implementation, the plan must specify:
+The sidecar then disconnected with:
 
-- The durable owner relation (owner column versus owner table), assignment, reclaim, and lease semantics.
-- Authenticated `BridgeIdentityReplace` negotiation and reconnect ordering.
-- Durable watermark/session continuity and replay request/item/completion semantics.
-- Atomic boundaries for dirty write plus checkpoint and owner-scoped page/complete/defer operations, including lease, idempotency, and expiry rules.
-- Cross-bridge and stale-epoch isolation rules.
-- Pagination, ordering, retry bounds, and focused integration tests.
+```text
+RegistryUnavailable("correlation=2, world=WorldIdentity { namespace: \"minecraft\", value: \"overworld\", epoch: 1 }, revision=3, cached_revision=Some(3), registry_issue=None")
+```
 
-No partial replay or sentinel owner is safe.
+The Java supervisor reported a fatal bridge protocol error and the render job was cancelled with zero completed chunks. Evidence is preserved at `/tmp/squaremap-parity-live-repro-20260820.log`.
 
-## Not yet passed
+Root cause: Rust `SnapshotClient::request_once` did not bind a later request to an already cached registry generation; Java's `SnapshotRequestHandler` uses `RegistryGate` to ensure and reuse the registry before encoding the snapshot. **Fixed** at component level with a regression test (commit 7b9195e); a fresh live Paper render probe is still required to confirm end-to-end.
 
-- Full independent Java-primary/Rust-shadow comparison across block/chunk churn, player/marker changes, reload, quiescence, and sidecar fault while Paper remains alive.
-- Paper production sidecar fault/reconnect/replay evidence.
-- Isolated end-to-end performance and RSS evidence; the current benchmark excludes Scheduler, bridge, repository, and HTTP.
-- Remote five-target release publication and asset URL resolution.
-- Rust observation-release default and clean deletion of legacy Java backend paths.
-- Full replay parity: exact RGBA tile comparison and semantic JSON coverage beyond the checked two-path artifact.
+## Current verdict
 
-The migration is not complete until every item above has direct current-commit evidence.
+Deterministic protocol, state, JSON, HTTP, and fixture-render components are green within their declared scopes. The two known render-path divergences (cached-registry binding; grass color modifiers) are fixed with component-level regression evidence. Complete Java parity is **not verified**: a fresh live Paper render/control probe is required to confirm the fixes end-to-end, and addon API parity, all loader lifecycle parity, release publication/remote resolution, rollback, observation/cutover, and full Java-primary/Rust-shadow coverage also remain unproven.
+
+Do not enable Rust as an observation-release default or delete legacy Java paths based on this evidence.
