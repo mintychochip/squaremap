@@ -53,9 +53,9 @@ Pre-existing tile content:
 
 ## Current
 
-- [ ] Direct Java `Image.save()` vs Rust `TilePyramid` decoded-RGBA probe, zero mismatches
-- [ ] Sequential sparse chunk-sized updates to one region match
-- [ ] Negative-region + zoom 0..=3 path/origin/pixel probe
+- [x] Direct Java `Image.save()` vs Rust `TilePyramid` decoded-RGBA probe, zero mismatches
+- [x] Sequential sparse chunk-sized updates to one region match
+- [x] Negative-region + zoom 0..=3 path/origin/pixel probe
 - [ ] Paired renderer A/B with per-pass samples and graphs
 - [ ] Paired pyramid A/B with per-pass samples and graphs
 
@@ -71,6 +71,7 @@ Live Paper tile-tree comparison.
 
 - 2026-08-21: Keep Rust fail-closed on corrupt/wrong-type/wrong-size existing tiles; do not match Java overwrite.
 - 2026-08-21: A/B graphs use per-pass samples; no speedup published unless checksums match.
+- 2026-08-21: Java `Image.save()` vs Rust `TilePyramid` decoded-RGBA probe was zero-mismatch on first paired run (10 catalog cases). No pyramid compositing fix required.
 
 ## Open questions
 
