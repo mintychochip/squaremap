@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "max_zoom": 3,
+  "cases": [
+    {
+      "id": "solid-origin",
+      "region": [0, 0],
+      "pixels": { "kind": "solid", "argb": "0xFF112233" }
+    },
+    {
+      "id": "solid-east",
+      "region": [1, 0],
+      "pixels": { "kind": "solid", "argb": "0xFF445566" }
+    },
+    {
+      "id": "solid-negative",
+      "region": [-1, -1],
+      "pixels": { "kind": "solid", "argb": "0xFF778899" }
+    },
+    {
+      "id": "sparse-chunk-0-0",
+      "region": [0, 0],
+      "pixels": { "kind": "rect", "x": 0, "z": 0, "w": 16, "h": 16, "argb": "0xFF010203" }
+    },
+    {
+      "id": "sparse-chunk-31-31",
+      "region": [0, 0],
+      "pixels": { "kind": "rect", "x": 496, "z": 496, "w": 16, "h": 16, "argb": "0xFF040506" }
+    },
+    {
+      "id": "checker-step2",
+      "region": [0, 0],
+      "pixels": { "kind": "checker", "step": 2, "even": "0xFFAA0000", "odd": "0xFF00AA00" }
+    },
+    {
+      "id": "gradient-diag",
+      "region": [3, -2],
+      "pixels": { "kind": "gradient" }
+    },
+    {
+      "id": "transparent-zero",
+      "region": [0, 0],
+      "pixels": { "kind": "rect", "x": 32, "z": 64, "w": 1, "h": 1, "argb": "0x00000000" }
+    },
+    {
+      "id": "unset-vs-transparent",
+      "region": [0, 0],
+      "pixels": { "kind": "rect", "x": 0, "z": 0, "w": 1, "h": 1, "argb": "0x00000000" },
+      "existing": { "kind": "solid", "argb": "0xFF070707" }
+    },
+    {
+      "id": "merge-existing-quadrant",
+      "region": [1, 0],
+      "pixels": { "kind": "solid", "argb": "0xFF220000" },
+      "existing_from": "solid-origin"
+    }
+  ]
+}
