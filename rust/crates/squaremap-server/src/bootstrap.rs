@@ -215,8 +215,15 @@ async fn dispatch_replay_request(
     config_revision: u64,
     outbound: &mpsc::Sender<Envelope>,
 ) -> Result<(), BootstrapError> {
-    let mut replay = ReplayState::new(request.clone(), bridge_id, session_id, config_revision)
-        .map_err(|error| BootstrapError::Rejected(format!("{error:?}")))?;
+    let mut replay = match ReplayState::new(request.clone(), bridge_id, session_id, config_revision)
+    {
+        Ok(replay) => replay,
+        // A stale replay from the previous config revision must not tear down HTTP.
+        Err(squaremap_server::dirty_resync::DirtyResyncError::RevisionMismatch) => return Ok(()),
+        Err(error) => {
+            return Err(BootstrapError::Rejected(format!("{error:?}")));
+        }
+    };
     let request = replay.request().clone();
     let world = request.world.clone().expect("validated replay world");
     let cursor = match request.cursor.as_ref() {
