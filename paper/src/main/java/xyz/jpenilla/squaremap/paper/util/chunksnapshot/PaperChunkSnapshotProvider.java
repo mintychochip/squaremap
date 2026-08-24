@@ -39,7 +39,7 @@ record PaperChunkSnapshotProvider(
                 x,
                 z,
                 ChunkStatus.FULL,
-                true,
+                false,
                 Priority.NORMAL,
                 chunk -> load.complete(this.maybeSnapshot(chunk))
             );

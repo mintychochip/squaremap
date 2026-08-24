@@ -113,6 +113,7 @@ public final class SnapshotRequestHandler implements AutoCloseable {
                 return new SnapshotRequestService.Work(encoded, upstream);
             });
         } catch (final RuntimeException failure) {
+            publish(publish, envelope, this.requests.requestMissingChunk(request, ChunkMissingReason.CHUNK_MISSING_REASON_UNAVAILABLE));
             return;
         }
         result.whenComplete((snapshot, failure) -> {
@@ -125,7 +126,10 @@ public final class SnapshotRequestHandler implements AutoCloseable {
                 || cause instanceof SnapshotRequestService.SaturatedException
                 || cause instanceof SnapshotRequestService.StaleEpochException
                 || cause instanceof SnapshotRequestService.ClosedException
-                || cause instanceof CancellationException) return;
+                || cause instanceof CancellationException) {
+                publish(publish, envelope, this.requests.requestMissingChunk(request, ChunkMissingReason.CHUNK_MISSING_REASON_UNAVAILABLE));
+                return;
+            }
             final ChunkMissingReason reason = cause instanceof SnapshotRequestService.ChunkMissingException missing
                 ? missing.reason() : ChunkMissingReason.CHUNK_MISSING_REASON_UNAVAILABLE;
             publish(publish, envelope, this.requests.requestMissingChunk(request, reason));

@@ -253,7 +253,7 @@ impl Repository {
                            dirty_chunks.owner_bridge_id AS owner_bridge_id,
                            dirty_chunks.lease_expires_epoch_seconds AS lease_expires_epoch_seconds,
                            ROW_NUMBER() OVER (PARTITION BY dirty_chunks.namespace,dirty_chunks.value,dirty_chunks.epoch
-                                              ORDER BY dirty_chunks.x,dirty_chunks.z) AS ordinal
+                                              ORDER BY dirty_chunks.revision DESC,dirty_chunks.x,dirty_chunks.z) AS ordinal
                     FROM dirty_chunks
                     INNER JOIN worlds USING(namespace,value)
                     LEFT JOIN dirty_retries USING(namespace,value,epoch,x,z)
@@ -500,7 +500,7 @@ impl Repository {
                    AND dirty_chunks.owner_bridge_id=?1
                    AND dirty_chunks.replay_pending=0
                    AND (dirty_chunks.lease_expires_epoch_seconds=0 OR dirty_chunks.lease_expires_epoch_seconds<=?2)
-                 ORDER BY dirty_chunks.namespace,dirty_chunks.value,dirty_chunks.epoch,dirty_chunks.x,dirty_chunks.z
+                 ORDER BY dirty_chunks.revision DESC,dirty_chunks.namespace,dirty_chunks.value,dirty_chunks.epoch,dirty_chunks.x,dirty_chunks.z
                  LIMIT ?3",
             )?;
             let rows = statement.query_map(params![bridge_id, now, limit], |row| {
@@ -563,7 +563,7 @@ impl Repository {
                      WHERE worlds.epoch >= 0 AND dirty_chunks.epoch=worlds.epoch
                        AND (dirty_chunks.replay_pending=0
                             OR (dirty_chunks.replay_pending=1 AND dirty_chunks.lease_expires_epoch_seconds>0 AND dirty_chunks.lease_expires_epoch_seconds<=?1))
-                     ORDER BY dirty_chunks.namespace,dirty_chunks.value,dirty_chunks.epoch,dirty_chunks.x,dirty_chunks.z
+                     ORDER BY dirty_chunks.revision DESC,dirty_chunks.namespace,dirty_chunks.value,dirty_chunks.epoch,dirty_chunks.x,dirty_chunks.z
                      LIMIT 1",
                     params![now],
                     |row| {

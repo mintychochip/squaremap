@@ -129,10 +129,18 @@ pub(super) async fn run(
         }
         let coordinate = cursor.coordinates[cursor.next];
         report.selected += 1;
-        match scheduler
+        let disposition = match scheduler
             .render_one(&job.world, coordinate, cursor.revision, Some(id))
-            .await?
+            .await
         {
+            Ok(disposition) => disposition,
+            Err(error) => {
+                job.state = JobState::Failed;
+                scheduler.repository.update_render_job(job).await?;
+                return Err(error);
+            }
+        };
+        match disposition {
             RenderDisposition::Installed | RenderDisposition::Missing => {
                 if scheduler.is_cancelled(id) {
                     report.cancelled = true;

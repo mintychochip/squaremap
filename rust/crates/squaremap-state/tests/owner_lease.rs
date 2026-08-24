@@ -52,8 +52,9 @@ async fn dirty_page_honors_page_size_and_orders_rows() {
     }
     let page = repository.dirty_page_for_owner(&BRIDGE_A, 2, 0).await.unwrap();
     assert_eq!(page.len(), 2);
-    assert_eq!(page[0].coordinate, coordinate(0, 0));
-    assert_eq!(page[1].coordinate, coordinate(1, 0));
+    assert_eq!(page[0].coordinate, coordinate(4, 0));
+    assert_eq!(page[1].coordinate, coordinate(3, 0));
+    assert!(page[0].revision > page[1].revision);
 }
 
 #[tokio::test]

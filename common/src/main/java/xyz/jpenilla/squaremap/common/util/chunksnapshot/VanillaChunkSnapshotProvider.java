@@ -65,7 +65,7 @@ record VanillaChunkSnapshotProvider(ServerLevel level, boolean moonrise) impleme
                 x,
                 z,
                 ChunkStatus.FULL,
-                true,
+                false,
                 Priority.NORMAL,
                 chunk -> {
                     final @Nullable ChunkAccess unwrap = unwrap(chunk);
