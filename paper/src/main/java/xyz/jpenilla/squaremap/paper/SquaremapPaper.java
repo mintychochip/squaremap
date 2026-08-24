@@ -21,6 +21,7 @@ import xyz.jpenilla.squaremap.paper.folia.FoliaInitListener;
 import xyz.jpenilla.squaremap.paper.listener.MapUpdateListeners;
 import xyz.jpenilla.squaremap.paper.listener.WorldLoadListener;
 import xyz.jpenilla.squaremap.paper.network.PaperNetworking;
+import xyz.jpenilla.squaremap.paper.util.CraftBukkitHelper;
 import xyz.jpenilla.squaremap.paper.util.Folia;
 
 @DefaultQualifier(NonNull.class)
@@ -78,6 +79,11 @@ public final class SquaremapPaper implements SquaremapPlatform {
     public void startCallback() {
         this.worldLoadListener = this.injector.getInstance(WorldLoadListener.class);
         this.server.getPluginManager().registerEvents(this.worldLoadListener, this.plugin);
+
+        final PaperWorldManager worldManager = this.injector.getInstance(PaperWorldManager.class);
+        for (final org.bukkit.World world : this.server.getWorlds()) {
+            worldManager.initWorld(CraftBukkitHelper.serverLevel(world));
+        }
 
         this.mapUpdateListeners = this.injector.getInstance(MapUpdateListeners.class);
         this.mapUpdateListeners.register();
