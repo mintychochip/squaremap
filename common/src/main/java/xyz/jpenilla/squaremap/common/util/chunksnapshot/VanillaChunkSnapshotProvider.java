@@ -64,7 +64,7 @@ record VanillaChunkSnapshotProvider(ServerLevel level, boolean moonrise) impleme
                 this.level,
                 x,
                 z,
-                ChunkStatus.EMPTY,
+                ChunkStatus.FULL,
                 true,
                 Priority.NORMAL,
                 chunk -> {

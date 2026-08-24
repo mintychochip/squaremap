@@ -38,7 +38,7 @@ record PaperChunkSnapshotProvider(
                 this.level,
                 x,
                 z,
-                ChunkStatus.EMPTY,
+                ChunkStatus.FULL,
                 true,
                 Priority.NORMAL,
                 chunk -> load.complete(this.maybeSnapshot(chunk))
