@@ -35,6 +35,7 @@ async fn rejects_non_loopback_and_early_exit() {
         "printf '\\033[31mhttp://192.0.2.1:1\\033[0m\\n'",
     );
     let config = HttpConfig {
+        web_root: None,
         bind: "127.0.0.1:0".parse().unwrap(),
         enabled: true,
         dev_frontend: Some(DevFrontendConfig {
@@ -56,6 +57,7 @@ async fn readiness_timeout_reaps_fake_process() {
     let root = OutputRoot::new(dir.path()).unwrap();
     let fake = executable(dir.path(), "sleep 10");
     let config = HttpConfig {
+        web_root: None,
         bind: "127.0.0.1:0".parse().unwrap(),
         enabled: true,
         dev_frontend: Some(DevFrontendConfig {
@@ -80,6 +82,7 @@ async fn scans_multiple_candidates_and_delayed_readiness() {
         "sleep 0.1; printf 'http://192.0.2.1:1 http://127.0.0.1:9\\n'; sleep 10",
     );
     let config = HttpConfig {
+        web_root: None,
         bind: "127.0.0.1:0".parse().unwrap(),
         enabled: true,
         dev_frontend: Some(DevFrontendConfig {
@@ -102,6 +105,7 @@ async fn rejects_immediate_exit_after_url_and_multibyte_logs() {
     let root = OutputRoot::new(dir.path()).unwrap();
     let fake = executable(dir.path(), "printf 'http://127.0.0.1:9\\n'; exit 0");
     let config = HttpConfig {
+        web_root: None,
         bind: "127.0.0.1:0".parse().unwrap(),
         enabled: true,
         dev_frontend: Some(DevFrontendConfig {
@@ -119,6 +123,7 @@ async fn rejects_immediate_exit_after_url_and_multibyte_logs() {
         &format!("printf '{}\\nhttp://127.0.0.1:9\\n'; sleep 10", long_line),
     );
     let config = HttpConfig {
+        web_root: None,
         bind: "127.0.0.1:0".parse().unwrap(),
         enabled: true,
         dev_frontend: Some(DevFrontendConfig {
@@ -164,6 +169,7 @@ async fn proxies_http_and_keeps_excluded_paths_local() {
         &format!("printf 'http://{}\\n'; sleep 10", upstream_addr),
     );
     let config = HttpConfig {
+        web_root: None,
         bind: "127.0.0.1:0".parse().unwrap(),
         enabled: true,
         dev_frontend: Some(DevFrontendConfig {
@@ -232,6 +238,7 @@ async fn proxies_non_get_body_and_query() {
         &format!("printf 'http://{}\\n'; sleep 10", upstream_addr),
     );
     let config = HttpConfig {
+        web_root: None,
         bind: "127.0.0.1:0".parse().unwrap(),
         enabled: true,
         dev_frontend: Some(DevFrontendConfig {
@@ -284,6 +291,7 @@ async fn tunnels_websocket_echo() {
         &format!("printf 'http://{}\\n'; sleep 10", upstream_addr),
     );
     let config = HttpConfig {
+        web_root: None,
         bind: "127.0.0.1:0".parse().unwrap(),
         enabled: true,
         dev_frontend: Some(DevFrontendConfig {
@@ -326,6 +334,7 @@ async fn drains_sustained_logs_after_readiness() {
     let root = OutputRoot::new(dir.path()).unwrap();
     let fake = executable(dir.path(), &script);
     let config = HttpConfig {
+        web_root: None,
         bind: "127.0.0.1:0".parse().unwrap(),
         enabled: true,
         dev_frontend: Some(DevFrontendConfig {
@@ -377,6 +386,7 @@ async fn shutdown_cancels_infinite_proxy_response() {
         &format!("printf 'http://{}\\n'; sleep 10", upstream_addr),
     );
     let config = HttpConfig {
+        web_root: None,
         bind: "127.0.0.1:0".parse().unwrap(),
         enabled: true,
         dev_frontend: Some(DevFrontendConfig {
@@ -438,6 +448,7 @@ async fn shutdown_cancels_stalled_websocket_handshake() {
         &format!("printf 'http://{}\\n'; sleep 10", upstream_addr),
     );
     let config = HttpConfig {
+        web_root: None,
         bind: "127.0.0.1:0".parse().unwrap(),
         enabled: true,
         dev_frontend: Some(DevFrontendConfig {
@@ -519,6 +530,7 @@ async fn websocket_forwards_headers_and_selected_protocol() {
         &format!("printf 'http://{}\\n'; sleep 10", upstream_addr),
     );
     let config = HttpConfig {
+        web_root: None,
         bind: "127.0.0.1:0".parse().unwrap(),
         enabled: true,
         dev_frontend: Some(DevFrontendConfig {
@@ -584,6 +596,7 @@ async fn websocket_origin_only_is_forwarded() {
         &format!("printf 'http://{}\\n'; sleep 10", upstream_addr),
     );
     let config = HttpConfig {
+        web_root: None,
         bind: "127.0.0.1:0".parse().unwrap(),
         enabled: true,
         dev_frontend: Some(DevFrontendConfig {
@@ -623,6 +636,7 @@ async fn shutdown_kills_descendant_process_group() {
     let fake = executable(dir.path(), &script);
     let root = OutputRoot::new(dir.path()).unwrap();
     let config = HttpConfig {
+        web_root: None,
         bind: "127.0.0.1:0".parse().unwrap(),
         enabled: true,
         dev_frontend: Some(DevFrontendConfig {
@@ -663,6 +677,7 @@ async fn startup_failure_kills_saved_process_group_descendant() {
     let root = OutputRoot::new(dir.path()).unwrap();
     let fake = executable(dir.path(), &script);
     let config = HttpConfig {
+        web_root: None,
         bind: "127.0.0.1:0".parse().unwrap(),
         enabled: true,
         dev_frontend: Some(DevFrontendConfig {

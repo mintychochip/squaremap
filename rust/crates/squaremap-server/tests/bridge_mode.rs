@@ -65,6 +65,7 @@ async fn shadow_config_replacement_does_not_bind_rust_http() {
     let root = OutputRoot::new(directory.path()).unwrap();
     let mut server = HttpServer::bind(
         HttpConfig {
+            web_root: None,
             bind: format!("{}:{}", global.http_bind, global.http_port)
                 .parse()
                 .unwrap(),
