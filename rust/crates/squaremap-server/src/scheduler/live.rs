@@ -481,6 +481,13 @@ impl SnapshotDispatcher {
                 state.client.cancel(envelope.correlation_id);
                 return Ok(true);
             }
+            Err(SnapshotClientError::Snapshot(error)) => {
+                if let Some(response) = state.pending.remove(&envelope.correlation_id) {
+                    let _ = response.send(Err(BridgeError::Transient(error.to_string())));
+                }
+                state.client.cancel(envelope.correlation_id);
+                return Ok(true);
+            }
             Err(error) => return Err(error),
         };
         let Some(outcome) = outcome else {

@@ -143,7 +143,17 @@ impl Snapshot {
         generation: &GenerationToken,
         limits: Limits,
     ) -> Result<Self, SnapshotError> {
-        Self::decode_generation(wire, generation, limits)
+        Self::decode_generation(wire, generation, limits, true)
+    }
+
+    /// Live dirty events retag the same palette with a new request revision.
+    /// Bind on world identity; do not require generation.revision == snapshot.revision.
+    pub fn decode_for_live(
+        wire: &WireSnapshot,
+        generation: &GenerationToken,
+        limits: Limits,
+    ) -> Result<Self, SnapshotError> {
+        Self::decode_generation(wire, generation, limits, false)
     }
     pub fn decode_bytes(
         bytes: &[u8],
@@ -165,6 +175,7 @@ impl Snapshot {
         wire: &WireSnapshot,
         generation: &GenerationToken,
         limits: Limits,
+        match_revision: bool,
     ) -> Result<Self, SnapshotError> {
         let world = wire
             .world
@@ -175,7 +186,7 @@ impl Snapshot {
             .as_ref()
             .ok_or_else(|| SnapshotError::Protobuf("missing coordinate".into()))?;
         let registry_world = generation.world().ok_or(SnapshotError::RegistryMismatch)?;
-        if generation.revision() != wire.revision
+        if (match_revision && generation.revision() != wire.revision)
             || registry_world.namespace != world.namespace
             || registry_world.value != world.value
             || registry_world.epoch != world.epoch

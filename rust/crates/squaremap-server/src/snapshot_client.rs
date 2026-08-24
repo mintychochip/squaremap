@@ -215,7 +215,7 @@ impl SnapshotClient {
                 .ok_or(SnapshotClientError::InvalidResponse(
                     "snapshot registry unavailable",
                 ))?;
-                let decoded = Snapshot::decode_for(snapshot, &generation, self.limits)?;
+                let decoded = Snapshot::decode_for_live(snapshot, &generation, self.limits)?;
                 self.pending.remove(&envelope.correlation_id);
                 Ok(Some(SnapshotOutcome::Snapshot(decoded)))
             }
@@ -662,6 +662,49 @@ mod tests {
                 session_id: neighbor.session_id,
                 correlation_id: neighbor.correlation_id,
                 payload: Some(envelope::Payload::ChunkSnapshot(neighbor_snapshot)),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(matches!(outcome, Some(SnapshotOutcome::Snapshot(_))));
+    }
+
+    #[test]
+    fn cached_palette_decodes_a_later_dirty_revision_without_a_new_registry_replace() {
+        let mut client = SnapshotClient::new([9; 16], Limits::default()).unwrap();
+        let first = client.request_once(world(), 0, 0, 42).unwrap();
+        push_registry(&mut client, first.correlation_id, &world(), 42);
+        let mut first_snapshot = ChunkSnapshot::decode(
+            &include_bytes!("../../../../testdata/bridge/v1/chunk_snapshot_valid.bin")[..],
+        )
+        .unwrap();
+        first_snapshot.world = Some(world());
+        first_snapshot.coordinate = Some(squaremap_protocol::wire::ChunkCoordinate { x: 0, z: 0 });
+        first_snapshot.revision = 42;
+        assert!(matches!(
+            client
+                .accept(&Envelope {
+                    session_id: first.session_id,
+                    correlation_id: first.correlation_id,
+                    payload: Some(envelope::Payload::ChunkSnapshot(first_snapshot)),
+                    ..Default::default()
+                })
+                .unwrap(),
+            Some(SnapshotOutcome::Snapshot(_))
+        ));
+
+        let second = client.request_once(world(), 1, 0, 43).unwrap();
+        let mut snapshot = ChunkSnapshot::decode(
+            &include_bytes!("../../../../testdata/bridge/v1/chunk_snapshot_valid.bin")[..],
+        )
+        .unwrap();
+        snapshot.world = Some(world());
+        snapshot.coordinate = Some(squaremap_protocol::wire::ChunkCoordinate { x: 1, z: 0 });
+        snapshot.revision = 43;
+        let outcome = client
+            .accept(&Envelope {
+                session_id: second.session_id,
+                correlation_id: second.correlation_id,
+                payload: Some(envelope::Payload::ChunkSnapshot(snapshot)),
                 ..Default::default()
             })
             .unwrap();
