@@ -135,9 +135,14 @@ pub(super) async fn run(
         {
             Ok(disposition) => disposition,
             Err(error) => {
-                job.state = JobState::Failed;
-                scheduler.repository.update_render_job(job).await?;
-                return Err(error);
+                tracing::warn!(
+                    error = %error,
+                    x = coordinate.x,
+                    z = coordinate.z,
+                    "skipping chunk after render error"
+                );
+                report.stale += 1;
+                RenderDisposition::Missing
             }
         };
         match disposition {
@@ -158,8 +163,17 @@ pub(super) async fn run(
                 report.completed += 1;
             }
             RenderDisposition::Stale => {
+                tracing::warn!(x = coordinate.x, z = coordinate.z, "skipping stale chunk");
+                cursor.next += 1;
+                job.completed_chunks = cursor.next as u64;
+                job.payload = serde_json::to_vec(&cursor)?;
+                job.state = if cursor.next == cursor.coordinates.len() {
+                    JobState::Completed
+                } else {
+                    JobState::Running
+                };
+                scheduler.repository.update_render_job(job.clone()).await?;
                 report.stale += 1;
-                break;
             }
             RenderDisposition::Cancelled => {
                 report.cancelled = true;
