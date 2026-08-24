@@ -102,7 +102,6 @@ impl SnapshotClient {
         let generation = self
             .registries
             .get(&world_key(&world))
-            .filter(|registry| registry.revision() == revision)
             .map(Registry::generation);
         let generation_from_cache = generation.is_some();
         self.pending.insert(
@@ -199,14 +198,18 @@ impl SnapshotClient {
                         "snapshot binding mismatch",
                     ));
                 }
-                let generation =
-                    pending
-                        .generation
-                        .as_ref()
-                        .ok_or(SnapshotClientError::InvalidResponse(
-                            "snapshot registry unavailable",
-                        ))?;
-                let decoded = Snapshot::decode_for(snapshot, generation, self.limits)?;
+                let generation = pending
+                    .generation
+                    .clone()
+                    .or_else(|| {
+                        self.registries
+                            .get(&world_key(&pending.world))
+                            .map(Registry::generation)
+                    })
+                    .ok_or(SnapshotClientError::InvalidResponse(
+                        "snapshot registry unavailable",
+                    ))?;
+                let decoded = Snapshot::decode_for(snapshot, &generation, self.limits)?;
                 self.pending.remove(&envelope.correlation_id);
                 Ok(Some(SnapshotOutcome::Snapshot(decoded)))
             }
@@ -237,19 +240,22 @@ impl SnapshotClient {
         correlation_id: u64,
         replacement: &RegistryReplace,
     ) -> Result<Option<SnapshotOutcome>, SnapshotClientError> {
-        if correlation_id < self.cancelled_before || self.cancelled.contains_key(&correlation_id) {
-            return Ok(None);
-        }
-        let Some(pending) = self.pending.get(&correlation_id) else {
-            return Ok(None);
-        };
-        let world = replacement
-            .world
-            .as_ref()
-            .ok_or(SnapshotClientError::InvalidResponse(
+        let cancelled = correlation_id < self.cancelled_before
+            || self.cancelled.contains_key(&correlation_id);
+        let pending = self.pending.get(&correlation_id);
+        let Some(world) = replacement.world.as_ref() else {
+            if cancelled {
+                return Ok(None);
+            }
+            return Err(SnapshotClientError::InvalidResponse(
                 "registry missing world",
-            ))?;
-        if pending.revision != replacement.revision || pending.world != *world {
+            ));
+        };
+        if let Some(pending) = pending {
+            if pending.revision != replacement.revision || pending.world != *world {
+                return Ok(None);
+            }
+        } else if !cancelled {
             return Ok(None);
         }
         let key = world_key(world);
@@ -575,6 +581,55 @@ mod tests {
             &include_bytes!("../../../../testdata/bridge/v1/chunk_snapshot_valid.bin")[..],
         )
         .unwrap();
+        let outcome = client
+            .accept(&Envelope {
+                session_id: second.session_id,
+                correlation_id: second.correlation_id,
+                payload: Some(envelope::Payload::ChunkSnapshot(snapshot)),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(matches!(outcome, Some(SnapshotOutcome::Snapshot(_))));
+    }
+
+    #[test]
+    fn sibling_in_flight_snapshot_uses_registry_cached_by_the_other_request() {
+        let mut client = SnapshotClient::new([9; 16], Limits::default()).unwrap();
+        let first = client.request_once(world(), 0, 0, 42).unwrap();
+        let second = client.request_once(world(), 1, 0, 42).unwrap();
+        push_registry(&mut client, first.correlation_id, &world(), 42);
+        let mut snapshot = ChunkSnapshot::decode(
+            &include_bytes!("../../../../testdata/bridge/v1/chunk_snapshot_valid.bin")[..],
+        )
+        .unwrap();
+        snapshot.world = Some(world());
+        snapshot.coordinate = Some(squaremap_protocol::wire::ChunkCoordinate { x: 1, z: 0 });
+        snapshot.revision = 42;
+        let outcome = client
+            .accept(&Envelope {
+                session_id: second.session_id,
+                correlation_id: second.correlation_id,
+                payload: Some(envelope::Payload::ChunkSnapshot(snapshot)),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(matches!(outcome, Some(SnapshotOutcome::Snapshot(_))));
+    }
+
+    #[test]
+    fn cancelled_request_still_caches_registry_for_sibling_snapshot() {
+        let mut client = SnapshotClient::new([9; 16], Limits::default()).unwrap();
+        let first = client.request_once(world(), 0, 0, 42).unwrap();
+        let second = client.request_once(world(), 1, 0, 42).unwrap();
+        client.cancel(first.correlation_id);
+        push_registry(&mut client, first.correlation_id, &world(), 42);
+        let mut snapshot = ChunkSnapshot::decode(
+            &include_bytes!("../../../../testdata/bridge/v1/chunk_snapshot_valid.bin")[..],
+        )
+        .unwrap();
+        snapshot.world = Some(world());
+        snapshot.coordinate = Some(squaremap_protocol::wire::ChunkCoordinate { x: 1, z: 0 });
+        snapshot.revision = 42;
         let outcome = client
             .accept(&Envelope {
                 session_id: second.session_id,

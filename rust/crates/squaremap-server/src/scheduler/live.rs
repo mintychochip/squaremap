@@ -470,7 +470,19 @@ impl SnapshotDispatcher {
 
     pub async fn accept(&self, envelope: &Envelope) -> Result<bool, SnapshotClientError> {
         let mut state = self.state.lock().await;
-        let outcome = state.client.accept(envelope)?;
+        let outcome = match state.client.accept(envelope) {
+            Ok(outcome) => outcome,
+            Err(SnapshotClientError::InvalidResponse("snapshot registry unavailable")) => {
+                if let Some(response) = state.pending.remove(&envelope.correlation_id) {
+                    let _ = response.send(Err(BridgeError::Transient(
+                        "snapshot registry unavailable".into(),
+                    )));
+                }
+                state.client.cancel(envelope.correlation_id);
+                return Ok(true);
+            }
+            Err(error) => return Err(error),
+        };
         let Some(outcome) = outcome else {
             return Ok(false);
         };
@@ -617,6 +629,48 @@ mod tests {
             result.await.unwrap(),
             Err(BridgeError::Transient(message)) if message == "bridge connection closed"
         ));
+    }
+    #[tokio::test]
+    async fn missing_snapshot_registry_is_transient_and_keeps_dispatcher_alive() {
+        use prost::Message;
+        use squaremap_protocol::wire::ChunkSnapshot;
+
+        let dispatcher =
+            SnapshotDispatcher::new(SnapshotClient::new([9; 16], Limits::default()).unwrap());
+        let (response, result) = oneshot::channel();
+        let request = SnapshotRequest {
+            world: squaremap_state::WorldId::new("minecraft", "overworld", 3),
+            coordinate: squaremap_state::ChunkCoordinate { x: -7, z: 5 },
+            revision: 42,
+        };
+        let envelope = dispatcher
+            .begin(OutboundSnapshotRequest {
+                request,
+                response,
+                cancellation: oneshot::channel().1,
+            })
+            .await
+            .unwrap();
+        let snapshot = ChunkSnapshot::decode(
+            &include_bytes!("../../../../../testdata/bridge/v1/chunk_snapshot_valid.bin")[..],
+        )
+        .unwrap();
+        assert!(
+            dispatcher
+                .accept(&Envelope {
+                    session_id: envelope.session_id,
+                    correlation_id: envelope.correlation_id,
+                    payload: Some(envelope::Payload::ChunkSnapshot(snapshot)),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+        );
+        assert!(matches!(
+            result.await.unwrap(),
+            Err(BridgeError::Transient(message)) if message == "snapshot registry unavailable"
+        ));
+        assert_eq!(dispatcher.in_flight().await, 0);
     }
     #[tokio::test]
     async fn enumeration_cancellation_clears_pending_and_ignores_late_response() {
