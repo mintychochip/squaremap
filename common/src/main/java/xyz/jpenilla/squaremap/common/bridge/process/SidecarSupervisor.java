@@ -273,6 +273,10 @@ public final class SidecarSupervisor implements AutoCloseable {
             }
             final ProcessBuilder builder = new ProcessBuilder(command);
             builder.environment().put("SQUAREMAP_OUTPUT_ROOT", config.rustOutputRoot().toString());
+            final String webRoot = System.getProperty("squaremap.backendWebRoot", "");
+            if (!webRoot.isBlank()) {
+                builder.environment().put("SQUAREMAP_WEB_ROOT", webRoot);
+            }
             synchronized (this.lock) {
                 if (this.lifecycleState != LifecycleState.STARTING || this.closed) {
                     throw new IOException("supervisor closed");
@@ -666,7 +670,9 @@ public final class SidecarSupervisor implements AutoCloseable {
                         || envelope.hasWorldResyncRequired()) this.replayListener.accept(envelope);
                     else if (envelope.hasReady()) this.readyListener.accept(envelope);
                     else if (envelope.hasAck()) this.publisher.acknowledge(envelope);
-                    else if (envelope.hasProtocolError() && envelope.getProtocolError().getFatal()) throw new IOException("fatal bridge protocol error");
+                    else if (envelope.hasProtocolError() && envelope.getProtocolError().getFatal()) {
+                        throw new IOException("fatal bridge protocol error: " + envelope.getProtocolError().getMessage());
+                    }
                     else if (envelope.hasChunkSnapshotRequest() || envelope.hasWorldEnumerationRequest()) this.snapshotRequestListener.accept(envelope);
                     else this.responseListener.accept(envelope);
                 }

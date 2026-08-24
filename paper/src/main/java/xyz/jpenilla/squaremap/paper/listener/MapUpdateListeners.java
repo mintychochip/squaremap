@@ -92,6 +92,17 @@ public final class MapUpdateListeners {
         this.registerListener(ChunkPopulateEvent.class, this::handleChunkPopulateEvent);
         this.registerListener(ChunkLoadEvent.class, this::handleChunkLoadEvent);
         this.registerListener(PlayerChunkLoadEvent.class, this::handlePlayerChunkLoadEvent);
+        this.markLoadedChunks();
+    }
+
+    private void markLoadedChunks() {
+        for (final World world : Bukkit.getWorlds()) {
+            this.worldManager.getWorldIfEnabled(world).ifPresent(mapWorld -> {
+                for (final Chunk chunk : world.getLoadedChunks()) {
+                    this.dirtyChunks.publish(mapWorld, new ChunkCoordinate(chunk.getX(), chunk.getZ()));
+                }
+            });
+        }
     }
 
     public void unregister() {

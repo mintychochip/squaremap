@@ -87,8 +87,8 @@ public final class SquaremapCommon {
         this.commands.registerCommands();
     }
     private void start() {
-        this.startSidecar();
         this.squaremapJar.extract("web", this.directoryProvider.webDirectory(), Config.UPDATE_WEB_DIR);
+        this.startSidecar();
         LevelBiomeColorData.loadImages(this.directoryProvider);
         this.worldManager.start();
         this.platform.startCallback();
@@ -98,6 +98,7 @@ public final class SquaremapCommon {
     }
 
     private void startSidecar() {
+        System.setProperty("squaremap.backendWebRoot", this.directoryProvider.webDirectory().toAbsolutePath().toString());
         final BridgeBootstrapConfig bootstrapConfig = this.bootstrapConfig.get();
         Logging.logger().info(
             "Configured Rust bridge backend with sidecar command {} and output root {}",

@@ -198,17 +198,23 @@ impl SnapshotClient {
                         "snapshot binding mismatch",
                     ));
                 }
-                let generation = pending
-                    .generation
-                    .clone()
-                    .or_else(|| {
+                // Stamped cache is from an earlier dirty revision. Prefer the current
+                // world registry so a sibling RegistryReplace at this revision wins.
+                let generation = if pending.generation_from_cache {
+                    self.registries
+                        .get(&world_key(&pending.world))
+                        .map(Registry::generation)
+                        .or_else(|| pending.generation.clone())
+                } else {
+                    pending.generation.clone().or_else(|| {
                         self.registries
                             .get(&world_key(&pending.world))
                             .map(Registry::generation)
                     })
-                    .ok_or(SnapshotClientError::InvalidResponse(
-                        "snapshot registry unavailable",
-                    ))?;
+                }
+                .ok_or(SnapshotClientError::InvalidResponse(
+                    "snapshot registry unavailable",
+                ))?;
                 let decoded = Snapshot::decode_for(snapshot, &generation, self.limits)?;
                 self.pending.remove(&envelope.correlation_id);
                 Ok(Some(SnapshotOutcome::Snapshot(decoded)))
@@ -610,6 +616,52 @@ mod tests {
                 session_id: second.session_id,
                 correlation_id: second.correlation_id,
                 payload: Some(envelope::Payload::ChunkSnapshot(snapshot)),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(matches!(outcome, Some(SnapshotOutcome::Snapshot(_))));
+    }
+
+    #[test]
+    fn later_dirty_revision_sibling_uses_fresh_registry_not_stale_request_cache() {
+        let mut client = SnapshotClient::new([9; 16], Limits::default()).unwrap();
+        let first = client.request_once(world(), 0, 0, 42).unwrap();
+        push_registry(&mut client, first.correlation_id, &world(), 42);
+        let mut first_snapshot = ChunkSnapshot::decode(
+            &include_bytes!("../../../../testdata/bridge/v1/chunk_snapshot_valid.bin")[..],
+        )
+        .unwrap();
+        first_snapshot.world = Some(world());
+        first_snapshot.coordinate = Some(squaremap_protocol::wire::ChunkCoordinate { x: 0, z: 0 });
+        first_snapshot.revision = 42;
+        assert!(matches!(
+            client
+                .accept(&Envelope {
+                    session_id: first.session_id,
+                    correlation_id: first.correlation_id,
+                    payload: Some(envelope::Payload::ChunkSnapshot(first_snapshot)),
+                    ..Default::default()
+                })
+                .unwrap(),
+            Some(SnapshotOutcome::Snapshot(_))
+        ));
+
+        let center = client.request_once(world(), 2, 0, 43).unwrap();
+        let neighbor = client.request_once(world(), 3, 0, 43).unwrap();
+        push_registry(&mut client, center.correlation_id, &world(), 43);
+        let mut neighbor_snapshot = ChunkSnapshot::decode(
+            &include_bytes!("../../../../testdata/bridge/v1/chunk_snapshot_valid.bin")[..],
+        )
+        .unwrap();
+        neighbor_snapshot.world = Some(world());
+        neighbor_snapshot.coordinate =
+            Some(squaremap_protocol::wire::ChunkCoordinate { x: 3, z: 0 });
+        neighbor_snapshot.revision = 43;
+        let outcome = client
+            .accept(&Envelope {
+                session_id: neighbor.session_id,
+                correlation_id: neighbor.correlation_id,
+                payload: Some(envelope::Payload::ChunkSnapshot(neighbor_snapshot)),
                 ..Default::default()
             })
             .unwrap();
