@@ -1357,7 +1357,7 @@ pub async fn run_bridge(
                                                 match desired_bind {
                                                     Some(bind) => Some(
                                                         HttpServer::bind(
-                                                            HttpConfig { bind, enabled: true, dev_frontend: None },
+                                                            HttpConfig::enabled_at(bind),
                                                             root.clone(),
                                                         )
                                                         .await

@@ -79,14 +79,7 @@ fn main() {
             .expect("tokio runtime should initialize");
         let result = runtime.block_on(async move {
             let output = OutputRoot::new(root)?;
-            let mut server = HttpServer::bind(
-                HttpConfig {
-                    bind,
-                    enabled: true,
-                    dev_frontend: None,
-                },
-                output,
-            )
+            let mut server = HttpServer::bind(HttpConfig::enabled_at(bind), output)
             .await?;
             println!(
                 "READY http_addr={}",
