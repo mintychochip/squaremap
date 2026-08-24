@@ -237,27 +237,27 @@ fn replacement_views_preserve_ui_world_names_marker_shapes_timestamps_and_icon_p
 #[test]
 fn checked_in_legacy_fixtures_are_consumed() {
     let empty: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../testdata/bridge/v1/views/empty.json"
+        "../../../../testdata/bridge/v1/fixtures/java/empty.json"
     ))
     .unwrap();
     let settings: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../testdata/bridge/v1/views/settings.json"
+        "../../../../testdata/bridge/v1/fixtures/java/settings.json"
     ))
     .unwrap();
     let world_settings: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../testdata/bridge/v1/views/world-settings.json"
+        "../../../../testdata/bridge/v1/fixtures/java/world-settings.json"
     ))
     .unwrap();
     let players: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../testdata/bridge/v1/views/players.json"
+        "../../../../testdata/bridge/v1/fixtures/java/players.json"
     ))
     .unwrap();
     let icons: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../testdata/bridge/v1/views/icons.json"
+        "../../../../testdata/bridge/v1/fixtures/java/icons.json"
     ))
     .unwrap();
     let markers: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../testdata/bridge/v1/views/markers.json"
+        "../../../../testdata/bridge/v1/fixtures/java/markers.json"
     ))
     .unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -319,13 +319,13 @@ fn checked_in_legacy_fixtures_are_consumed() {
     assert_eq!(marker_list[7]["tooltip"], "hover");
 }
 #[test]
-fn multipolygon_geometry_uses_distinct_type_tag() {
+fn multipolygon_geometry_uses_polygon_type_tag() {
     let geometry = squaremap_state::view::MarkerGeometryView::MultiPolygon {
         points: vec![vec![vec![squaremap_state::view::ViewPoint { x: 1, z: 2 }]]],
     };
     let value: serde_json::Value =
         serde_json::from_slice(&squaremap_state::view::serialize_json(&geometry).unwrap()).unwrap();
-    assert_eq!(value["type"], "multipolygon");
+    assert_eq!(value["type"], "polygon");
     let decoded: squaremap_state::view::MarkerGeometryView = serde_json::from_value(value).unwrap();
     assert_eq!(decoded, geometry);
 }

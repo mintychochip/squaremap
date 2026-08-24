@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "manifest_hash": "17d28344eba35387eb58f354125332e23950c6a248bc9e9c3599620e48b1684c",
+  "max_zoom": 3,
+  "cases": {
+    "solid-origin": {
+      "0/0_0.png": "ae2fc4766bb283ab68ca43ab7fbea80bf32e158a236560c143979eb515baceb7",
+      "1/0_0.png": "6e1fdf059134ec9f32b64bfa1a3349758506567493da00904dc85d1a71d90b51",
+      "2/0_0.png": "4a04c9ad9adbf5e46d54cbf956f6e6d30cc88cabad50209bbace4a22ba8f88cc",
+      "3/0_0.png": "abf0bc5090345385913e4eb7e808d220f6178d34b9e1fe992a4db6ce38ca9b7f"
+    },
+    "solid-east": {
+      "0/0_0.png": "c94c69c77636d7d1a1ad2a605e88956fa44cb082a7b3556d0c15a979223a3726",
+      "1/0_0.png": "fd1b9e998488a9e1c0f44a4bf6e1e217f667b899897eb4c25f68defdf1dd030c",
+      "2/0_0.png": "adda51061936f881a19e228d00dc7ddcfd7b4f10aba8f72909e21101278599c4",
+      "3/1_0.png": "7d325f23e744f99b7953b60c60b01ae5c68510a621e3e1df67a9a3d7d177f7eb"
+    },
+    "solid-negative": {
+      "0/-1_-1.png": "836b31cc03a4d31c5386ce5325fd5454a59eb68de7e2759e38a97b544eeb882d",
+      "1/-1_-1.png": "4df5a9357da21c4fc94dac88ca61c4d93ae49e6d0df080e8edb6364a95b6c0c3",
+      "2/-1_-1.png": "acdba26892a324ce72aa786462552d7bbc24bdf1977aefb985c62895a7d768b2",
+      "3/-1_-1.png": "2b49891029bceb18007f08688ff3403c6d2bd14fa50ddefdc51bf7e38ddb7f78"
+    },
+    "sparse-chunk-0-0": {
+      "0/0_0.png": "fe4a0c65330692a153ebe347ac72b30583df32d72134020b070faa789d316d68",
+      "1/0_0.png": "f69d65f5f60c7c162f737d29192a1483c8348fee48eae43d0debdb2d4446a051",
+      "2/0_0.png": "154b6c5ba3e768dc471fc5b44bac738fa726628d8ee2367a1f50f59961b3984c",
+      "3/0_0.png": "6b9f97c8e2920cd20a9333941ae005c5bfbebf59c556f169abceca6a38e10a3e"
+    },
+    "sparse-chunk-31-31": {
+      "0/0_0.png": "2049389966d1ff9a6ea636d98e8c2d2da649f1ea4c0af59a7486578c49416b06",
+      "1/0_0.png": "c541846e4a8da3dda9056ca82629c076eb7c0cb9fbd1e56982b715e4614116a4",
+      "2/0_0.png": "436bc7997ef99689c531295b0c80a2cbeb2976b649301dd866fee7961b7b8389",
+      "3/0_0.png": "dad786e09636adce301d04db39e1fb78c0e4e31fc2d42102bdb9ad50fa99068c"
+    },
+    "checker-step2": {
+      "0/0_0.png": "8f58277fb21279756a53755c6224c9ac48250c05b85534e538b60263cc0fde00",
+      "1/0_0.png": "9f9142e12459ff2130a3bf42a58e08435a36b8aab1617569bc66ae19f975ace6",
+      "2/0_0.png": "8e159638aa6cf3cd51fb0b66cff7a84157bbb6bf5c1f6c75fb28e9fd34d31123",
+      "3/0_0.png": "e89249aafdba211dbb41bb7fafab383367408f610e033e0a304a0a927db2bc3b"
+    },
+    "gradient-diag": {
+      "0/0_-1.png": "c0671ad4ef4bdfc39537bbb41b847e6c37baf6753b358d6e9775e45b41d3c5a9",
+      "1/0_-1.png": "41227d6b484d1d60213c36bec04589f1106d43e6c5ab73245bd5f1d9a32f0eba",
+      "2/1_-1.png": "fe4c390c1832433942ea223950593811ea6fd8def488eb5abd0a86ecb4181244",
+      "3/3_-2.png": "df3c122c8516ebdab9c94ddb6f0dafc241089a9feef42f229d8022ae7326ecd1"
+    },
+    "transparent-zero": {
+      "0/0_0.png": "30e14955ebf1352266dc2ff8067e68104607e750abb9d3b36582b8af909fcb58",
+      "1/0_0.png": "30e14955ebf1352266dc2ff8067e68104607e750abb9d3b36582b8af909fcb58",
+      "2/0_0.png": "30e14955ebf1352266dc2ff8067e68104607e750abb9d3b36582b8af909fcb58",
+      "3/0_0.png": "30e14955ebf1352266dc2ff8067e68104607e750abb9d3b36582b8af909fcb58"
+    },
+    "unset-vs-transparent": {
+      "0/0_0.png": "ed6e57be89ef96e53646f86ba24079bb4f9fa868956db1a11a077f1c8d073226",
+      "1/0_0.png": "7401d510539404496649709b9af98a1856f956b3cba53ef252782d09fca506e9",
+      "2/0_0.png": "21a86a964b7dd3296c0799d38c471f3c579a8709f74d367de58b56cd458f9c1c",
+      "3/0_0.png": "8a15322ff8bfef5cbccc9a8ea82ed23af3592d00bb9172e3c99be2f40d958bf0"
+    },
+    "merge-existing-quadrant": {
+      "0/0_0.png": "f8440c9a705812c6fdb7c848e6fb86af8781e89ed52c595e68d1a9885bf980cc",
+      "1/0_0.png": "37a69ca7fd55b130ad1100f490e8f2f1dbc044410239e2f8fcf5c06fc8c488d3",
+      "2/0_0.png": "6aae371874e87a4bbbe4bf479fd9cce4554a8ba040cc1a1e1e63025eb36990d2",
+      "3/0_0.png": "abf0bc5090345385913e4eb7e808d220f6178d34b9e1fe992a4db6ce38ca9b7f",
+      "3/1_0.png": "c4b908e73d1638d6820b152564fe974f3c36a38b98c50dd1e01c0cb5bebb69d3"
+    }
+  }
+}

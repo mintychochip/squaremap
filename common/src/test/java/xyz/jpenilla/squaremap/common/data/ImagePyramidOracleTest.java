@@ -30,6 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ImagePyramidOracleTest {
     private static final Path ROOT = Path.of(System.getProperty("squaremap.task11.root"));
     private static final Path MANIFEST = ROOT.resolve("testdata/bridge/v2/tiles/manifest.json");
+    private static final Path COMMITTED_HASHES = ROOT.resolve("testdata/bridge/v2/tiles/java-oracle-hashes.json");
     private static final Path OUT = ROOT.resolve("build/tile-oracle/java");
     private static final int MAX_ZOOM = 3;
     private static final int TILE = Image.SIZE;
@@ -179,6 +180,31 @@ class ImagePyramidOracleTest {
         final BufferedImage parent = readPng("merge-existing-quadrant", "2/0_0.png");
         assertEquals(0xFF112233, parent.getRGB(0, 0));
         assertEquals(0xFF220000, parent.getRGB(256, 0));
+    }
+
+    @Test
+    void generatedHashesMatchCommittedJavaOracle() throws Exception {
+        assertTrue(Files.isRegularFile(COMMITTED_HASHES), COMMITTED_HASHES.toString());
+        final JsonObject committed = JsonParser.parseString(Files.readString(COMMITTED_HASHES)).getAsJsonObject();
+        assertEquals(1, committed.get("schema_version").getAsInt());
+        assertEquals(MAX_ZOOM, committed.get("max_zoom").getAsInt());
+        assertEquals(sha256Hex(Files.readAllBytes(MANIFEST)), committed.get("manifest_hash").getAsString());
+        final JsonObject cases = committed.getAsJsonObject("cases");
+        assertEquals(manifest.getAsJsonArray("cases").size(), cases.size());
+        for (final var element : report.getAsJsonArray("cases")) {
+            final JsonObject row = element.getAsJsonObject();
+            final String id = row.get("id").getAsString();
+            assertTrue(cases.has(id), id);
+            final JsonObject expected = cases.getAsJsonObject(id);
+            final JsonArray paths = row.getAsJsonArray("paths");
+            final JsonArray hashes = row.getAsJsonArray("pixel_sha256");
+            assertEquals(paths.size(), expected.size(), id);
+            for (int i = 0; i < paths.size(); i++) {
+                final String relative = paths.get(i).getAsString();
+                assertTrue(expected.has(relative), id + " " + relative);
+                assertEquals(expected.get(relative).getAsString(), hashes.get(i).getAsString(), id + " " + relative);
+            }
+        }
     }
 
     private static void applyCase(final JsonObject testCase, final Path directory) {

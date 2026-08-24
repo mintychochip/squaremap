@@ -35,6 +35,7 @@ libc.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 criterion = "0.5.1"
+squaremap-compare = { path = "../squaremap-compare" }
 
 [[bench]]
 name = "backend_workload"

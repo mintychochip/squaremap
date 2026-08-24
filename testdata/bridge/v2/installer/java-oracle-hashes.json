@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "manifest_hash": "cb231cec5da956b068e0781596e2ed3ca69548dc3a6e87ef8e6c2d46706ad190",
+  "max_zoom": 3,
+  "cases": {
+    "fixture-flat-solid-at-0-0": {
+      "0/0_0.png": "a3185d8411423134440ad1a6d278c7b05e5a1bd24b8b57e20fe6befca7b9ea26",
+      "1/0_0.png": "e2bc0ec251d1193b0284ff6b2dc75727cf2464a448f2d77d6628a1e2a6af45cd",
+      "2/0_0.png": "0f5fe5e0af7fa300b949a62e6986a5dfd96b799850e7fda6fbdb3167c9bb77d3",
+      "3/0_0.png": "060d81a18d15e18e3011ad030fd44562b4002a498e4f6a011a9e1e098114f6a3"
+    },
+    "fixture-flat-solid-at-1-0": {
+      "0/0_0.png": "038c412869609cdf735eb2808e17c8493c497a62f13ca6cfde630700266faf3d",
+      "1/0_0.png": "225fac5e5db648869937a93dbdd10b37894d75a2ef5c13735a2a49e76729a898",
+      "2/0_0.png": "638c7200f08f690e44286be1e4b14a6bc8055fcbfda4e0318f1818b009e68f90",
+      "3/0_0.png": "2de2b3e60eb17cc1b5aa1d7454f8817d4e422ed792ad26b0d10497156a54cb7a"
+    },
+    "fixture-flat-solid-then-iterate-down": {
+      "0/0_0.png": "adea8ab7a9341d457ba79a5556a2c54cb51a5cf625f42f7cda62b0b55ba3f958",
+      "1/0_0.png": "9c76a43f24d441daa239630bedca7e93b3107f26a73234c214476b58185fbe66",
+      "2/0_0.png": "1fa09869abdf480b615dc58f4ee6070e0c40bb310ff0469d0929a3b1a4b00113",
+      "3/0_0.png": "0f7c7e048443ee264d86e9e36f505fcc0a2ba26b592dd27ff4f779f0fc1720bb"
+    },
+    "fixture-flat-solid-at-31-31": {
+      "0/0_0.png": "14513d079f78441049b8b0a316ad5aafd6fce8bcc2bf9a5fb172d69f0d2fc695",
+      "1/0_0.png": "8da5641a3f0afc36c4892b80c158e0434206376297b259acd247d097191bfa7b",
+      "2/0_0.png": "6611b0fd404079d8841d942187cb0fd70273ef6c63f27f1be37a7b87b671ac26",
+      "3/0_0.png": "ddeeb6b470d969c946107e73a62ffab7fd1fc37917d2a19aa8ad8126ee2a9753"
+    },
+    "fixture-flat-solid-at-negative": {
+      "0/-1_-1.png": "348c124bb9cb1252a7aa8ea845bd933196ee7b0566a0a5783b0ac300cad5f7d9",
+      "1/-1_-1.png": "6e8c5d5359594d08825b9bdc70fe720f914a456ceb0989de576428032962e069",
+      "2/-1_-1.png": "196385b5de98b11fe60fb25e6668e70f39f876251d344220f0e42a00e6319420",
+      "3/-1_-1.png": "ddeeb6b470d969c946107e73a62ffab7fd1fc37917d2a19aa8ad8126ee2a9753"
+    },
+    "fixture-flat-solid-at-32-0": {
+      "0/0_0.png": "d5441e35deb6468607a6544d6eb028117146c2a4155a703ddc2b0bf0052e47f6",
+      "1/0_0.png": "ea16e7ef1f9b577716b0fa085f5961ac17fb61961ba7eaf170e31ad13aca8b2e",
+      "2/0_0.png": "12baea906efeaf67655d474517b94f72755b1e1d60e4c64cde5fa529b68e3d6d",
+      "3/1_0.png": "060d81a18d15e18e3011ad030fd44562b4002a498e4f6a011a9e1e098114f6a3"
+    }
+  }
+}

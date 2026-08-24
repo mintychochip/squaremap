@@ -80,7 +80,6 @@ pub(crate) fn serve(
         Ok(Some(opened)) => opened,
         Ok(None) => {
             if is_tile && path.extension().is_some_and(|extension| extension == "png") {
-                headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
                 headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
                 return super::make_response(StatusCode::OK, headers, Body::empty());
             }
@@ -133,9 +132,22 @@ fn content_type(path: &Path) -> &'static str {
     match path.extension().and_then(|extension| extension.to_str()) {
         Some("json") => "application/json",
         Some("png") => "image/png",
-        Some("html") => "text/html; charset=utf-8",
+        Some("html" | "htm") => "text/html; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
-        Some("js") => "application/javascript",
+        Some("js" | "mjs") => "application/javascript",
+        Some("ico") => "image/x-icon",
+        Some("svg") => "image/svg+xml",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        Some("ttf") => "font/ttf",
+        Some("otf") => "font/otf",
+        Some("txt") => "text/plain; charset=utf-8",
+        Some("xml") => "application/xml",
+        Some("map") => "application/json",
+        Some("webmanifest") => "application/manifest+json",
         _ => "application/octet-stream",
     }
 }

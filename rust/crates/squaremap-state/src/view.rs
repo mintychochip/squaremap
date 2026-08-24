@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ViewPoint { pub x: i32, pub z: i32 }
@@ -101,16 +101,86 @@ pub struct MarkerTooltipView {
     #[serde(rename = "popup", skip_serializing_if = "Option::is_none")] pub click: Option<String>,
     #[serde(rename = "tooltip", skip_serializing_if = "Option::is_none")] pub hover: Option<String>,
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[derive(Clone, Debug, PartialEq)]
 pub enum MarkerGeometryView {
+    Icon { point: ViewPoint, size: ViewPoint, anchor: ViewPoint, tooltip_anchor: ViewPoint, icon: String },
+    Circle { center: ViewPoint, radius: f64 },
+    Ellipse { center: ViewPoint, radius_x: f64, radius_z: f64 },
+    Rectangle { points: Vec<ViewPoint> },
+    Polyline { points: PolylinePoints },
+    Polygon { points: Vec<Vec<ViewPoint>> },
+    MultiPolygon { points: Vec<Vec<Vec<ViewPoint>>> },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum MarkerGeometrySerde {
     #[serde(rename = "icon")] Icon { point: ViewPoint, size: ViewPoint, anchor: ViewPoint, tooltip_anchor: ViewPoint, icon: String },
     #[serde(rename = "circle")] Circle { center: ViewPoint, radius: f64 },
     #[serde(rename = "ellipse")] Ellipse { center: ViewPoint, #[serde(rename = "radiusX")] radius_x: f64, #[serde(rename = "radiusZ")] radius_z: f64 },
     #[serde(rename = "rectangle")] Rectangle { points: Vec<ViewPoint> },
     #[serde(rename = "polyline")] Polyline { points: PolylinePoints },
-    #[serde(rename = "polygon")] Polygon { points: Vec<Vec<ViewPoint>> },
+    #[serde(rename = "polygon")] Polygon { points: serde_json::Value },
     #[serde(rename = "multipolygon")] MultiPolygon { points: Vec<Vec<Vec<ViewPoint>>> },
+}
+
+impl Serialize for MarkerGeometryView {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let tagged = match self {
+            Self::Icon { point, size, anchor, tooltip_anchor, icon } => MarkerGeometrySerde::Icon {
+                point: point.clone(),
+                size: size.clone(),
+                anchor: anchor.clone(),
+                tooltip_anchor: tooltip_anchor.clone(),
+                icon: icon.clone(),
+            },
+            Self::Circle { center, radius } => MarkerGeometrySerde::Circle {
+                center: center.clone(),
+                radius: *radius,
+            },
+            Self::Ellipse { center, radius_x, radius_z } => MarkerGeometrySerde::Ellipse {
+                center: center.clone(),
+                radius_x: *radius_x,
+                radius_z: *radius_z,
+            },
+            Self::Rectangle { points } => MarkerGeometrySerde::Rectangle { points: points.clone() },
+            Self::Polyline { points } => MarkerGeometrySerde::Polyline { points: points.clone() },
+            Self::Polygon { points } => MarkerGeometrySerde::Polygon {
+                points: serde_json::to_value(points).map_err(serde::ser::Error::custom)?,
+            },
+            Self::MultiPolygon { points } => MarkerGeometrySerde::Polygon {
+                points: serde_json::to_value(points).map_err(serde::ser::Error::custom)?,
+            },
+        };
+        tagged.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MarkerGeometryView {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let tagged = MarkerGeometrySerde::deserialize(deserializer)?;
+        Ok(match tagged {
+            MarkerGeometrySerde::Icon { point, size, anchor, tooltip_anchor, icon } => {
+                Self::Icon { point, size, anchor, tooltip_anchor, icon }
+            }
+            MarkerGeometrySerde::Circle { center, radius } => Self::Circle { center, radius },
+            MarkerGeometrySerde::Ellipse { center, radius_x, radius_z } => {
+                Self::Ellipse { center, radius_x, radius_z }
+            }
+            MarkerGeometrySerde::Rectangle { points } => Self::Rectangle { points },
+            MarkerGeometrySerde::Polyline { points } => Self::Polyline { points },
+            MarkerGeometrySerde::Polygon { points } => {
+                if let Ok(multi) = serde_json::from_value::<Vec<Vec<Vec<ViewPoint>>>>(points.clone()) {
+                    Self::MultiPolygon { points: multi }
+                } else {
+                    Self::Polygon {
+                        points: serde_json::from_value(points).map_err(serde::de::Error::custom)?,
+                    }
+                }
+            }
+            MarkerGeometrySerde::MultiPolygon { points } => Self::MultiPolygon { points },
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

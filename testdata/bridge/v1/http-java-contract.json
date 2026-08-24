@@ -1,0 +1,180 @@
+{
+  "schema_version": 1,
+  "source": "Java IntegratedServer / Undertow semantics captured after Java HTTP deletion",
+  "cases": [
+    {
+      "id": "index-from-web-root",
+      "proves": "GET / is 200 HTML from the extracted web directory, not the output root",
+      "verdict": "match",
+      "request": { "method": "GET", "path": "/" },
+      "expect": { "status": 200, "body": "exact", "exact_body": "web-index", "content_type": "text/html; charset=utf-8" }
+    },
+    {
+      "id": "asset-from-web-root",
+      "proves": "GET /assets/* is served from the web root with a JavaScript content type",
+      "verdict": "match",
+      "request": { "method": "GET", "path": "/assets/app.js" },
+      "expect": { "status": 200, "body": "exact", "exact_body": "web-js", "content_type": "application/javascript" }
+    },
+    {
+      "id": "favicon-ico-content-type",
+      "proves": "Undertow MimeMappings serve favicon.ico as image/x-icon",
+      "verdict": "match",
+      "request": { "method": "GET", "path": "/favicon.ico" },
+      "expect": { "status": 200, "body": "exact", "exact_body": "ico", "content_type": "image/x-icon" }
+    },
+    {
+      "id": "settings-json-cache-and-etag",
+      "proves": "tiles JSON is application/json with max-age=0 cache headers and a quoted ETag",
+      "verdict": "match",
+      "request": { "method": "GET", "path": "/tiles/settings.json" },
+      "expect": {
+        "status": 200,
+        "body": "exact",
+        "exact_body": "{\"ok\":true}",
+        "content_type": "application/json",
+        "cache_control": "max-age=0, must-revalidate, no-cache",
+        "etag": "quoted"
+      }
+    },
+    {
+      "id": "settings-json-head",
+      "proves": "HEAD of tiles JSON returns the same headers and an empty body",
+      "verdict": "match",
+      "request": { "method": "HEAD", "path": "/tiles/settings.json" },
+      "expect": {
+        "status": 200,
+        "body": "empty",
+        "content_type": "application/json",
+        "cache_control": "max-age=0, must-revalidate, no-cache",
+        "etag": "quoted"
+      }
+    },
+    {
+      "id": "etag-if-none-match-304",
+      "proves": "matching If-None-Match returns 304 empty like Undertow",
+      "verdict": "match",
+      "request": { "method": "GET", "path": "/tiles/settings.json", "if_none_match": "etag" },
+      "expect": { "status": 304, "body": "empty" }
+    },
+    {
+      "id": "etag-star-and-weak-304",
+      "proves": "If-None-Match * and W/etag both yield 304",
+      "verdict": "match",
+      "request": { "method": "GET", "path": "/tiles/settings.json", "if_none_match_variants": ["*", "weak"] },
+      "expect": { "status": 304, "body": "empty" }
+    },
+    {
+      "id": "existing-tile-200",
+      "proves": "an existing tiles/*.png is 200",
+      "verdict": "match",
+      "request": { "method": "GET", "path": "/tiles/existing.png" },
+      "expect": { "status": 200, "body": "exact", "exact_body": "png", "content_type": "image/png" }
+    },
+    {
+      "id": "missing-tile-empty-200",
+      "proves": "Java IntegratedServer welcome handler returned 200 empty for missing tiles/*.png so Leaflet skips",
+      "verdict": "match",
+      "request": { "method": "GET", "path": "/tiles/missing.png" },
+      "expect": {
+        "status": 200,
+        "body": "empty",
+        "content_type": "absent",
+        "cache_control": "max-age=0, must-revalidate, no-cache"
+      }
+    },
+    {
+      "id": "registered-icon-from-output",
+      "proves": "/images/icon/registered/* is served from the output root",
+      "verdict": "match",
+      "request": { "method": "GET", "path": "/images/icon/registered/spawn.png" },
+      "expect": { "status": 200, "body": "exact", "exact_body": "icon", "content_type": "image/png" }
+    },
+    {
+      "id": "static-icon-from-web",
+      "proves": "/images/icon/player.png is served from the web root",
+      "verdict": "match",
+      "request": { "method": "GET", "path": "/images/icon/player.png" },
+      "expect": { "status": 200, "body": "exact", "exact_body": "player", "content_type": "image/png" }
+    },
+    {
+      "id": "unknown-path-404",
+      "proves": "a non-tile missing path is 404",
+      "verdict": "match",
+      "request": { "method": "GET", "path": "/missing.json" },
+      "expect": { "status": 404, "body": "empty" }
+    },
+    {
+      "id": "post-not-allowed",
+      "proves": "POST / is 405",
+      "verdict": "match",
+      "request": { "method": "POST", "path": "/" },
+      "expect": { "status": 405, "body": "empty" }
+    },
+    {
+      "id": "path-traversal-rejected",
+      "proves": "../, percent-encoded dots, encoded slash, NUL, and backslash are 4xx",
+      "verdict": "match",
+      "request": {
+        "method": "GET",
+        "paths": ["/%2e%2e/secret", "/%252e%252e/secret", "/a%2fb", "/a%00b"]
+      },
+      "expect": { "status_class": "client_error" }
+    },
+    {
+      "id": "disabled-http-does-not-bind",
+      "proves": "http_enabled=false writes files but binds no listener",
+      "verdict": "match",
+      "mode": "disabled"
+    },
+    {
+      "id": "hostname-bind-localhost",
+      "proves": "bind host localhost resolves like Undertow addHttpListener",
+      "verdict": "match",
+      "mode": "hostname"
+    },
+    {
+      "id": "players-json-cache-control",
+      "proves": "Rust always sends Cache-Control on players.json",
+      "verdict": "deliberate",
+      "java": "JsonCache served players.json / markers.json with no Cache-Control",
+      "rust": "always Cache-Control: max-age=0, must-revalidate, no-cache",
+      "reason": "prevent stale player positions",
+      "request": { "method": "GET", "path": "/tiles/players.json" },
+      "expect": {
+        "status": 200,
+        "cache_control": "max-age=0, must-revalidate, no-cache"
+      }
+    },
+    {
+      "id": "json-post-405",
+      "proves": "Rust rejects non-GET/HEAD on JSON that Java JsonCache would serve",
+      "verdict": "deliberate",
+      "java": "JsonCache answered non-GET/HEAD",
+      "rust": "405",
+      "reason": "no mutation API",
+      "request": { "method": "POST", "path": "/tiles/players.json" },
+      "expect": { "status": 405, "body": "empty" }
+    },
+    {
+      "id": "encoded-separator-rejected",
+      "proves": "encoded slash is rejected rather than decoded and served",
+      "verdict": "deliberate",
+      "java": "Undertow decoded and could serve",
+      "rust": "400/4xx",
+      "reason": "path confinement",
+      "request": { "method": "GET", "path": "/tiles/a%2fb.png" },
+      "expect": { "status_class": "client_error" }
+    },
+    {
+      "id": "no-h2c",
+      "proves": "the listener is HTTP/1.1 only",
+      "verdict": "deliberate",
+      "java": "Undertow could enable h2c",
+      "rust": "HTTP/1.1 only",
+      "reason": "not required by the frontend",
+      "request": { "method": "GET", "path": "/" },
+      "expect": { "status": 200, "http_version": "HTTP/1.1", "upgrade": "absent" }
+    }
+  ]
+}

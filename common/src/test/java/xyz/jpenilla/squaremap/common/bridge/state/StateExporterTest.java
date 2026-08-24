@@ -35,6 +35,19 @@ import xyz.jpenilla.squaremap.bridge.v1.WorldStateReplace;
 import xyz.jpenilla.squaremap.bridge.v1.ZoomSettings;
 
 final class StateExporterTest {
+    private static final Path JAVA_FIXTURES = Path.of(
+        System.getProperty("squaremap.task11.root"),
+        "testdata/bridge/v1/fixtures/java"
+    );
+    private static final List<String> LAYER3_JSON = List.of(
+        "empty.json",
+        "settings.json",
+        "world-settings.json",
+        "players.json",
+        "markers.json",
+        "icons.json"
+    );
+
     @Test
     void playerCoreFiltersPrivateStatesAndPreservesPublicFields() {
         final PlayerStateExporter.Input publicPlayer = new PlayerStateExporter.Input(
@@ -95,8 +108,16 @@ final class StateExporterTest {
     }
 
     @Test
+    void frozenLayer3JavaFixturesExist() {
+        assertTrue(Files.isDirectory(JAVA_FIXTURES), JAVA_FIXTURES.toString());
+        for (final String name : LAYER3_JSON) {
+            assertTrue(Files.isRegularFile(JAVA_FIXTURES.resolve(name)), JAVA_FIXTURES.resolve(name).toString());
+        }
+    }
+
+    @Test
     void checkedInGoldenDocumentsUseProductionExporterAndSinkCores() throws Exception {
-        final Path root = Path.of("..", "testdata/bridge/v1/views");
+        final Path root = JAVA_FIXTURES;
         final JsonElement empty = fixture(root, "empty.json");
         final JsonElement settings = fixture(root, "settings.json");
         final JsonElement worldSettings = fixture(root, "world-settings.json");

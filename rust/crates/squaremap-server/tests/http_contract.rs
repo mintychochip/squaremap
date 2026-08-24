@@ -13,6 +13,111 @@ async fn server(root: &std::path::Path) -> HttpServer {
 }
 
 #[tokio::test]
+async fn serves_frontend_from_web_root_and_tiles_from_output_root() {
+    let web = tempdir().unwrap();
+    let output = tempdir().unwrap();
+    std::fs::write(web.path().join("index.html"), b"web-index").unwrap();
+    std::fs::create_dir_all(web.path().join("assets")).unwrap();
+    std::fs::write(web.path().join("assets/app.js"), b"web-js").unwrap();
+    std::fs::write(output.path().join("index.html"), b"output-index").unwrap();
+    std::fs::create_dir_all(output.path().join("tiles")).unwrap();
+    std::fs::write(output.path().join("tiles/settings.json"), br#"{"from":"output"}"#).unwrap();
+    std::fs::create_dir_all(output.path().join("images/icon/registered")).unwrap();
+    std::fs::write(
+        output.path().join("images/icon/registered/spawn.png"),
+        b"icon",
+    )
+    .unwrap();
+
+    let root = OutputRoot::new(output.path()).unwrap();
+    let mut server = HttpServer::bind(
+        HttpConfig {
+            web_root: Some(web.path().to_path_buf()),
+            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
+            enabled: true,
+            dev_frontend: None,
+        },
+        root,
+    )
+    .await
+    .unwrap();
+    let client = reqwest::Client::new();
+    let base = format!("http://{}", server.local_addr().unwrap());
+
+    let index = client.get(format!("{base}/")).send().await.unwrap();
+    assert_eq!(index.status(), StatusCode::OK);
+    assert_eq!(index.text().await.unwrap(), "web-index");
+
+    let asset = client
+        .get(format!("{base}/assets/app.js"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(asset.status(), StatusCode::OK);
+    assert_eq!(asset.text().await.unwrap(), "web-js");
+
+    let json = client
+        .get(format!("{base}/tiles/settings.json"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(json.status(), StatusCode::OK);
+    assert_eq!(json.text().await.unwrap(), r#"{"from":"output"}"#);
+
+    let icon = client
+        .get(format!("{base}/images/icon/registered/spawn.png"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(icon.status(), StatusCode::OK);
+    assert_eq!(icon.bytes().await.unwrap().as_ref(), b"icon");
+
+    let missing = client.get(format!("{base}/nope.js")).send().await.unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn web_root_can_be_opened_twice_without_exclusive_lock() {
+    let web = tempdir().unwrap();
+    let output_a = tempdir().unwrap();
+    let output_b = tempdir().unwrap();
+    std::fs::write(web.path().join("index.html"), b"shared-web").unwrap();
+    let mut first = HttpServer::bind(
+        HttpConfig {
+            web_root: Some(web.path().to_path_buf()),
+            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
+            enabled: true,
+            dev_frontend: None,
+        },
+        OutputRoot::new(output_a.path()).unwrap(),
+    )
+    .await
+    .unwrap();
+    let mut second = HttpServer::bind(
+        HttpConfig {
+            web_root: Some(web.path().to_path_buf()),
+            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
+            enabled: true,
+            dev_frontend: None,
+        },
+        OutputRoot::new(output_b.path()).unwrap(),
+    )
+    .await
+    .unwrap();
+    let client = reqwest::Client::new();
+    let page = client
+        .get(format!("http://{}/", second.local_addr().unwrap()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page.text().await.unwrap(), "shared-web");
+    first.shutdown().await.unwrap();
+    second.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn serves_files_headers_and_missing_tile_contract() {
     let dir = tempdir().unwrap();
     std::fs::write(dir.path().join("index.html"), b"index").unwrap();
@@ -244,11 +349,9 @@ fn removes_stale_temp_siblings_recursively() {
 async fn disabled_mode_does_not_bind_but_writes() {
     let dir = tempdir().unwrap();
     let root = OutputRoot::new(dir.path()).unwrap();
-    let config = HttpConfig {
-        bind: SocketAddr::from(([127, 0, 0, 1], 0)),
-        enabled: false,
-        dev_frontend: None,
-    };
+    let config = HttpConfig { web_root: None, bind: SocketAddr::from(([127, 0, 0, 1], 0)),
+    enabled: false,
+    dev_frontend: None, };
     let mut server = HttpServer::bind(config, root.clone()).await.unwrap();
     assert!(server.local_addr().is_none());
     root.atomic_write("index.html", b"still works").unwrap();

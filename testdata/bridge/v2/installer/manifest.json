@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "max_zoom": 3,
+  "render_manifest": "testdata/bridge/v2/render/manifest.json",
+  "cases": [
+    {
+      "id": "fixture-flat-solid-at-0-0",
+      "installs": [{ "fixture": "flat-solid", "chunk": [0, 0] }]
+    },
+    {
+      "id": "fixture-flat-solid-at-1-0",
+      "installs": [{ "fixture": "flat-solid", "chunk": [1, 0] }]
+    },
+    {
+      "id": "fixture-flat-solid-then-iterate-down",
+      "installs": [
+        { "fixture": "flat-solid", "chunk": [0, 0] },
+        { "fixture": "iterate-down", "chunk": [1, 0] }
+      ]
+    },
+    {
+      "id": "fixture-flat-solid-at-31-31",
+      "installs": [{ "fixture": "flat-solid", "chunk": [31, 31] }]
+    },
+    {
+      "id": "fixture-flat-solid-at-negative",
+      "installs": [{ "fixture": "flat-solid", "chunk": [-1, -1] }]
+    },
+    {
+      "id": "fixture-flat-solid-at-32-0",
+      "installs": [{ "fixture": "flat-solid", "chunk": [32, 0] }]
+    }
+  ]
+}

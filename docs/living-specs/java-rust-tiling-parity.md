@@ -1,6 +1,6 @@
 # Java/Rust tiling parity
 
-Last updated: 2026-08-21
+Last updated: 2026-08-23
 Status: active
 
 ## Intent
@@ -58,10 +58,11 @@ Pre-existing tile content:
 - [x] Negative-region + zoom 0..=3 path/origin/pixel probe
 - [x] Paired renderer A/B with per-pass samples and graphs
 - [x] Paired pyramid A/B with per-pass samples and graphs
+- [x] Production-path installer (chunk → region local coords → pyramid) vs Java Image fed the same chunk pixels. Owned by `docs/living-specs/java-rust-equivalence.md` Layer 1.
 
 ## Next
 
-Production-path installer (chunk → region local coords → pyramid) vs Java Image fed the same chunk pixels.
+None. Live Paper tile-tree comparison remains Future.
 
 ## Future
 

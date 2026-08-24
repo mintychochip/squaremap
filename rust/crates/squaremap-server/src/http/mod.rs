@@ -17,6 +17,8 @@ pub struct HttpConfig {
     pub bind: SocketAddr,
     pub enabled: bool,
     pub dev_frontend: Option<DevFrontendConfig>,
+    /// Read-only frontend asset root; generated state stays in the output root.
+    pub web_root: Option<std::path::PathBuf>,
 }
 
 impl HttpConfig {
@@ -25,6 +27,18 @@ impl HttpConfig {
             bind: SocketAddr::from(([127, 0, 0, 1], 0)),
             enabled: true,
             dev_frontend: None,
+            web_root: None,
+        }
+    }
+
+    pub fn enabled_at(bind: SocketAddr) -> Self {
+        Self {
+            bind,
+            enabled: true,
+            dev_frontend: None,
+            web_root: std::env::var_os("SQUAREMAP_WEB_ROOT")
+                .filter(|value| !value.is_empty())
+                .map(std::path::PathBuf::from),
         }
     }
 }
@@ -50,6 +64,10 @@ impl HttpServer {
             Some(dev_config) => Some(dev_frontend::DevFrontend::start(dev_config).await?),
             None => None,
         };
+        let web = match &config.web_root {
+            Some(path) => Some(OutputRoot::read_only(path)?),
+            None => None,
+        };
         let listener = match TcpListener::bind(config.bind).await {
             Ok(listener) => listener,
             Err(error) => {
@@ -71,6 +89,7 @@ impl HttpServer {
         let (stop_tx, stop_rx) = oneshot::channel();
         let state = Arc::new(AppState {
             root,
+            web,
             dev: dev.as_ref().map(|frontend| frontend.clone()),
         });
         let router = Router::new().fallback(handle_request).with_state(state);
@@ -120,6 +139,7 @@ impl HttpServer {
 
 struct AppState {
     root: OutputRoot,
+    web: Option<OutputRoot>,
     dev: Option<dev_frontend::DevFrontend>,
 }
 
@@ -151,7 +171,16 @@ async fn handle_request(
             Body::empty(),
         );
     }
-    static_files::serve(&state.root, &decoded, &method, request.headers())
+    let from_output = is_static_exclusion(&decoded);
+    if from_output || state.web.is_none() {
+        return static_files::serve(&state.root, &decoded, &method, request.headers());
+    }
+    static_files::serve(
+        state.web.as_ref().expect("web root"),
+        &decoded,
+        &method,
+        request.headers(),
+    )
 }
 
 fn is_static_exclusion(path: &std::path::Path) -> bool {

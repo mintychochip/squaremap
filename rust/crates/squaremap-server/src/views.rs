@@ -308,10 +308,14 @@ fn sorted_worlds(value: &WorldStateReplace) -> Vec<&World> {
     worlds.sort_by(|left, right| {
         let left_identity = left.identity.as_ref();
         let right_identity = right.identity.as_ref();
-        left_identity
-            .map(|id| id.namespace.as_str())
-            .unwrap_or("")
-            .cmp(right_identity.map(|id| id.namespace.as_str()).unwrap_or(""))
+        left.order
+            .cmp(&right.order)
+            .then_with(|| {
+                left_identity
+                    .map(|id| id.namespace.as_str())
+                    .unwrap_or("")
+                    .cmp(right_identity.map(|id| id.namespace.as_str()).unwrap_or(""))
+            })
             .then_with(|| {
                 left_identity
                     .map(|id| id.value.as_str())

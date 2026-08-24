@@ -74,6 +74,29 @@ impl OutputRoot {
         })
     }
 
+    /// Open a confined root for reads without taking the exclusive writer lock.
+    /// Used for the plugin web directory, which Java also writes.
+    pub fn read_only(root: impl AsRef<Path>) -> io::Result<Self> {
+        let configured = root.as_ref();
+        let root_dir = open_root_handle(configured)?;
+        let display_root = if configured.is_absolute() {
+            configured.to_owned()
+        } else {
+            std::env::current_dir()?.join(configured)
+        };
+        let root_dir = Arc::new(root_dir);
+        validate_open_root(&root_dir)?;
+        let owner_lock = Arc::new(open_owner_lock(&root_dir)?);
+        Ok(Self {
+            root: display_root,
+            root_dir,
+            owner_lock,
+            writes: Arc::new(Mutex::new(())),
+            canonical: Arc::new(Mutex::new(CanonicalState::default())),
+            latest: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
     pub fn path(&self) -> &Path {
         &self.root
     }

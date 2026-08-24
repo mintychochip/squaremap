@@ -1981,6 +1981,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "squaremap-compare",
  "squaremap-protocol",
  "squaremap-render",
  "squaremap-state",

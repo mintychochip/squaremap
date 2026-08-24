@@ -1,13 +1,25 @@
 #[path = "support/tile_cases.rs"]
 mod tile_cases;
 
+use serde::Deserialize;
 use squaremap_render::{TILE_RGBA_BYTES, TILE_SIZE, TileStore, decode_rgba_png};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use tile_cases::{
-    MANIFEST_PATH, MAX_ZOOM, ProbeReport, load_manifest, probe_catalog, run_case, sha256_hex,
-};
+use tile_cases::{MANIFEST_PATH, MAX_ZOOM, load_manifest, probe_catalog, run_case};
+
+const JAVA_HASHES: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../testdata/bridge/v2/tiles/java-oracle-hashes.json"
+);
+
+#[derive(Deserialize)]
+struct JavaOracleHashes {
+    schema_version: u32,
+    manifest_hash: String,
+    max_zoom: u8,
+    cases: BTreeMap<String, BTreeMap<String, String>>,
+}
 
 fn pixel(rgba: &[u8], x: usize, z: usize) -> [u8; 4] {
     let offset = (z * TILE_SIZE + x) * 4;
@@ -144,25 +156,26 @@ async fn unset_vs_transparent_writes_clear_pixel_and_leaves_neighbor() {
 
 #[tokio::test]
 async fn java_oracle_decoded_rgba_hashes_and_paths_match() {
-    let Some(oracle) = std::env::var_os("SQUAREMAP_JAVA_TILE_ORACLE") else {
-        return;
-    };
-    let oracle = PathBuf::from(oracle);
-    let report_path = oracle.join("report.json");
+    let hash_path = Path::new(JAVA_HASHES);
     assert!(
-        report_path.is_file(),
-        "SQUAREMAP_JAVA_TILE_ORACLE is set to {} but report.json is missing (fail closed)",
-        oracle.display()
+        hash_path.is_file(),
+        "committed Java tile oracle hashes missing: {}",
+        hash_path.display()
     );
+    let java: JavaOracleHashes = serde_json::from_slice(&fs::read(hash_path).unwrap())
+        .unwrap_or_else(|error| panic!("invalid {}: {error}", hash_path.display()));
+    assert_eq!(java.schema_version, 1, "java-oracle-hashes schema_version");
+    assert_eq!(java.max_zoom, MAX_ZOOM, "Java oracle max_zoom");
 
     let (manifest, manifest_bytes) = load_manifest(Path::new(MANIFEST_PATH));
     let rust = probe_catalog(&manifest, &manifest_bytes)
         .await
         .expect("rust probe");
-    let java: ProbeReport = serde_json::from_slice(&fs::read(&report_path).unwrap())
-        .unwrap_or_else(|error| panic!("invalid Java report.json: {error}"));
-
-    assert_eq!(java.max_zoom, MAX_ZOOM, "Java oracle max_zoom");
+    assert_eq!(
+        rust.report.manifest_hash, java.manifest_hash,
+        "tile catalog manifest hash rust={} java={}",
+        rust.report.manifest_hash, java.manifest_hash
+    );
     assert_eq!(
         rust.report.cases.len(),
         java.cases.len(),
@@ -171,80 +184,53 @@ async fn java_oracle_decoded_rgba_hashes_and_paths_match() {
         java.cases.len()
     );
 
+    let dump_root = std::env::var_os("SQUAREMAP_JAVA_TILE_ORACLE").map(PathBuf::from);
     let mut mismatches = Vec::new();
-    for (rust_case, java_case) in rust.report.cases.iter().zip(&java.cases) {
-        if rust_case.id != java_case.id {
-            mismatches.push(format!(
-                "case id rust={} java={}",
-                rust_case.id, java_case.id
-            ));
+    for rust_case in &rust.report.cases {
+        let Some(java_paths) = java.cases.get(&rust_case.id) else {
+            mismatches.push(format!("{} missing from committed Java hashes", rust_case.id));
             continue;
-        }
-        if rust_case.paths != java_case.paths {
+        };
+        let rust_paths: BTreeSet<&str> = rust_case.paths.iter().map(String::as_str).collect();
+        let java_path_set: BTreeSet<&str> = java_paths.keys().map(String::as_str).collect();
+        if rust_paths != java_path_set {
             mismatches.push(format!(
                 "{} path set rust={:?} java={:?}",
-                rust_case.id, rust_case.paths, java_case.paths
+                rust_case.id, rust_paths, java_path_set
             ));
         }
-        if rust_case.pixel_sha256.len() != java_case.pixel_sha256.len() {
-            mismatches.push(format!(
-                "{} hash count rust={} java={}",
-                rust_case.id,
-                rust_case.pixel_sha256.len(),
-                java_case.pixel_sha256.len()
-            ));
-            continue;
-        }
-        for (index, (rust_hash, java_hash)) in rust_case
-            .pixel_sha256
-            .iter()
-            .zip(&java_case.pixel_sha256)
-            .enumerate()
-        {
-            let relative = rust_case
-                .paths
-                .get(index)
-                .cloned()
-                .or_else(|| java_case.paths.get(index).cloned())
-                .unwrap_or_else(|| format!("index {index}"));
-            let rgba_path = oracle
-                .join(&java_case.id)
-                .join(relative.replacen(".png", ".rgba", 1));
-            if !rgba_path.is_file() {
-                mismatches.push(format!(
-                    "{} {} missing Java rgba dump {}",
-                    java_case.id,
-                    relative,
-                    rgba_path.display()
-                ));
+        for (relative, rust_hash) in rust_case.paths.iter().zip(&rust_case.pixel_sha256) {
+            let Some(java_hash) = java_paths.get(relative) else {
+                mismatches.push(format!("{} {} missing Java hash", rust_case.id, relative));
                 continue;
-            }
-            let java_rgba = fs::read(&rgba_path).unwrap();
-            if java_rgba.len() != TILE_RGBA_BYTES {
-                mismatches.push(format!(
-                    "{} {} Java rgba length {} expected {TILE_RGBA_BYTES}",
-                    java_case.id,
-                    relative,
-                    java_rgba.len()
-                ));
-            }
-            let java_file_hash = sha256_hex(&java_rgba);
-            if java_file_hash != *java_hash {
-                mismatches.push(format!(
-                    "{} {} Java rgba dump hash {java_file_hash} != report {java_hash}",
-                    java_case.id, relative
-                ));
-            }
+            };
             if rust_hash != java_hash {
-                let detail = rust
-                    .rgba(&rust_case.id, &relative)
-                    .map(|pixels| first_pixel_mismatch(pixels, &java_rgba))
+                let detail = dump_root
+                    .as_ref()
+                    .map(|oracle| oracle.join(&rust_case.id).join(relative.replacen(".png", ".rgba", 1)))
+                    .filter(|path| path.is_file())
+                    .and_then(|path| {
+                        let java_rgba = fs::read(path).ok()?;
+                        if java_rgba.len() != TILE_RGBA_BYTES {
+                            return Some(format!(
+                                " Java rgba length {} expected {TILE_RGBA_BYTES}",
+                                java_rgba.len()
+                            ));
+                        }
+                        rust.rgba(&rust_case.id, relative)
+                            .map(|pixels| first_pixel_mismatch(pixels, &java_rgba))
+                    })
                     .unwrap_or_default();
                 mismatches.push(format!(
                     "{} {} rust={rust_hash} java={java_hash}{detail}",
                     rust_case.id, relative
                 ));
             }
+        }
+    }
+    for id in java.cases.keys() {
+        if !rust.report.cases.iter().any(|case| case.id == *id) {
+            mismatches.push(format!("{id} present in Java hashes but missing from Rust probe"));
         }
     }
 
