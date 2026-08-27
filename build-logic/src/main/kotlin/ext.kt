@@ -50,10 +50,28 @@ private fun runGitCommand(command: List<String>, workingDirectory: File): GitCom
 private fun isFullGitObjectId(value: String): Boolean =
   (value.length == 40 || value.length == 64) && value.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
 
-fun runProps(layout: ProjectLayout, providers: ProviderFactory): Map<String, String> = mapOf(
-  "squaremap.devFrontend" to providers.gradleProperty("devFrontend").getOrElse("true"),
-  "squaremap.frontendPath" to layout.settingsDirectory.dir("web").asFile.absolutePath,
-)
+fun runProps(layout: ProjectLayout, providers: ProviderFactory): Map<String, String> = buildMap {
+  put("squaremap.devFrontend", providers.gradleProperty("devFrontend").getOrElse("true"))
+  put("squaremap.frontendPath", layout.settingsDirectory.dir("web").asFile.absolutePath)
+  localBackendBinary(layout)?.let { put("squaremap.backendBinary", it) }
+}
+
+internal fun localBackendBinary(layout: ProjectLayout): String? {
+  val os = System.getProperty("os.name").lowercase()
+  val arch = System.getProperty("os.arch").lowercase()
+  val windows = os.contains("windows")
+  val triple = when {
+    os.contains("linux") && (arch == "amd64" || arch == "x86_64") -> "x86_64-unknown-linux-gnu"
+    os.contains("linux") && (arch == "aarch64" || arch == "arm64") -> "aarch64-unknown-linux-gnu"
+    (os.contains("mac") || os.contains("darwin")) && (arch == "aarch64" || arch == "arm64") -> "aarch64-apple-darwin"
+    (os.contains("mac") || os.contains("darwin")) && (arch == "amd64" || arch == "x86_64") -> "x86_64-apple-darwin"
+    windows && (arch == "amd64" || arch == "x86_64") -> "x86_64-pc-windows-msvc"
+    else -> return null
+  }
+  val name = "squaremap-server-$triple${if (windows) ".exe" else ""}"
+  val file = layout.settingsDirectory.file("rust/backend/rust-backend-$triple/$name").asFile
+  return file.takeIf { it.isFile }?.absolutePath
+}
 
 val Project.releaseNotes: Provider<String>
   get() = providers.environmentVariable("RELEASE_NOTES")

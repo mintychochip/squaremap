@@ -224,7 +224,13 @@ impl Repository {
         self.blocking(move |connection| {
             let transaction = connection.transaction()?;
             ensure_current_world(&transaction, &world)?;
-            let changed = transaction.execute("INSERT INTO dirty_chunks(namespace,value,epoch,x,z,revision,owner_bridge_id,owner_session_id,lease_expires_epoch_seconds,replay_pending) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,0,0) ON CONFLICT(namespace,value,epoch,x,z) DO UPDATE SET revision=excluded.revision,owner_bridge_id=excluded.owner_bridge_id,owner_session_id=excluded.owner_session_id,replay_pending=0 WHERE excluded.revision > dirty_chunks.revision", params![world.namespace, world.value, world.epoch as i64, coordinate.x, coordinate.z, revision, bridge_id, session_id])?;
+            let high_water: i64 = transaction.query_row(
+                "SELECT COALESCE(MAX(revision), 0) FROM dirty_chunks WHERE namespace=?1 AND value=?2 AND epoch=?3",
+                params![world.namespace, world.value, world.epoch as i64],
+                |row| row.get(0),
+            )?;
+            let assigned = revision.max(high_water.saturating_add(1));
+            let changed = transaction.execute("INSERT INTO dirty_chunks(namespace,value,epoch,x,z,revision,owner_bridge_id,owner_session_id,lease_expires_epoch_seconds,replay_pending) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,0,0) ON CONFLICT(namespace,value,epoch,x,z) DO UPDATE SET revision=excluded.revision,owner_bridge_id=excluded.owner_bridge_id,owner_session_id=excluded.owner_session_id,replay_pending=0", params![world.namespace, world.value, world.epoch as i64, coordinate.x, coordinate.z, assigned, bridge_id, session_id])?;
             transaction.execute("DELETE FROM dirty_retries WHERE namespace=?1 AND value=?2 AND epoch=?3 AND x=?4 AND z=?5", params![world.namespace, world.value, world.epoch as i64, coordinate.x, coordinate.z])?;
             if sequence != 0 {
                 transaction.execute("INSERT INTO bridge_checkpoints(bridge_id,session_id,durable_sequence) VALUES(?1,?2,?3) ON CONFLICT(bridge_id) DO UPDATE SET session_id=excluded.session_id,durable_sequence=MAX(bridge_checkpoints.durable_sequence,excluded.durable_sequence)", params![bridge_id, session_id, sequence])?;
@@ -471,14 +477,108 @@ impl Repository {
         }).await
     }
 
-    /// Owner-scoped page: returns at most `limit` rows owned by `bridge_id` that
-    /// are unleased/unreplayed, ordered deterministically.
+    /// Owner-scoped page: returns at most `limit` rows owned by `bridge_id` whose
+    /// lease is absent or expired. Replay-pending unleased rows are included so a
+    /// reconnect cannot freeze live tile painting. Rows waiting on retry backoff
+    /// are skipped so a newest-unloaded flood cannot starve the player's loaded cell.
+    ///
+    /// Selection keeps a handful of newest revisions (fresh fly-in) and fills the
+    /// rest from chunks nearest the centroid of recent dirties so a view-distance
+    /// ring cannot starve the player's already-loaded interior.
     pub async fn dirty_page_for_owner(
         &self,
         bridge_id: &[u8],
         limit: usize,
         now: i64,
     ) -> Result<Vec<DirtyChunk>, RepositoryError> {
+        if bridge_id.len() != MAX_BRIDGE_ID_BYTES || bridge_id.iter().all(|byte| *byte == 0) {
+            return Err(ModelError::Bounds("bridge ID must be exactly 16 non-zero bytes").into());
+        }
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let bridge_id = bridge_id.to_vec();
+        let recency_limit = i64::try_from(limit.min(8)).unwrap_or(8);
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.blocking(move |connection| {
+            let mut statement = connection.prepare(
+                "WITH eligible AS (
+                    SELECT dirty_chunks.namespace, dirty_chunks.value, dirty_chunks.epoch,
+                           dirty_chunks.x, dirty_chunks.z, dirty_chunks.revision,
+                           dirty_chunks.owner_bridge_id, dirty_chunks.lease_expires_epoch_seconds
+                    FROM dirty_chunks
+                    INNER JOIN worlds USING(namespace,value)
+                    LEFT JOIN dirty_retries USING(namespace,value,epoch,x,z)
+                    WHERE worlds.epoch >= 0 AND dirty_chunks.epoch=worlds.epoch
+                      AND dirty_chunks.owner_bridge_id=?1
+                      AND (dirty_chunks.lease_expires_epoch_seconds=0 OR dirty_chunks.lease_expires_epoch_seconds<=?2)
+                      AND (dirty_retries.next_attempt IS NULL OR dirty_retries.next_attempt<=?2)
+                 ),
+                 newest AS (
+                    SELECT x, z, revision FROM eligible
+                    ORDER BY revision DESC, namespace, value, epoch, x, z
+                    LIMIT 64
+                 ),
+                 anchor AS (
+                    SELECT AVG(x * 1.0) AS cx, AVG(z * 1.0) AS cz,
+                           (SELECT MIN(revision) FROM (
+                               SELECT revision FROM newest ORDER BY revision DESC LIMIT ?4
+                           )) AS newest_floor
+                    FROM newest
+                 )
+                 SELECT length(CAST(eligible.namespace AS BLOB)),COALESCE(substr(CAST(eligible.namespace AS BLOB),1,4097),zeroblob(0)),
+                        length(CAST(eligible.value AS BLOB)),COALESCE(substr(CAST(eligible.value AS BLOB),1,4097),zeroblob(0)),
+                        eligible.epoch,eligible.x,eligible.z,eligible.revision,
+                        length(CAST(eligible.owner_bridge_id AS BLOB)),COALESCE(substr(CAST(eligible.owner_bridge_id AS BLOB),1,17),zeroblob(0)),
+                        eligible.lease_expires_epoch_seconds
+                 FROM eligible
+                 CROSS JOIN anchor
+                 ORDER BY
+                   CASE WHEN eligible.revision >= COALESCE(anchor.newest_floor, eligible.revision) THEN 0 ELSE 1 END ASC,
+                   CASE WHEN eligible.revision >= COALESCE(anchor.newest_floor, eligible.revision) THEN 0
+                        ELSE (eligible.x - COALESCE(anchor.cx, eligible.x)) * (eligible.x - COALESCE(anchor.cx, eligible.x))
+                           + (eligible.z - COALESCE(anchor.cz, eligible.z)) * (eligible.z - COALESCE(anchor.cz, eligible.z))
+                   END ASC,
+                   eligible.revision DESC,eligible.namespace,eligible.value,eligible.epoch,eligible.x,eligible.z
+                 LIMIT ?3",
+            )?;
+            let rows = statement.query_map(params![bridge_id, now, limit, recency_limit], |row| {
+                let world = WorldId::new(
+                    bounded_text(row.get(0)?, row.get(1)?, MAX_TEXT_BYTES)?,
+                    bounded_text(row.get(2)?, row.get(3)?, MAX_TEXT_BYTES)?,
+                    checked_u64(row.get(4)?, "dirty epoch").map_err(|_| rusqlite::Error::InvalidQuery)?,
+                );
+                world.validate().map_err(|_| rusqlite::Error::InvalidQuery)?;
+                let owner_bridge_id = bounded_blob(row.get(8)?, row.get(9)?, MAX_BRIDGE_ID_BYTES)?;
+                if owner_bridge_id.len() != MAX_BRIDGE_ID_BYTES
+                    || owner_bridge_id.iter().all(|byte| *byte == 0)
+                {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+                Ok(DirtyChunk {
+                    world,
+                    coordinate: ChunkCoordinate { x: row.get(5)?, z: row.get(6)? },
+                    revision: checked_u64(row.get(7)?, "dirty revision").map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    owner_bridge_id,
+                    lease_expires_epoch_seconds: row.get(10)?,
+                })
+            })?.collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        }).await
+    }
+
+    /// Same as [`Self::dirty_page_for_owner`], but when `focus` is set the page
+    /// is the dirty chunks nearest that chunk rather than the newest cluster.
+    pub async fn dirty_page_for_owner_near(
+        &self,
+        bridge_id: &[u8],
+        limit: usize,
+        now: i64,
+        focus: Option<(i32, i32)>,
+    ) -> Result<Vec<DirtyChunk>, RepositoryError> {
+        let Some((focus_x, focus_z)) = focus else {
+            return self.dirty_page_for_owner(bridge_id, limit, now).await;
+        };
         if bridge_id.len() != MAX_BRIDGE_ID_BYTES || bridge_id.iter().all(|byte| *byte == 0) {
             return Err(ModelError::Bounds("bridge ID must be exactly 16 non-zero bytes").into());
         }
@@ -496,14 +596,18 @@ impl Repository {
                         dirty_chunks.lease_expires_epoch_seconds
                  FROM dirty_chunks
                  INNER JOIN worlds USING(namespace,value)
+                 LEFT JOIN dirty_retries USING(namespace,value,epoch,x,z)
                  WHERE worlds.epoch >= 0 AND dirty_chunks.epoch=worlds.epoch
                    AND dirty_chunks.owner_bridge_id=?1
-                   AND dirty_chunks.replay_pending=0
                    AND (dirty_chunks.lease_expires_epoch_seconds=0 OR dirty_chunks.lease_expires_epoch_seconds<=?2)
-                 ORDER BY dirty_chunks.revision DESC,dirty_chunks.namespace,dirty_chunks.value,dirty_chunks.epoch,dirty_chunks.x,dirty_chunks.z
+                   AND (dirty_retries.next_attempt IS NULL OR dirty_retries.next_attempt<=?2)
+                 ORDER BY
+                   (dirty_chunks.x - ?4) * (dirty_chunks.x - ?4)
+                     + (dirty_chunks.z - ?5) * (dirty_chunks.z - ?5) ASC,
+                   dirty_chunks.revision DESC,dirty_chunks.namespace,dirty_chunks.value,dirty_chunks.epoch,dirty_chunks.x,dirty_chunks.z
                  LIMIT ?3",
             )?;
-            let rows = statement.query_map(params![bridge_id, now, limit], |row| {
+            let rows = statement.query_map(params![bridge_id, now, limit, focus_x, focus_z], |row| {
                 let world = WorldId::new(
                     bounded_text(row.get(0)?, row.get(1)?, MAX_TEXT_BYTES)?,
                     bounded_text(row.get(2)?, row.get(3)?, MAX_TEXT_BYTES)?,

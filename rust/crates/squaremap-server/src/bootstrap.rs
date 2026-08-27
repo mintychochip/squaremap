@@ -526,10 +526,23 @@ fn spawn_background_scheduler_observed(
     }))
 }
 
+fn live_player_chunk_focus(root: &squaremap_server::output::OutputRoot) -> Option<(i32, i32)> {
+    let bytes = root
+        .latest_bytes("tiles/players.json")
+        .or_else(|| std::fs::read(root.path().join("tiles/players.json")).ok())?;
+    let view: squaremap_state::view::PlayersView = serde_json::from_slice(&bytes).ok()?;
+    let player = view
+        .players
+        .iter()
+        .find(|player| player.x.is_some() && player.z.is_some())?;
+    Some((player.x?.div_euclid(16), player.z?.div_euclid(16)))
+}
+
 fn spawn_background_scheduler(
     scheduler: Arc<Scheduler>,
     enabled: bool,
     identity: Arc<tokio::sync::RwLock<Option<(Vec<u8>, Vec<u8>, u64)>>>,
+    root: squaremap_server::output::OutputRoot,
 ) -> Option<JoinHandle<()>> {
     if !enabled {
         return None;
@@ -538,10 +551,23 @@ fn spawn_background_scheduler(
     Some(tokio::spawn(async move {
         let _ = scheduler.resume_jobs().await;
         loop {
-            if let Some((bridge_id, _, _)) = identity.read().await.clone() {
-                let _ = scheduler.run_live_dirty_page(&bridge_id).await;
+            let selected = if let Some((bridge_id, _, _)) = identity.read().await.clone() {
+                let focus = live_player_chunk_focus(&root);
+                scheduler
+                    .run_live_dirty_page_near(&bridge_id, focus)
+                    .await
+                    .map(|report| report.selected)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            let live_page = scheduler
+                .config()
+                .dirty_page_size
+                .min(squaremap_server::scheduler::LIVE_DIRTY_PAGE_SIZE);
+            if selected < live_page {
+                tokio::time::sleep(interval).await;
             }
-            tokio::time::sleep(interval).await;
         }
     }))
 }
@@ -1403,7 +1429,7 @@ pub async fn run_bridge(
                                                 if let Some(task) = background_task.take() {
                                                     task.abort();
                                                 }
-                                                background_task = spawn_background_scheduler(next_scheduler.clone(), background_enabled, activation.clone());
+                                                background_task = spawn_background_scheduler(next_scheduler.clone(), background_enabled, activation.clone(), root.clone());
                                                 scheduler = Some(next_scheduler);
                                                 active_config_revision = config.revision;
                                                 if let Some(bridge_id) = stable_bridge_id.as_ref() {

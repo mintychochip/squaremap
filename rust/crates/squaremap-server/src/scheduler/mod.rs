@@ -19,6 +19,14 @@ use tokio::sync::{Notify, Semaphore};
 
 pub const DEFAULT_MAX_ACTIVE_SNAPSHOTS: usize = 96;
 pub const DEFAULT_DIRTY_PAGE_SIZE: usize = 256;
+/// Live ticks pick a small newest page so fly-in chunks are not stuck behind a
+/// thousand-chunk generation backlog.
+pub const LIVE_DIRTY_PAGE_SIZE: usize = 32;
+pub const LIVE_DIRTY_CONCURRENCY: usize = 2;
+/// Live dirty ticks have no job cancel token. Bound Transient retries so one
+/// newest chunk cannot stall the rest of the page.
+const LIVE_SNAPSHOT_TRANSIENT_ATTEMPTS: u32 = 3;
+const LIVE_SNAPSHOT_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Clone, Debug)]
 pub struct SchedulerConfig {
@@ -43,6 +51,7 @@ pub struct SnapshotRequest {
     pub world: WorldId,
     pub coordinate: ChunkCoordinate,
     pub revision: u64,
+    pub loaded_only: bool,
 }
 #[derive(Debug)]
 pub enum SnapshotReply {
@@ -348,6 +357,7 @@ impl Scheduler {
         request: SnapshotRequest,
         job_id: Option<&[u8]>,
     ) -> Result<SnapshotReply, SchedulerError> {
+        let mut transient_attempts = 0u32;
         loop {
             if job_id.is_some_and(|id| self.is_cancelled(id)) {
                 return Err(SchedulerError::InvalidJob("render job cancelled"));
@@ -377,12 +387,24 @@ impl Scheduler {
                     }
                 }
             } else {
-                self.bridge.request(request.clone()).await
+                match tokio::time::timeout(
+                    LIVE_SNAPSHOT_REQUEST_TIMEOUT,
+                    self.bridge.request(request.clone()),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(BridgeError::Transient("snapshot request timed out".into())),
+                }
             };
             drop(permit);
             match result {
                 Ok(reply) => return Ok(reply),
                 Err(BridgeError::Transient(_)) => {
+                    transient_attempts += 1;
+                    if job_id.is_none() && transient_attempts >= LIVE_SNAPSHOT_TRANSIENT_ATTEMPTS {
+                        return Ok(SnapshotReply::Missing(ChunkMissingReason::Unloaded));
+                    }
                     if let Some(id) = job_id {
                         tokio::select! {
                             _ = tokio::time::sleep(self.config.transient_retry_delay) => {}
@@ -411,6 +433,8 @@ impl Scheduler {
         coordinate: ChunkCoordinate,
         revision: u64,
         job_id: Option<&[u8]>,
+        loaded_only: bool,
+        fetch_neighbors: bool,
     ) -> Result<SnapshotBundleResult, SchedulerError> {
         if job_id.is_some_and(|id| self.is_cancelled(id)) {
             return Ok(SnapshotBundleResult::Cancelled);
@@ -421,6 +445,7 @@ impl Scheduler {
                     world: world.clone(),
                     coordinate,
                     revision,
+                    loaded_only,
                 },
                 job_id,
             )
@@ -445,6 +470,15 @@ impl Scheduler {
             }
             SnapshotReply::Missing(_) => return Ok(SnapshotBundleResult::Stale),
         };
+        if !fetch_neighbors {
+            return Ok(SnapshotBundleResult::Ready(SnapshotBundle {
+                north: None,
+                center,
+                south: None,
+                biome_sources: Vec::new(),
+                grass_resolutions: Vec::new(),
+            }));
+        }
         let neighbor_offsets = [
             (0, -1),
             (0, 1),
@@ -466,6 +500,7 @@ impl Scheduler {
                             z: coordinate.z + dz,
                         },
                         revision,
+                        loaded_only,
                     },
                     job_id,
                 )
@@ -507,6 +542,8 @@ impl Scheduler {
         coordinate: ChunkCoordinate,
         revision: u64,
         job_id: Option<&[u8]>,
+        loaded_only: bool,
+        fetch_neighbors: bool,
     ) -> Result<RenderDisposition, SchedulerError> {
         if !self.wait_unpaused(world, job_id).await
             || job_id.is_some_and(|id| self.is_cancelled(id))
@@ -517,7 +554,7 @@ impl Scheduler {
             return Ok(RenderDisposition::Installed);
         }
         let snapshots = match self
-            .snapshot_bundle(world, coordinate, revision, job_id)
+            .snapshot_bundle(world, coordinate, revision, job_id, loaded_only, fetch_neighbors)
             .await?
         {
             SnapshotBundleResult::Ready(snapshots) => snapshots,
@@ -617,11 +654,18 @@ impl Scheduler {
         &self,
         bridge_id: &[u8],
     ) -> Result<RunReport, SchedulerError> {
-        dirty::run_owner_page(self, bridge_id).await
+        dirty::run_owner_page(self, bridge_id, None).await
     }
     /// Production dirty tick: only rows leased to `bridge_id`.
     pub async fn run_live_dirty_page(&self, bridge_id: &[u8]) -> Result<RunReport, SchedulerError> {
-        self.run_owner_dirty_page(bridge_id).await
+        self.run_live_dirty_page_near(bridge_id, None).await
+    }
+    pub async fn run_live_dirty_page_near(
+        &self,
+        bridge_id: &[u8],
+        focus: Option<(i32, i32)>,
+    ) -> Result<RunReport, SchedulerError> {
+        dirty::run_owner_page(self, bridge_id, focus).await
     }
     pub async fn discover_full_render_coordinates(
         &self,

@@ -595,6 +595,7 @@ async fn live_dispatcher_cancellation_releases_pending_capacity() {
             world: world.id(),
             coordinate: coordinate(index, 0),
             revision: index as u64 + 1,
+            loaded_only: false,
         };
         let bridge_clone = bridge.clone();
         tasks.push(tokio::spawn(async move {

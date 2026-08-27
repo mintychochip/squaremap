@@ -673,6 +673,8 @@ message ChunkSnapshotRequest {
   ChunkCoordinate coordinate = 2;
   uint64 revision = 3;
   uint64 request_id = 4;
+  // Live fly-in ticks set this so Java must not disk-load distant dirty chunks.
+  bool loaded_only = 5;
 }
 
 message ChunkSection {

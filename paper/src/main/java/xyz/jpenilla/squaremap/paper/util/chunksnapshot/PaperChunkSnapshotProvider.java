@@ -25,6 +25,22 @@ record PaperChunkSnapshotProvider(
 ) implements ChunkSnapshotProvider {
     @Override
     public CompletableFuture<@Nullable ChunkSnapshot> asyncSnapshot(final int x, final int z) {
+        return this.asyncSnapshot(x, z, false);
+    }
+
+    @Override
+    public CompletableFuture<@Nullable ChunkSnapshot> asyncSnapshot(final int x, final int z, final boolean loadedOnly) {
+        // Thread-safe on Paper. Do not use ServerChunkCache.getChunkNow from the sidecar thread.
+        final @Nullable ChunkAccess loaded = this.level.getChunkIfLoadedImmediately(x, z);
+        if (loaded != null) {
+            final @Nullable ChunkSnapshot snapshot = this.maybeSnapshot(loaded);
+            if (snapshot != null) {
+                return CompletableFuture.completedFuture(snapshot);
+            }
+        }
+        if (loadedOnly) {
+            return CompletableFuture.completedFuture(null);
+        }
         return CompletableFuture.supplyAsync(() -> {
             final @Nullable ChunkAccess existing = this.level.getChunkIfLoadedImmediately(x, z);
             if (existing != null) {

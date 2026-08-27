@@ -204,6 +204,16 @@ public final class MapUpdateListeners {
     }
 
     private void handlePlayerEvent(final @NonNull PlayerEvent playerEvent) {
+        if (playerEvent instanceof PlayerMoveEvent move) {
+            final Location from = move.getFrom();
+            final Location to = move.getTo();
+            if (to == null
+                || from.getWorld() == to.getWorld()
+                    && Numbers.blockToChunk(from.getBlockX()) == Numbers.blockToChunk(to.getBlockX())
+                    && Numbers.blockToChunk(from.getBlockZ()) == Numbers.blockToChunk(to.getBlockZ())) {
+                return;
+            }
+        }
         this.markChunk(playerEvent.getPlayer().getLocation(), true);
     }
 

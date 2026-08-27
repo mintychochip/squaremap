@@ -1,5 +1,6 @@
 use squaremap_protocol::wire::{
-    ChunkMissingReason, ChunkSnapshotRequest, Envelope, RegistryReplace, WorldIdentity, envelope,
+    ChunkMissingReason, ChunkSnapshot, ChunkSnapshotRequest, Envelope, RegistryReplace,
+    WorldIdentity, envelope,
 };
 use squaremap_render::{GenerationToken, Limits, Registry, RegistryError, Snapshot};
 use std::collections::HashMap;
@@ -46,6 +47,7 @@ struct Pending {
     revision: u64,
     generation: Option<GenerationToken>,
     generation_from_cache: bool,
+    held_snapshot: Option<ChunkSnapshot>,
 }
 fn world_key(world: &WorldIdentity) -> String {
     format!("{}\0{}\0{}", world.namespace, world.value, world.epoch)
@@ -88,6 +90,17 @@ impl SnapshotClient {
         z: i32,
         revision: u64,
     ) -> Result<Envelope, SnapshotClientError> {
+        self.request_once_loaded_only(world, x, z, revision, false)
+    }
+
+    pub fn request_once_loaded_only(
+        &mut self,
+        world: WorldIdentity,
+        x: i32,
+        z: i32,
+        revision: u64,
+        loaded_only: bool,
+    ) -> Result<Envelope, SnapshotClientError> {
         if self.pending.len() >= MAX_IN_FLIGHT {
             return Err(SnapshotClientError::Saturated);
         }
@@ -98,6 +111,7 @@ impl SnapshotClient {
             coordinate: Some(squaremap_protocol::wire::ChunkCoordinate { x, z }),
             revision,
             request_id,
+            loaded_only,
         };
         let generation = self
             .registries
@@ -112,6 +126,7 @@ impl SnapshotClient {
                 revision,
                 generation,
                 generation_from_cache,
+                held_snapshot: None,
             },
         );
         Ok(Envelope {
@@ -211,10 +226,13 @@ impl SnapshotClient {
                             .get(&world_key(&pending.world))
                             .map(Registry::generation)
                     })
-                }
-                .ok_or(SnapshotClientError::InvalidResponse(
-                    "snapshot registry unavailable",
-                ))?;
+                };
+                let Some(generation) = generation else {
+                    if let Some(pending) = self.pending.get_mut(&envelope.correlation_id) {
+                        pending.held_snapshot = Some(snapshot.clone());
+                    }
+                    return Ok(None);
+                };
                 let decoded = Snapshot::decode_for_live(snapshot, &generation, self.limits)?;
                 self.pending.remove(&envelope.correlation_id);
                 Ok(Some(SnapshotOutcome::Snapshot(decoded)))
@@ -281,7 +299,7 @@ impl SnapshotClient {
                     }
                 }
             }
-            return Ok(None);
+            return self.complete_held_snapshot(correlation_id);
         }
         let registry = self.registries.entry(key.clone()).or_default();
         registry.replace(replacement.clone())?;
@@ -292,7 +310,33 @@ impl SnapshotClient {
             }
         }
         self.registry_replacements.insert(key, replacement.clone());
-        Ok(None)
+        self.complete_held_snapshot(correlation_id)
+    }
+
+    fn complete_held_snapshot(
+        &mut self,
+        correlation_id: u64,
+    ) -> Result<Option<SnapshotOutcome>, SnapshotClientError> {
+        let Some(pending) = self.pending.get(&correlation_id) else {
+            return Ok(None);
+        };
+        let Some(generation) = pending.generation.clone().or_else(|| {
+            self.registries
+                .get(&world_key(&pending.world))
+                .map(Registry::generation)
+        }) else {
+            return Ok(None);
+        };
+        let Some(snapshot) = self
+            .pending
+            .get_mut(&correlation_id)
+            .and_then(|pending| pending.held_snapshot.take())
+        else {
+            return Ok(None);
+        };
+        let decoded = Snapshot::decode_for_live(&snapshot, &generation, self.limits)?;
+        self.pending.remove(&correlation_id);
+        Ok(Some(SnapshotOutcome::Snapshot(decoded)))
     }
     pub fn in_flight(&self) -> usize {
         self.pending.len()
@@ -325,6 +369,25 @@ mod tests {
             value: "overworld".into(),
             epoch: 3,
         }
+    }
+
+    #[test]
+    fn live_request_sets_loaded_only_flag() {
+        let mut client = SnapshotClient::new([7; 16], Limits::default()).unwrap();
+        let envelope = client
+            .request_once_loaded_only(world(), 1, 2, 9, true)
+            .unwrap();
+        let request = match envelope.payload.unwrap() {
+            envelope::Payload::ChunkSnapshotRequest(value) => value,
+            _ => unreachable!(),
+        };
+        assert!(request.loaded_only);
+        let job = client.request_once(world(), 3, 4, 9).unwrap();
+        let job_request = match job.payload.unwrap() {
+            envelope::Payload::ChunkSnapshotRequest(value) => value,
+            _ => unreachable!(),
+        };
+        assert!(!job_request.loaded_only);
     }
 
     #[test]
@@ -1122,5 +1185,47 @@ mod tests {
             .unwrap();
         let after = client.registries.get(&key).unwrap().generation();
         assert!(!std::sync::Arc::ptr_eq(&before, &after));
+    }
+
+    #[test]
+    fn snapshot_before_registry_completes_when_registry_arrives() {
+        let mut client = SnapshotClient::new([9; 16], Limits::default()).unwrap();
+        let request = client.request_once(world(), -7, 5, 42).unwrap();
+        let snapshot = ChunkSnapshot::decode(
+            &include_bytes!("../../../../testdata/bridge/v1/chunk_snapshot_valid.bin")[..],
+        )
+        .unwrap();
+        let held = client
+            .accept(&Envelope {
+                session_id: request.session_id.clone(),
+                correlation_id: request.correlation_id,
+                payload: Some(envelope::Payload::ChunkSnapshot(snapshot)),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            held.is_none(),
+            "snapshot without registry must wait, not fail"
+        );
+        assert_eq!(client.in_flight(), 1);
+        let mut registry = RegistryReplace::decode(
+            &include_bytes!("../../../../testdata/bridge/v1/registry_replace_valid.bin")[..],
+        )
+        .unwrap();
+        registry.world = Some(world());
+        registry.revision = 42;
+        let completed = client
+            .accept(&Envelope {
+                session_id: request.session_id,
+                correlation_id: request.correlation_id,
+                payload: Some(envelope::Payload::RegistryReplace(registry)),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            matches!(completed, Some(SnapshotOutcome::Snapshot(_))),
+            "held snapshot must decode after registry, got {completed:?}"
+        );
+        assert_eq!(client.in_flight(), 0);
     }
 }

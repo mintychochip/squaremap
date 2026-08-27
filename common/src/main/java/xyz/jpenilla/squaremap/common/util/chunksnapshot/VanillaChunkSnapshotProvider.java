@@ -34,11 +34,18 @@ record VanillaChunkSnapshotProvider(ServerLevel level, boolean moonrise) impleme
 
     @Override
     public CompletableFuture<@Nullable ChunkSnapshot> asyncSnapshot(final int x, final int z) {
+        return this.asyncSnapshot(x, z, false);
+    }
+
+    @Override
+    public CompletableFuture<@Nullable ChunkSnapshot> asyncSnapshot(final int x, final int z, final boolean loadedOnly) {
         if (this.moonrise) {
-            return this.moonriseAsyncSnapshot(x, z);
+            return this.moonriseAsyncSnapshot(x, z, loadedOnly);
         }
         return CompletableFuture.supplyAsync(() -> {
-            final @Nullable ChunkAccess chunk = chunkIfGenerated(this.level, x, z);
+            final @Nullable ChunkAccess chunk = loadedOnly
+                ? visibleFullChunk(this.level, x, z)
+                : chunkIfGenerated(this.level, x, z);
             if (chunk == null) {
                 return null;
             }
@@ -46,7 +53,7 @@ record VanillaChunkSnapshotProvider(ServerLevel level, boolean moonrise) impleme
         }, this.mainThreadExecutor());
     }
 
-    private CompletableFuture<@Nullable ChunkSnapshot> moonriseAsyncSnapshot(final int x, final int z) {
+    private CompletableFuture<@Nullable ChunkSnapshot> moonriseAsyncSnapshot(final int x, final int z, final boolean loadedOnly) {
         return CompletableFuture.supplyAsync(() -> {
             final ChunkPos chunkPos = new ChunkPos(x, z);
             final ChunkMapAccess chunkMap = (ChunkMapAccess) this.level.getChunkSource().chunkMap;
@@ -57,6 +64,9 @@ record VanillaChunkSnapshotProvider(ServerLevel level, boolean moonrise) impleme
                 if (chunk != null) {
                     return CompletableFuture.completedFuture(ChunkSnapshot.snapshot(this.level, chunk, false));
                 }
+            }
+            if (loadedOnly) {
+                return CompletableFuture.<@Nullable ChunkSnapshot>completedFuture(null);
             }
 
             final CompletableFuture<@Nullable ChunkSnapshot> load = new CompletableFuture<>();
@@ -78,6 +88,12 @@ record VanillaChunkSnapshotProvider(ServerLevel level, boolean moonrise) impleme
             );
             return load;
         }, this.mainThreadExecutor()).thenCompose(future -> future);
+    }
+
+    private static @Nullable ChunkAccess visibleFullChunk(final ServerLevel level, final int x, final int z) {
+        final ChunkMapAccess chunkMap = (ChunkMapAccess) level.getChunkSource().chunkMap;
+        final ChunkHolder visibleChunk = chunkMap.squaremap$getVisibleChunkIfPresent(new ChunkPos(x, z).pack());
+        return visibleChunk == null ? null : fullIfPresent(visibleChunk);
     }
 
     private static @Nullable ChunkAccess chunkIfGenerated(final ServerLevel level, final int x, final int z) {

@@ -438,11 +438,12 @@ impl SnapshotDispatcher {
                 "bridge connection closed",
             ));
         }
-        let envelope = match state.client.request_once(
+        let envelope = match state.client.request_once_loaded_only(
             world,
             request.coordinate.x,
             request.coordinate.z,
             request.revision,
+            request.loaded_only,
         ) {
             Ok(envelope) => envelope,
             Err(error) => {
@@ -553,6 +554,7 @@ mod tests {
             world: squaremap_state::WorldId::new("minecraft", "overworld", 3),
             coordinate: squaremap_state::ChunkCoordinate { x: 4, z: 5 },
             revision: 42,
+            loaded_only: false,
         };
         let envelope = dispatcher
             .begin(OutboundSnapshotRequest {
@@ -593,6 +595,7 @@ mod tests {
             world: squaremap_state::WorldId::new("minecraft", "overworld", 3),
             coordinate: squaremap_state::ChunkCoordinate { x: 6, z: 7 },
             revision: 9,
+            loaded_only: false,
         };
         dispatcher
             .begin(OutboundSnapshotRequest {
@@ -619,6 +622,7 @@ mod tests {
             world: squaremap_state::WorldId::new("minecraft", "overworld", 3),
             coordinate: squaremap_state::ChunkCoordinate { x: 1, z: 2 },
             revision: 1,
+            loaded_only: false,
         };
         let error = dispatcher
             .begin(OutboundSnapshotRequest {
@@ -638,9 +642,9 @@ mod tests {
         ));
     }
     #[tokio::test]
-    async fn missing_snapshot_registry_is_transient_and_keeps_dispatcher_alive() {
+    async fn snapshot_before_registry_completes_after_registry_arrives() {
         use prost::Message;
-        use squaremap_protocol::wire::ChunkSnapshot;
+        use squaremap_protocol::wire::{ChunkSnapshot, RegistryReplace};
 
         let dispatcher =
             SnapshotDispatcher::new(SnapshotClient::new([9; 16], Limits::default()).unwrap());
@@ -649,6 +653,7 @@ mod tests {
             world: squaremap_state::WorldId::new("minecraft", "overworld", 3),
             coordinate: squaremap_state::ChunkCoordinate { x: -7, z: 5 },
             revision: 42,
+            loaded_only: false,
         };
         let envelope = dispatcher
             .begin(OutboundSnapshotRequest {
@@ -663,20 +668,36 @@ mod tests {
         )
         .unwrap();
         assert!(
-            dispatcher
+            !dispatcher
                 .accept(&Envelope {
-                    session_id: envelope.session_id,
+                    session_id: envelope.session_id.clone(),
                     correlation_id: envelope.correlation_id,
                     payload: Some(envelope::Payload::ChunkSnapshot(snapshot)),
                     ..Default::default()
                 })
                 .await
+                .unwrap(),
+            "snapshot without registry must stay pending"
+        );
+        assert_eq!(dispatcher.in_flight().await, 1);
+        let mut registry = RegistryReplace::decode(
+            &include_bytes!("../../../../../testdata/bridge/v1/registry_replace_valid.bin")[..],
+        )
+        .unwrap();
+        registry.world = Some(world());
+        registry.revision = 42;
+        assert!(
+            dispatcher
+                .accept(&Envelope {
+                    session_id: envelope.session_id,
+                    correlation_id: envelope.correlation_id,
+                    payload: Some(envelope::Payload::RegistryReplace(registry)),
+                    ..Default::default()
+                })
+                .await
                 .unwrap()
         );
-        assert!(matches!(
-            result.await.unwrap(),
-            Err(BridgeError::Transient(message)) if message == "snapshot registry unavailable"
-        ));
+        assert!(matches!(result.await.unwrap(), Ok(SnapshotReply::Snapshot(_))));
         assert_eq!(dispatcher.in_flight().await, 0);
     }
     #[tokio::test]

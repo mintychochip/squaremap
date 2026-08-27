@@ -25,6 +25,7 @@ include(":squaremap-paper:folia")
 setupSubproject("fabric")
 setupSubproject("neoforge")
 setupSubproject("sponge")
+setupSubproject("test")
 
 fun setupSubproject(moduleName: String) {
   val name = "squaremap-$moduleName"

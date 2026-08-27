@@ -51,7 +51,7 @@ public final class SnapshotRequestHandler implements AutoCloseable {
     @Inject
     public SnapshotRequestHandler(final WorldManager worlds, final ChunkSnapshotProviderFactory providers,
                                   final WorldEpochRegistry epochs, final RegionFileDirectoryResolver regionFiles) {
-        this(worlds, providers, epochs, regionFiles, new SnapshotRequestService(), Executors.newSingleThreadExecutor(runnable -> {
+        this(worlds, providers, epochs, regionFiles, new SnapshotRequestService(), Executors.newFixedThreadPool(8, runnable -> {
             final Thread thread = new Thread(runnable, "squaremap-bridge-snapshot");
             thread.setDaemon(true);
             return thread;
@@ -103,7 +103,10 @@ public final class SnapshotRequestHandler implements AutoCloseable {
         try {
             result = this.requests.requestWork(request, ignored -> {
                 final CompletionStage<xyz.jpenilla.squaremap.common.util.chunksnapshot.ChunkSnapshot> upstream =
-                    this.providers.createChunkSnapshotProvider(level).asyncSnapshot(request.getCoordinate().getX(), request.getCoordinate().getZ());
+                    this.providers.createChunkSnapshotProvider(level).asyncSnapshot(
+                        request.getCoordinate().getX(),
+                        request.getCoordinate().getZ(),
+                        request.getLoadedOnly());
                 final CompletionStage<ChunkSnapshot> encoded = upstream.thenComposeAsync(snapshot -> {
                     if (snapshot == null) return CompletableFuture.failedFuture(new SnapshotRequestService.ChunkMissingException(ChunkMissingReason.CHUNK_MISSING_REASON_UNLOADED));
                     final RegistryDescriptorExporter descriptors = RegistryDescriptorExporter.create(world, request.getRevision(), epoch);

@@ -130,7 +130,7 @@ pub(super) async fn run(
         let coordinate = cursor.coordinates[cursor.next];
         report.selected += 1;
         let disposition = match scheduler
-            .render_one(&job.world, coordinate, cursor.revision, Some(id))
+            .render_one(&job.world, coordinate, cursor.revision, Some(id), false, true)
             .await
         {
             Ok(disposition) => disposition,

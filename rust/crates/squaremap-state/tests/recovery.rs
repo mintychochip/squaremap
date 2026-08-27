@@ -42,7 +42,11 @@ async fn schema_pragmas_reopen_revision_guards_checkpoint_and_deterministic_reco
         .unwrap();
     let checkpoint = repository.recover().await.unwrap().checkpoints;
     assert_eq!(checkpoint[0].durable_sequence, 8);
-    assert_eq!(dirty_rows(&repository.recover().await.unwrap()), vec![(7, 4, 8)]);
+    let after_stale = dirty_rows(&repository.recover().await.unwrap());
+    assert_eq!(after_stale.len(), 1);
+    assert_eq!(after_stale[0].1, 4);
+    assert_eq!(after_stale[0].2, 8);
+    assert!(after_stale[0].0 >= 7, "live marks must not rewind revision, got {}", after_stale[0].0);
 
     repository
         .mark_dirty(&world.id(), chunk(4, 8), 8, &[1_u8; 16], &[2_u8; 16], 9)
@@ -56,14 +60,15 @@ async fn schema_pragmas_reopen_revision_guards_checkpoint_and_deterministic_reco
     assert_eq!(reconnect_checkpoint[0].durable_sequence, 9);
     assert_eq!(reconnect_checkpoint[0].session_id, vec![3_u8; 16]);
     let updated = repository.recover().await.unwrap();
-    assert_eq!(dirty_rows(&updated), vec![(8, 4, 8)]);
+    let current_revision = updated.dirty[0].revision;
+    assert!(current_revision >= 8);
     repository
-        .complete_dirty(&world.id(), chunk(4, 8), 7)
+        .complete_dirty(&world.id(), chunk(4, 8), current_revision.saturating_sub(1))
         .await
         .unwrap();
-    assert_eq!(dirty_rows(&repository.recover().await.unwrap()), vec![(8, 4, 8)]);
+    assert_eq!(dirty_rows(&repository.recover().await.unwrap()).len(), 1);
     repository
-        .complete_dirty(&world.id(), chunk(4, 8), 8)
+        .complete_dirty(&world.id(), chunk(4, 8), current_revision)
         .await
         .unwrap();
     assert!(repository.recover().await.unwrap().dirty.is_empty());
@@ -510,6 +515,36 @@ async fn oversized_schema_valid_stored_values_fail_recovery_without_returning_bl
     drop(connection);
     let repository = Repository::open(&db).await.unwrap();
     assert!(repository.recover().await.is_err());
+}
+
+/// After a sidecar/plugin restart Java's revision clock starts at 1 while SQLite
+/// still holds pre-restart revisions. A live fly-in dirty must still become the
+/// newest row so walking/flying paints immediately instead of being ignored.
+#[tokio::test]
+async fn restarted_clock_live_dirty_becomes_newest() {
+    let dir = tempdir().unwrap();
+    let repository = Repository::open(dir.path().join("state.sqlite")).await.unwrap();
+    let world = world(1);
+    repository.apply_world(world.clone()).await.unwrap();
+    repository
+        .mark_dirty(&world.id(), chunk(0, 0), 34045, &[1_u8; 16], &[1_u8; 16], 1)
+        .await
+        .unwrap();
+    repository
+        .mark_dirty(&world.id(), chunk(19, -24), 12, &[1_u8; 16], &[2_u8; 16], 2)
+        .await
+        .unwrap();
+    let page = repository
+        .dirty_page_for_owner(&[1_u8; 16], 1, 0)
+        .await
+        .unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].coordinate, chunk(19, -24));
+    assert!(
+        page[0].revision > 34045,
+        "live dirty must outrank pre-restart high water, got {}",
+        page[0].revision
+    );
 }
 
 #[tokio::test]
